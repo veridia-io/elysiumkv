@@ -1,0 +1,199 @@
+#include "elysiumkv/local_file_blob_store.hpp"
+
+#include "blob/object_name.hpp"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <string>
+#include <system_error>
+#include <utility>
+
+namespace elysiumkv {
+namespace {
+
+namespace fs = std::filesystem;
+
+constexpr std::string_view kTempPrefix = ".tmp.";
+
+/// Flat, non-empty, no path separators, no leading dot. The leading-dot rule
+/// also keeps user objects clear of the temp files below.
+/// Everything that is not "this object is definitely absent" is Io (ARCHITECTURE.md "Immutable named objects").
+Status errno_to_status(int err) {
+    return err == ENOENT ? Status::NotFound : Status::Io;
+}
+
+class FileDescriptor {
+public:
+    explicit FileDescriptor(int fd) : fd_(fd) {}
+    FileDescriptor(const FileDescriptor&) = delete;
+    FileDescriptor& operator=(const FileDescriptor&) = delete;
+    ~FileDescriptor() {
+        if (fd_ >= 0) ::close(fd_);
+    }
+    int get() const { return fd_; }
+    bool valid() const { return fd_ >= 0; }
+
+private:
+    int fd_;
+};
+
+bool write_all(int fd, const uint8_t* data, size_t size) {
+    size_t written = 0;
+    while (written < size) {
+        const ssize_t n = ::write(fd, data + written, size - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        written += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool fsync_directory(const fs::path& dir) {
+    FileDescriptor fd(::open(dir.c_str(), O_RDONLY));
+    if (!fd.valid()) return false;
+    return ::fsync(fd.get()) == 0;
+}
+
+}  // namespace
+
+LocalFileBlobStore::LocalFileBlobStore(fs::path root, std::string id)
+    : root_(std::move(root)), id_(std::move(id)) {
+    if (id_.empty()) {
+        std::error_code ec;
+        const fs::path canonical = fs::weakly_canonical(root_, ec);
+        id_ = ec ? root_.string() : canonical.string();
+    }
+}
+
+bool LocalFileBlobStore::root_is_directory() const {
+    std::error_code ec;
+    return fs::is_directory(root_, ec);
+}
+
+fs::path LocalFileBlobStore::path_for(std::string_view name) const {
+    return root_ / std::string(name);
+}
+
+std::future<GetResult> LocalFileBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
+    return make_ready_future(do_get(name, offset, len));
+}
+std::future<Status> LocalFileBlobStore::put(std::string_view name, Slice bytes) {
+    return make_ready_future(do_put(name, bytes));
+}
+std::future<Status> LocalFileBlobStore::remove(std::string_view name) {
+    return make_ready_future(do_remove(name));
+}
+std::future<ListResult> LocalFileBlobStore::list(std::string_view prefix) {
+    return make_ready_future(do_list(prefix));
+}
+
+GetResult LocalFileBlobStore::do_get(std::string_view name, uint64_t offset, size_t len) {
+    if (!is_valid_object_name(name)) return std::unexpected(Status::Config);
+
+    FileDescriptor fd(::open(path_for(name).c_str(), O_RDONLY));
+    if (!fd.valid()) {
+        Status status = errno_to_status(errno);
+        // A missing file inside a missing root is not evidence of absence.
+        if (status == Status::NotFound && !root_is_directory()) status = Status::Io;
+        return std::unexpected(status);
+    }
+
+    struct stat st {};
+    if (::fstat(fd.get(), &st) != 0) return std::unexpected(Status::Io);
+    const auto file_size = static_cast<uint64_t>(st.st_size);
+    if (offset >= file_size) return Buffer{};
+
+    const uint64_t available = file_size - offset;
+    const uint64_t want = (len == kReadToEnd || len > available) ? available
+                                                                 : static_cast<uint64_t>(len);
+    Buffer out(static_cast<size_t>(want));
+
+    size_t done = 0;
+    while (done < out.size()) {
+        const ssize_t n = ::pread(fd.get(), out.data() + done, out.size() - done,
+                                  static_cast<off_t>(offset + done));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return std::unexpected(Status::Io);
+        }
+        if (n == 0) break;  // raced with a truncation; return what exists
+        done += static_cast<size_t>(n);
+    }
+    out.resize(done);
+    return out;
+}
+
+Status LocalFileBlobStore::do_put(std::string_view name, Slice bytes) {
+    if (!is_valid_object_name(name)) return Status::Config;
+    if (!root_is_directory()) return Status::Io;
+
+    // Write to a temp file, then hard-link it into place. link() fails with
+    // EEXIST if the name is taken, which is how write-once is enforced;
+    // rename() would silently overwrite.
+    const std::string temp_name = std::string(kTempPrefix) + std::to_string(::getpid()) + "." +
+                                  std::to_string(temp_counter_.fetch_add(1)) + "." +
+                                  std::string(name);
+    const fs::path temp_path = root_ / temp_name;
+    const fs::path final_path = path_for(name);
+
+    {
+        FileDescriptor fd(::open(temp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644));
+        if (!fd.valid()) return Status::Io;
+        if (!write_all(fd.get(), bytes.data(), bytes.size())) {
+            ::unlink(temp_path.c_str());
+            return Status::Io;
+        }
+        if (sync_writes_ && ::fsync(fd.get()) != 0) {
+            ::unlink(temp_path.c_str());
+            return Status::Io;
+        }
+    }
+
+    if (::link(temp_path.c_str(), final_path.c_str()) != 0) {
+        const int err = errno;
+        ::unlink(temp_path.c_str());
+        // A collision under a single writer with a monotonic counter means
+        // another process is reusing file numbers: terminal, not retryable.
+        return err == EEXIST ? Status::Unusable : Status::Io;
+    }
+    ::unlink(temp_path.c_str());
+
+    if (sync_writes_ && !fsync_directory(root_)) return Status::Io;
+    return Status::Ok;
+}
+
+Status LocalFileBlobStore::do_remove(std::string_view name) {
+    if (!is_valid_object_name(name)) return Status::Config;
+    if (::unlink(path_for(name).c_str()) == 0) return Status::Ok;
+    if (errno == ENOENT) {
+        // Idempotent — but only if we could actually look.
+        return root_is_directory() ? Status::Ok : Status::Io;
+    }
+    return Status::Io;
+}
+
+ListResult LocalFileBlobStore::do_list(std::string_view prefix) {
+    std::error_code ec;
+    fs::directory_iterator it(root_, ec);
+    if (ec) return std::unexpected(Status::Io);  // includes a missing root
+
+    std::vector<std::string> names;
+    for (const fs::directory_entry& entry : it) {
+        std::string name = entry.path().filename().string();
+        if (name.starts_with(kTempPrefix)) continue;  // never visible
+        if (!is_valid_object_name(name)) continue;
+        if (name.compare(0, prefix.size(), prefix) != 0) continue;
+        names.push_back(std::move(name));
+    }
+    // An empty existing directory lists successfully and means empty (ARCHITECTURE.md "Immutable named objects").
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+}  // namespace elysiumkv

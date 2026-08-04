@@ -1,0 +1,431 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly: the full ARCHITECTURE.md "The differential oracle" differential profile (1M ops x 100 seeds).
+    - cron: '0 3 * * *'
+
+env:
+  # Must match builtin-baseline in vcpkg.json.
+  VCPKG_COMMIT: 39344dff01c5a5a0134caf2624cdd492f05d30ea
+  VCPKG_DISABLE_METRICS: '1'
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.preset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both architectures, not just both operating systems. The engine has
+        # arch-dependent code — CRC32 dispatches on SSE4.2 or on the ARMv8 CRC
+        # extension — and the two differ in what the compiler may assume: x86-64
+        # guarantees the baseline and probes for SSE4.2, while CRC32 is optional
+        # in ARMv8-A and only mandatory from ARMv8.1-A. A matrix covering one
+        # arch can silently fall back to the software path on the other.
+        #
+        # ubuntu-latest is x86-64 and macos-latest is arm64, so those two cover
+        # both arches; ubuntu-24.04-arm covers arm64 under gcc, which is the
+        # combination with no other home and the one that caught this.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        preset: [debug, release, asan-ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          # vcpkg's port scripts use string(JSON ... STRING_ENCODE), which is a
+          # CMake 4 feature, and vcpkg reaches for a *system* cmake whenever one
+          # clears its own minimum instead of fetching the version its ports
+          # were written against. The runner images ship 3.31, which clears that
+          # minimum and lacks the feature, so building any port from source dies
+          # in vcpkg's own scripts. (It only shows up on a binary-cache miss,
+          # which is why arm64 hit it first.) Installing 4.x ahead of the system
+          # copy fixes it and makes the toolchain identical across the matrix.
+          CMAKE_VERSION=4.4.0
+          case "${RUNNER_ARCH}" in
+            X64)   CMAKE_ARCH=x86_64 ;;
+            ARM64) CMAKE_ARCH=aarch64 ;;
+            *) echo "unhandled runner arch ${RUNNER_ARCH}" >&2; exit 1 ;;
+          esac
+          CMAKE_DIR="cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}"
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/vcpkg/archives
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      # Sanitizers are a build gate, not an option (ARCHITECTURE.md "Invariants and sanitizers").
+      #
+      # detect_leaks is Linux-only: LeakSanitizer is not implemented on macOS,
+      # and asking for it there is a startup error, not a no-op. Leak coverage
+      # therefore comes from the Linux legs of this matrix — which is enough,
+      # since a leak is a property of the code and not of the platform.
+      # `--parallel`, because `gtest_discover_tests` makes one ctest test per gtest case:
+      # 412 separate processes, each paying a sanitizer runtime's startup, run one at a time
+      # on a four-core runner. `getconf` rather than `nproc` so the macOS legs work too.
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --parallel "$(getconf _NPROCESSORS_ONLN)"
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: ${{ runner.os == 'Linux' && 'detect_leaks=1:abort_on_error=1' || 'abort_on_error=1' }}
+          TSAN_OPTIONS: halt_on_error=1
+
+
+  # ARCHITECTURE.md "Dependencies and artifacts" step 10 — the Java binding. Its native half is built by CMake, so this
+  # needs the same toolchain as the engine legs; only the test runner differs.
+  java:
+    name: java ${{ matrix.jdk }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # JDK 11 is the declared floor (ARCHITECTURE.md "The ABI boundary" chose JNI over Panama FFM precisely
+        # for that reach), so it runs everywhere the native artifact is built.
+        # One JDK 25 leg covers JEP 472: from JDK 24 a JNI load without
+        # --enable-native-access warns on every startup, and older JVMs refuse
+        # the flag outright, so both ends of that range need exercising.
+        include:
+          - {os: ubuntu-latest,    jdk: '11'}
+          - {os: ubuntu-24.04-arm, jdk: '11'}
+          - {os: macos-latest,     jdk: '11'}
+          - {os: ubuntu-latest,    jdk: '25'}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          # vcpkg's port scripts use string(JSON ... STRING_ENCODE), which is a
+          # CMake 4 feature, and vcpkg reaches for a *system* cmake whenever one
+          # clears its own minimum instead of fetching the version its ports
+          # were written against. The runner images ship 3.31, which clears that
+          # minimum and lacks the feature, so building any port from source dies
+          # in vcpkg's own scripts. (It only shows up on a binary-cache miss,
+          # which is why arm64 hit it first.) Installing 4.x ahead of the system
+          # copy fixes it and makes the toolchain identical across the matrix.
+          CMAKE_VERSION=4.4.0
+          case "${RUNNER_ARCH}" in
+            X64)   CMAKE_ARCH=x86_64 ;;
+            ARM64) CMAKE_ARCH=aarch64 ;;
+            *) echo "unhandled runner arch ${RUNNER_ARCH}" >&2; exit 1 ;;
+          esac
+          CMAKE_DIR="cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}"
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.jdk }}
+
+      # The glue links the static archive, so the engine has to build first.
+      - name: Build the native library
+        run: |
+          cmake --preset release
+          cmake --build --preset release --target elysiumkv_jni
+
+      - name: Test the binding
+        run: mvn -B -f bindings/java verify -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/release
+
+      # The suite above already exercises extraction — it runs without
+      # -Delysiumkv.library.path, so NativeLibrary pulls the artifact out of
+      # target/classes exactly as it would out of a jar. What it cannot prove is
+      # that the artifact was *packaged*: a resources misconfiguration would
+      # leave a jar that works on the build machine and nowhere else.
+      - name: Check the jar carries a native library for this platform
+        run: |
+          jar tf bindings/java/target/elysiumkv-*.jar | grep -E 'native/.*/libelysiumkv_jni' \
+            || { echo "the jar has no native library for this platform" >&2; exit 1; }
+
+  # ARCHITECTURE.md "The ABI boundary", ARCHITECTURE.md "Ownership is one compare-and-set" — the remote implementations, against LocalStack. One job, on
+  # x86 Linux only: this is about the S3 and DynamoDB code paths, not about
+  # architecture, and it is the heaviest configuration in the matrix because
+  # aws-sdk-cpp has to be built.
+  #
+  # LocalStack is pinned to 4.4.0 deliberately. `latest` refuses to start without
+  # a licence key, and 3.8 silently ignores `If-Match` — under 3.8 the write-once
+  # tests pass while a stale-token compare-and-swap *succeeds*, so the suite would
+  # show the fence working while two writers both install.
+  remote:
+    name: remote storage / localstack
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:4.4.0
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,dynamodb
+        options: >-
+          --health-cmd "curl -fs http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 10s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          CMAKE_VERSION=4.4.0
+          CMAKE_DIR="cmake-${CMAKE_VERSION}-linux-x86_64"
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-aws-ubuntu-latest-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-aws-ubuntu-latest-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build with the remote implementations
+        run: |
+          cmake -S . -B build/aws -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DELYSIUMKV_BUILD_AWS=ON -DELYSIUMKV_PARANOID=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build/aws
+
+      - name: Provision the bucket
+        # S3BlobStore has no create-bucket option on purpose: a bucket is
+        # provisioned infrastructure, and creating one silently would hide a
+        # misconfigured name behind a working store. The DynamoDB table needs no
+        # equivalent — createTableIfMissing is a real option there.
+        run: |
+          pip install --quiet awscli-local awscli
+          awslocal s3 mb s3://elysiumkv
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+
+      # The contract suites, instantiated for S3 and DynamoDB, plus the smoke
+      # probes. Without ELYSIUMKV_S3_ENDPOINT every remote case *skips*, so the
+      # variable is what makes this job mean anything.
+      - name: Test the remote implementations
+        run: ctest --test-dir build/aws --output-on-failure
+        env:
+          ELYSIUMKV_S3_ENDPOINT: http://localhost:4566
+          AWS_EC2_METADATA_DISABLED: 'true'
+
+      # The Java suite starts its *own* LocalStack through Testcontainers rather
+      # than using the service above, because it needs the container handle to
+      # provision the bucket and to map a port it did not choose. Each layer uses
+      # the mechanism it can: ctest takes an endpoint from the environment,
+      # Testcontainers manages a lifecycle.
+      #
+      # -Delysiumkv.remote.required=true turns the Java suite's skips into failures:
+      # a skipped remote test on the one runner that has Docker is
+      # indistinguishable from a pass.
+      - name: Test the binding against remote storage
+        run: |
+          cmake --build build/aws --target elysiumkv_jni
+          mvn -B -f bindings/java verify \
+            -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/aws \
+            -Delysiumkv.remote.required=true
+
+  # ARCHITECTURE.md "Benchmarks" — benchmarks are gating, not reported. The differential oracle
+  # validates answers, not cost.
+  benchmarks:
+    name: benchmarks / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          # vcpkg's port scripts use string(JSON ... STRING_ENCODE), which is a
+          # CMake 4 feature, and vcpkg reaches for a *system* cmake whenever one
+          # clears its own minimum instead of fetching the version its ports
+          # were written against. The runner images ship 3.31, which clears that
+          # minimum and lacks the feature, so building any port from source dies
+          # in vcpkg's own scripts. (It only shows up on a binary-cache miss,
+          # which is why arm64 hit it first.) Installing 4.x ahead of the system
+          # copy fixes it and makes the toolchain identical across the matrix.
+          CMAKE_VERSION=4.4.0
+          case "${RUNNER_ARCH}" in
+            X64)   CMAKE_ARCH=x86_64 ;;
+            ARM64) CMAKE_ARCH=aarch64 ;;
+            *) echo "unhandled runner arch ${RUNNER_ARCH}" >&2; exit 1 ;;
+          esac
+          CMAKE_DIR="cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}"
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      - run: cmake --preset release && cmake --build --preset release --target elysiumkv_bench
+
+      # The baseline belongs to the runner, not to the repository. A committed
+      # number is a measurement of whichever machine produced it, so comparing a
+      # runner against it reports the hardware difference as a regression. This
+      # restores the last baseline *this* OS's runners recorded on main; a PR
+      # therefore gates against main's numbers, measured on the same class of
+      # machine, and never writes back.
+      - name: Restore benchmark baseline
+        uses: actions/cache/restore@v6
+        with:
+          path: bench/baselines
+          key: bench-baseline-${{ matrix.os }}-
+          restore-keys: bench-baseline-${{ matrix.os }}-
+
+      - name: Run benchmarks
+        # Medians over repetitions: a shared CI runner is noisy, and a 10%
+        # threshold against a single sample would be a coin toss.
+        run: |
+          ./build/release/bench/elysiumkv_bench \
+            --benchmark_min_time=0.3s \
+            --benchmark_repetitions=7 \
+            --benchmark_report_aggregates_only=true \
+            --benchmark_format=json > bench-results.json
+      # The first run on a given OS has nothing to compare against: it writes the
+      # baseline and passes. The gate is live from the second main build onward.
+      - name: Check against baseline
+        run: python3 bench/check_regression.py bench-results.json
+
+      # Only main ratchets the stored baseline, so a slow PR cannot raise the bar
+      # for the PRs behind it. The run number keeps the key unique — cache
+      # entries are immutable, and restore-keys picks the newest prefix match.
+      - name: Save benchmark baseline
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: bench/baselines
+          key: bench-baseline-${{ matrix.os }}-${{ github.run_number }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmarks-${{ matrix.os }}
+          path: |
+            bench-results.json
+            bench/baselines/
+
+  differential-full:
+    name: full differential (1M ops x 100 seeds)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # Same CMake pin as the build job — see the comment there.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          CMAKE_DIR=cmake-4.4.0-linux-x86_64
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      # A ctest TIMEOUT *property* beats `ctest --timeout`, so the longer budget this job
+      # needs has to be set at configure time. One hour per test, against a measured ~6.5
+      # minutes for the heaviest config on a developer machine, leaves ample room for a slower
+      # runner.
+      - run: |
+          cmake --preset release -DELYSIUMKV_TEST_TIMEOUT=3600
+          cmake --build --preset release
+      # ARCHITECTURE.md "The differential oracle" — the synchronous pass is gating and shrinkable; the threaded pass samples
+      # interleavings. Neither covers the other.
+      #
+      # `--parallel` is the parallelism that matters here: each differential configuration is
+      # one ctest test, so this is per-config parallelism without duplicating the config list
+      # into this file, where it would drift from the C++ one. `--output-on-failure` is what
+      # names the failing config.
+      - run: |
+          ctest --preset release -R 'Diff|Fault|KillPoint|Soak|Migration' \
+            --parallel "$(getconf _NPROCESSORS_ONLN)" --output-on-failure
+        env:
+          ELYSIUMKV_DIFF_FULL: '1'
+          ELYSIUMKV_SOAK_OPS: '2000000'

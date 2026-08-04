@@ -1,0 +1,882 @@
+#include "elysiumkv/elysiumkv.h"
+
+#include "stats_decoder.hpp"
+#include "support/temp_dir.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+/// Compiled as C99 in its own translation unit — see elysiumkv_c_smoke.c.
+extern "C" int elysiumkv_c_smoke(const char* store_directory, const char* catalog_directory);
+
+namespace elysiumkv::test {
+namespace {
+
+/// ARCHITECTURE.md "The ABI boundary" — the ABI every binding targets. These tests go through `elysiumkv.h` only:
+/// no engine headers, no C++ types across the boundary.
+class CApiTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // ARCHITECTURE.md "A process-wide memory budget" — a budget generous enough never to shed, attached to every case here.
+        // The point is coverage of the *plumbing*: a budget that reaches the engine
+        // through the ABI and is charged by it. Shedding is tested where it can be
+        // forced.
+        budget_ = elysiumkv_memory_budget_create(256u << 20);
+        ASSERT_NE(budget_, nullptr);
+
+        store_dir_ = (dir_.path() / "store").string();
+        std::filesystem::create_directories(store_dir_);
+        catalog_dir_ = dir_.path().string();
+
+        store_ = elysiumkv_local_blob_store_create(store_dir_.c_str(), "store-0");
+        ASSERT_NE(store_, nullptr);
+        catalog_ = elysiumkv_file_manifest_catalog_create(catalog_dir_.c_str());
+        ASSERT_NE(catalog_, nullptr);
+    }
+
+    void TearDown() override {
+        if (budget_ != nullptr) elysiumkv_memory_budget_destroy(budget_);
+        if (catalog_ != nullptr) elysiumkv_manifest_catalog_destroy(catalog_);
+        if (store_ != nullptr) elysiumkv_blob_store_destroy(store_);
+        if (second_store_ != nullptr) elysiumkv_blob_store_destroy(second_store_);
+    }
+
+    void* budget_ = nullptr;
+
+    elysiumkv_options* make_options(bool transient_tier = false) {
+        elysiumkv_options* options = elysiumkv_options_create();
+        EXPECT_EQ(elysiumkv_options_configure(options, catalog_, budget_,
+                                            /*memtable_bytes=*/64u << 10,
+                                            /*block_bytes=*/1024, 0, 0, 0, 0, 0, -1, -1, -1,
+                                            /*flush_interval_ms=*/0),
+                  ELYSIUMKV_OK);
+
+        if (transient_tier) {
+            const std::string cold = (dir_.path() / "cold").string();
+            std::filesystem::create_directories(cold);
+            second_store_ = elysiumkv_local_blob_store_create(cold.c_str(), "store-1");
+            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 0,
+                                               120'000),
+                      ELYSIUMKV_OK);
+            EXPECT_EQ(elysiumkv_options_add_tier(options, second_store_, ELYSIUMKV_DURABLE, 0, 0, 0, 0),
+                      ELYSIUMKV_OK);
+        } else {
+            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_DURABLE, 0, 0, 0, 0),
+                      ELYSIUMKV_OK);
+        }
+        EXPECT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 8, 12, 0),
+                  ELYSIUMKV_OK);
+        EXPECT_EQ(elysiumkv_options_set_level(options, 1, ELYSIUMKV_COMPRESSION_ZSTD, 4u << 20, 0, 0, 0,
+                                            0),
+                  ELYSIUMKV_OK);
+        EXPECT_EQ(elysiumkv_options_set_level(options, 2, ELYSIUMKV_COMPRESSION_ZSTD, 0, 0, 0, 0, 0),
+                  ELYSIUMKV_OK);
+        return options;
+    }
+
+    elysiumkv_db* open() {
+        elysiumkv_options* options = make_options();
+        elysiumkv_db* db = nullptr;
+        EXPECT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_OK) << elysiumkv_last_error();
+        elysiumkv_options_destroy(options);
+        return db;
+    }
+
+    /// Every binding needs this shape: ask for the size, then decode.
+    static DecodedStats snapshot(const elysiumkv_db* db) {
+        size_t needed = 0;
+        EXPECT_EQ(elysiumkv_stats_snapshot(db, nullptr, 0, &needed), ELYSIUMKV_OK);
+        EXPECT_GT(needed, 0u);
+        std::vector<uint8_t> buffer(needed);
+        size_t written = 0;
+        EXPECT_EQ(elysiumkv_stats_snapshot(db, buffer.data(), buffer.size(), &written), ELYSIUMKV_OK);
+        EXPECT_EQ(written, needed);
+        return decode_stats(buffer.data(), written);
+    }
+
+    static elysiumkv_status put(elysiumkv_db* db, const std::string& key, const std::string& value) {
+        return elysiumkv_put(db, reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+                           reinterpret_cast<const uint8_t*>(value.data()), value.size());
+    }
+
+    TempDir dir_;
+    std::string store_dir_;
+    std::string catalog_dir_;
+    void* store_ = nullptr;
+    void* second_store_ = nullptr;
+    void* catalog_ = nullptr;
+};
+
+/// The header is C99: this passes only because elysiumkv_c_smoke.c compiled as C.
+TEST_F(CApiTest, TheHeaderIsUsableFromC) {
+    EXPECT_EQ(elysiumkv_c_smoke(store_dir_.c_str(), catalog_dir_.c_str()), 0);
+}
+
+TEST_F(CApiTest, VersionIsReported) {
+    ASSERT_NE(elysiumkv_version(), nullptr);
+    const std::string version = elysiumkv_version();
+    EXPECT_FALSE(version.empty()) << "a binding has to be able to check what it loaded";
+
+    // The value is substituted into a generated header from `ELYSIUMKV_VERSION`, so the way this
+    // breaks is not emptiness — it is a *literal* "@ELYSIUMKV_VERSION@" reaching the ABI when the
+    // placeholder name or `@ONLY` is wrong. Asserting the shape catches that; asserting an exact
+    // number would put the version back in a second place, which is what was removed.
+    //
+    // A pre-release suffix is allowed and deliberately not parsed: "1.0.1-rc1" is a legitimate
+    // release tag, and the numeric prefix is the part with a required shape.
+    const std::string numeric = version.substr(0, version.find('-'));
+    std::vector<std::string> parts;
+    for (size_t start = 0; start <= numeric.size();) {
+        const size_t dot = numeric.find('.', start);
+        const size_t end = dot == std::string::npos ? numeric.size() : dot;
+        parts.push_back(numeric.substr(start, end - start));
+        if (dot == std::string::npos) break;
+        start = end + 1;
+    }
+    ASSERT_EQ(parts.size(), 3u) << "expected major.minor.patch, got \"" << version << "\"";
+    for (const std::string& part : parts) {
+        EXPECT_FALSE(part.empty()) << "empty component in \"" << version << "\"";
+        EXPECT_EQ(part.find_first_not_of("0123456789"), std::string::npos)
+            << "non-numeric component \"" << part << "\" in \"" << version << "\"";
+    }
+}
+
+// ARCHITECTURE.md "The ABI boundary" — **pin accounting is a first-class invariant with a debug-build leak check
+// at close.** A leaked pin holds a block-cache entry forever.
+TEST_F(CApiTest, ClosingWithAPinOutstandingReportsTheLeak) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+
+    const uint8_t* value = nullptr;
+    size_t value_len = 0;
+    uint64_t pin = 0;
+    ASSERT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>("k"), 1, &value, &value_len, &pin),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_pins_outstanding(db), 1u);
+
+    // Deliberately not unpinned.
+    EXPECT_EQ(elysiumkv_close(db), 1u) << "close must report what was left held";
+    EXPECT_NE(std::string(elysiumkv_last_error()).find("outstanding"), std::string::npos)
+        << elysiumkv_last_error();
+}
+
+// Closing detaches a live iterator rather than leaving it pointing at a freed
+// engine: the handle belongs to the caller, who will destroy it on their own
+// schedule — including, when a binding gets it wrong, after the close.
+TEST_F(CApiTest, ClosingWithAnIteratorOutstandingReportsItAndDetachesIt) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+
+    elysiumkv_iter* iter = nullptr;
+    ASSERT_EQ(elysiumkv_iter_create(db, nullptr, 0, nullptr, 0, &iter), ELYSIUMKV_OK);
+    ASSERT_TRUE(elysiumkv_iter_next(iter)) << "live before the close";
+
+    EXPECT_EQ(elysiumkv_close(db), 1u) << "close reports what was left outstanding";
+
+    // Detached: exhausted rather than a crash, and safe to destroy.
+    EXPECT_FALSE(elysiumkv_iter_next(iter));
+    EXPECT_EQ(elysiumkv_iter_status(iter), ELYSIUMKV_CONFIG);
+    elysiumkv_iter_destroy(iter);
+}
+
+TEST_F(CApiTest, ACleanCloseReportsNothing) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+
+    const uint8_t* value = nullptr;
+    size_t value_len = 0;
+    uint64_t pin = 0;
+    ASSERT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>("k"), 1, &value, &value_len, &pin),
+              ELYSIUMKV_OK);
+    elysiumkv_unpin(db, pin);
+
+    elysiumkv_iter* iter = nullptr;
+    ASSERT_EQ(elysiumkv_iter_create(db, nullptr, 0, nullptr, 0, &iter), ELYSIUMKV_OK);
+    elysiumkv_iter_destroy(iter);
+
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// The pinned bytes must stay readable while the pin is held, whatever the cache
+// does in the meantime — that is the whole point of the protocol.
+TEST_F(CApiTest, PinnedBytesSurviveCachePressure) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+
+    for (int i = 0; i < 2000; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), std::string(200, 'v')), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    const std::string key = "key:7";
+    const uint8_t* value = nullptr;
+    size_t value_len = 0;
+    uint64_t pin = 0;
+    ASSERT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>(key.data()), key.size(), &value,
+                          &value_len, &pin),
+              ELYSIUMKV_OK);
+    const std::string held(reinterpret_cast<const char*>(value), value_len);
+
+    // Read everything else, evicting whatever the cache likes.
+    for (int i = 0; i < 2000; ++i) {
+        const std::string other = "key:" + std::to_string(i);
+        uint8_t scratch[512];
+        size_t len = 0;
+        (void)elysiumkv_get_copy(db, reinterpret_cast<const uint8_t*>(other.data()), other.size(),
+                               scratch, sizeof(scratch), &len);
+    }
+
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(value), value_len), held)
+        << "a pinned value must not move or change under the caller";
+    elysiumkv_unpin(db, pin);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+TEST_F(CApiTest, GetCopyReportsTheFullLengthEvenWhenTruncated) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    const std::string value(500, 'x');
+    ASSERT_EQ(put(db, "k", value), ELYSIUMKV_OK);
+
+    uint8_t small[16];
+    size_t len = 0;
+    ASSERT_EQ(elysiumkv_get_copy(db, reinterpret_cast<const uint8_t*>("k"), 1, small, sizeof(small),
+                               &len),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(len, 500u) << "the caller has to be able to size a second buffer";
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(small), sizeof(small)),
+              std::string(16, 'x'));
+
+    // A null buffer is a length query.
+    len = 0;
+    ASSERT_EQ(elysiumkv_get_copy(db, reinterpret_cast<const uint8_t*>("k"), 1, nullptr, 0, &len),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(len, 500u);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// ARCHITECTURE.md "The ABI boundary" — `ELYSIUMKV_IO` is the retryable class, and the ABI must never invite a
+// binding to read a failure as absence.
+TEST_F(CApiTest, StatusCodesAreDistinctAndCarryDetail) {
+    elysiumkv_options* options = elysiumkv_options_create();
+    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0), ELYSIUMKV_OK);
+    // A transient last tier: rejected at open (ARCHITECTURE.md "A tier is not a level").
+    ASSERT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 0, 120'000),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_level(options, 1, ELYSIUMKV_COMPRESSION_NONE, 0, 0, 0, 0, 0),
+              ELYSIUMKV_OK);
+
+    elysiumkv_db* db = nullptr;
+    EXPECT_EQ(elysiumkv_open_with_result(options, &db, nullptr, nullptr, nullptr, nullptr),
+              ELYSIUMKV_CONFIG);
+    EXPECT_EQ(db, nullptr);
+    EXPECT_FALSE(std::string(elysiumkv_last_error()).empty());
+    elysiumkv_options_destroy(options);
+}
+
+// ARCHITECTURE.md "A tier is not a level" — the guarded open refuses a transient configuration outright, and the
+// reporting form accepts it.
+TEST_F(CApiTest, GuardedOpenRefusesATransientTier) {
+    elysiumkv_options* options = make_options(/*transient_tier=*/true);
+    elysiumkv_db* db = nullptr;
+    EXPECT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(db, nullptr);
+
+    const char* discarded[4] = {nullptr, nullptr, nullptr, nullptr};
+    size_t n_stores = 4;
+    uint64_t discarded_files = 1;
+    bool requires_recovery = true;
+    ASSERT_EQ(elysiumkv_open_with_result(options, &db, discarded, &n_stores, &discarded_files,
+                                       &requires_recovery),
+              ELYSIUMKV_OK)
+        << elysiumkv_last_error();
+    EXPECT_EQ(n_stores, 0u);
+    EXPECT_EQ(discarded_files, 0u);
+    EXPECT_FALSE(requires_recovery);
+    EXPECT_EQ(snapshot(db).tiers.size(), 2u);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+    elysiumkv_options_destroy(options);
+}
+
+TEST_F(CApiTest, StatsReachBothAxes) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 500; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), std::string(100, 'v')), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    const DecodedStats stats = snapshot(db);
+    EXPECT_EQ(stats.format_version, 1u);
+    EXPECT_EQ(stats.levels.size(), 3u);
+    EXPECT_EQ(stats.tiers.size(), 1u);
+    EXPECT_GT(stats.tiers[0].file_count, 0);
+    EXPECT_GT(stats.tiers[0].bytes, 0u);
+    EXPECT_EQ(stats.tiers[0].files_pending_migration, 0);
+    EXPECT_FALSE(stats.tiers[0].stalling);
+    EXPECT_EQ(stats.level_bytes_total(), stats.tier_bytes_total())
+        << "the two axes describe the same files";
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// ARCHITECTURE.md "The ABI boundary" — the reason the snapshot is one call. The old shape had an accessor per
+// field, each taking its own `stats()`, so a caller assembling a picture of the
+// engine sampled a different instant per field.
+//
+// Every file sits in exactly one level and exactly one tier, so these two totals
+// are the same number seen along two axes. That identity is what the old design
+// could not offer: measured against this same workload, two snapshots taken 20ms
+// apart disagreed in 40 rounds out of 40. Back-to-back calls usually agree,
+// which is what makes the torn design so comfortable to ship — the window is
+// small, not absent, and a binding assembling fourteen calls is preemptible in
+// every gap. The assertion below is on the invariant rather than on the race,
+// because a test that depends on losing a race belongs nowhere near a gate.
+TEST_F(CApiTest, TheSnapshotIsOneInstantWhileCompactionRuns) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+
+    // Enough writing to keep the background thread compacting throughout.
+    int consistent = 0;
+    for (int round = 0; round < 40; ++round) {
+        for (int i = 0; i < 400; ++i) {
+            ASSERT_EQ(put(db, "key:" + std::to_string(round * 400 + i), std::string(120, 'v')),
+                      ELYSIUMKV_OK);
+        }
+        const DecodedStats stats = snapshot(db);
+        ASSERT_EQ(stats.level_bytes_total(), stats.tier_bytes_total())
+            << "torn snapshot at round " << round;
+        ++consistent;
+    }
+
+    EXPECT_EQ(consistent, 40);
+    const DecodedStats final_stats = snapshot(db);
+    EXPECT_GT(final_stats.level_bytes_total(), 0u) << "the check must not be vacuous";
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+/// Pins the stats buffer layout FORMAT.md declares, against a real snapshot. The self-describing
+/// header is only useful if a decoder can trust where the records begin, so the sizes the header
+/// reports are asserted against the buffer's actual length rather than against the constants.
+TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+
+    size_t needed = 0;
+    ASSERT_EQ(elysiumkv_stats_snapshot(db, nullptr, 0, &needed), ELYSIUMKV_OK);
+    std::vector<uint8_t> buffer(needed, 0);
+    size_t written = 0;
+    ASSERT_EQ(elysiumkv_stats_snapshot(db, buffer.data(), buffer.size(), &written), ELYSIUMKV_OK);
+    ASSERT_EQ(written, needed);
+
+    auto u32 = [&buffer](size_t offset) {
+        return static_cast<uint32_t>(buffer[offset]) |
+               (static_cast<uint32_t>(buffer[offset + 1]) << 8) |
+               (static_cast<uint32_t>(buffer[offset + 2]) << 16) |
+               (static_cast<uint32_t>(buffer[offset + 3]) << 24);
+    };
+
+    EXPECT_EQ(u32(0), 1u) << "format_version";
+    const uint32_t header_bytes = u32(4);
+    const uint32_t level_record_bytes = u32(8);
+    const uint32_t tier_record_bytes = u32(12);
+    const uint32_t level_count = u32(16);
+    const uint32_t tier_count = u32(20);
+
+    EXPECT_EQ(header_bytes, 192u);
+    EXPECT_EQ(level_record_bytes, 32u);
+    EXPECT_EQ(tier_record_bytes, 32u);
+    EXPECT_LE(buffer[24], 1u) << "requires_recovery is a 0/1 byte";
+    for (size_t i = 25; i < 32; ++i) EXPECT_EQ(buffer[i], 0u) << "header padding at " << i;
+
+    // **The whole point of the self-describing header**: records are located by the declared
+    // sizes, so those sizes must account for the buffer exactly.
+    EXPECT_EQ(needed, header_bytes + level_count * level_record_bytes +
+                          tier_count * tier_record_bytes)
+        << "a decoder locating records by the declared sizes would run off the end";
+
+    // Level record padding, at the documented offsets within the first record.
+    ASSERT_GT(level_count, 0u);
+    const size_t level0 = header_bytes;
+    EXPECT_LE(buffer[level0 + 28], 1u) << "age_triggered";
+    EXPECT_LE(buffer[level0 + 29], 1u) << "stalling";
+    EXPECT_EQ(buffer[level0 + 30], 0u);
+    EXPECT_EQ(buffer[level0 + 31], 0u);
+
+    // Tier record padding likewise.
+    ASSERT_GT(tier_count, 0u);
+    const size_t tier0 = header_bytes + level_count * level_record_bytes;
+    EXPECT_LE(buffer[tier0 + 28], 1u) << "stalling";
+    for (size_t i = 29; i < 32; ++i) EXPECT_EQ(buffer[tier0 + i], 0u);
+
+    elysiumkv_close(db);
+}
+
+TEST_F(CApiTest, StatsSnapshotReportsItsSizeAndRefusesToTruncate) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+
+    size_t needed = 0;
+    ASSERT_EQ(elysiumkv_stats_snapshot(db, nullptr, 0, &needed), ELYSIUMKV_OK);
+    ASSERT_GT(needed, 136u) << "header plus three levels and a tier";
+
+    // A buffer one byte short writes nothing rather than half a snapshot.
+    std::vector<uint8_t> undersized(needed - 1, 0xAB);
+    size_t reported = 0;
+    EXPECT_EQ(elysiumkv_stats_snapshot(db, undersized.data(), undersized.size(), &reported),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(reported, needed);
+    EXPECT_EQ(undersized[0], 0xAB) << "nothing was written";
+
+    // A larger buffer is fine, and reports the same length.
+    std::vector<uint8_t> oversized(needed + 64, 0);
+    EXPECT_EQ(elysiumkv_stats_snapshot(db, oversized.data(), oversized.size(), &reported),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(reported, needed);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// The rule that keeps the format extensible: locate records by the declared
+// sizes. A decoder that hardcodes them breaks the first time a field is added.
+TEST_F(CApiTest, TheDecoderFollowsTheDeclaredRecordSizes) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 200; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), "v"), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    size_t needed = 0;
+    ASSERT_EQ(elysiumkv_stats_snapshot(db, nullptr, 0, &needed), ELYSIUMKV_OK);
+    std::vector<uint8_t> buffer(needed);
+    size_t written = 0;
+    ASSERT_EQ(elysiumkv_stats_snapshot(db, buffer.data(), buffer.size(), &written), ELYSIUMKV_OK);
+    const DecodedStats actual = decode_stats(buffer.data(), written);
+
+    // Rewrite it as a future version would: same fields, wider records and a
+    // longer header. The decoder must read exactly the same values back.
+    // Read from the buffer, not written down here. A test about following declared
+    // sizes must not hardcode them: this said 136 and broke the moment the header
+    // legitimately grew, which is the failure it exists to rule out.
+    const auto read_u32_at = [&](size_t offset) {
+        uint32_t value = 0;
+        for (int i = 0; i < 4; ++i) {
+            value |= static_cast<uint32_t>(buffer[offset + static_cast<size_t>(i)]) << (8 * i);
+        }
+        return value;
+    };
+    const uint32_t header = read_u32_at(4), level_bytes = read_u32_at(8),
+                   tier_bytes = read_u32_at(12);
+    const uint32_t grown_header = header + 16, grown_level = level_bytes + 8,
+                   grown_tier = tier_bytes + 8;
+    std::vector<uint8_t> grown(grown_header + actual.levels.size() * grown_level +
+                               actual.tiers.size() * grown_tier);
+    std::memcpy(grown.data(), buffer.data(), header);
+    const auto put_u32 = [&](size_t offset, uint32_t value) {
+        for (int i = 0; i < 4; ++i) grown[offset + static_cast<size_t>(i)] =
+            static_cast<uint8_t>(value >> (8 * i));
+    };
+    put_u32(4, grown_header);
+    put_u32(8, grown_level);
+    put_u32(12, grown_tier);
+    for (size_t i = 0; i < actual.levels.size(); ++i) {
+        std::memcpy(grown.data() + grown_header + i * grown_level,
+                    buffer.data() + header + i * level_bytes, level_bytes);
+    }
+    for (size_t i = 0; i < actual.tiers.size(); ++i) {
+        std::memcpy(grown.data() + grown_header + actual.levels.size() * grown_level +
+                        i * grown_tier,
+                    buffer.data() + header + actual.levels.size() * level_bytes + i * tier_bytes,
+                    tier_bytes);
+    }
+
+    const DecodedStats from_grown = decode_stats(grown.data(), grown.size());
+    ASSERT_EQ(from_grown.levels.size(), actual.levels.size());
+    ASSERT_EQ(from_grown.tiers.size(), actual.tiers.size());
+    for (size_t i = 0; i < actual.levels.size(); ++i) {
+        EXPECT_EQ(from_grown.levels[i].file_count, actual.levels[i].file_count) << i;
+        EXPECT_EQ(from_grown.levels[i].bytes, actual.levels[i].bytes) << i;
+    }
+    EXPECT_EQ(from_grown.tier_bytes_total(), actual.tier_bytes_total());
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// Each bound is independent. Folding them — "unbounded only when both are null"
+// — turned `[lo, end)` into `[lo, "")`, the empty range, so the scan returned
+// nothing at all. That is the worst shape a bug can take here: it does not look
+// like a failure, it looks like a store with no data in it.
+TEST_F(CApiTest, EachIteratorBoundIsIndependentlyOptional) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 20; ++i) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "k%02d", i);
+        ASSERT_EQ(put(db, key, "v"), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    const auto count = [&](const char* lo, const char* hi) {
+        elysiumkv_iter* iter = nullptr;
+        EXPECT_EQ(elysiumkv_iter_create(db, reinterpret_cast<const uint8_t*>(lo),
+                                      lo == nullptr ? 0 : std::strlen(lo),
+                                      reinterpret_cast<const uint8_t*>(hi),
+                                      hi == nullptr ? 0 : std::strlen(hi), &iter),
+                  ELYSIUMKV_OK);
+        int seen = 0;
+        while (elysiumkv_iter_next(iter)) ++seen;
+        EXPECT_EQ(elysiumkv_iter_status(iter), ELYSIUMKV_OK);
+        elysiumkv_iter_destroy(iter);
+        return seen;
+    };
+
+    EXPECT_EQ(count(nullptr, nullptr), 20) << "both unbounded";
+    EXPECT_EQ(count("k05", "k10"), 5) << "half-open on both ends";
+    EXPECT_EQ(count("k05", nullptr), 15) << "from here to the end of the keyspace";
+    EXPECT_EQ(count(nullptr, "k05"), 5) << "from the start";
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// ARCHITECTURE.md "The ABI boundary" — the batched advance. The measurement that justified it: a Java scan costs
+// ~419ns per entry through next/key/value and ~58ns batched, against ~36ns in
+// C++. The correctness requirement is simply that it is the same scan.
+TEST_F(CApiTest, TheBatchedAdvanceMatchesTheEntryAtATimeOne) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 500; ++i) {
+        char key[24];
+        std::snprintf(key, sizeof(key), "key:%06d", i);
+        ASSERT_EQ(put(db, key, "value:" + std::to_string(i)), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    std::vector<std::string> one_at_a_time;
+    {
+        elysiumkv_iter* iter = nullptr;
+        ASSERT_EQ(elysiumkv_iter_prefix(db, reinterpret_cast<const uint8_t*>("key:"), 4, &iter),
+                  ELYSIUMKV_OK);
+        while (elysiumkv_iter_next(iter)) {
+            const uint8_t* key = nullptr;
+            const uint8_t* value = nullptr;
+            size_t key_len = 0, value_len = 0;
+            elysiumkv_iter_key(iter, &key, &key_len);
+            elysiumkv_iter_value(iter, &value, &value_len);
+            one_at_a_time.push_back(std::string(reinterpret_cast<const char*>(key), key_len) + "=" +
+                                    std::string(reinterpret_cast<const char*>(value), value_len));
+        }
+        elysiumkv_iter_destroy(iter);
+    }
+
+    // A buffer far too small for the whole scan, so refills are exercised.
+    std::vector<std::string> batched;
+    {
+        elysiumkv_iter* iter = nullptr;
+        ASSERT_EQ(elysiumkv_iter_prefix(db, reinterpret_cast<const uint8_t*>("key:"), 4, &iter),
+                  ELYSIUMKV_OK);
+        std::vector<uint8_t> buffer(256);
+        while (true) {
+            size_t count = 0, bytes = 0;
+            ASSERT_EQ(elysiumkv_iter_next_batch(iter, buffer.data(), buffer.size(), &count, &bytes),
+                      ELYSIUMKV_OK);
+            if (count == 0) {
+                if (bytes == 0) break;              // exhausted
+                buffer.resize(bytes);               // one entry needs more room
+                continue;
+            }
+            size_t offset = 0;
+            for (size_t i = 0; i < count; ++i) {
+                const auto read_u32 = [&](size_t at) {
+                    return static_cast<uint32_t>(buffer[at]) |
+                           static_cast<uint32_t>(buffer[at + 1]) << 8 |
+                           static_cast<uint32_t>(buffer[at + 2]) << 16 |
+                           static_cast<uint32_t>(buffer[at + 3]) << 24;
+                };
+                const uint32_t key_len = read_u32(offset);
+                const uint32_t value_len = read_u32(offset + 4 + key_len);
+                batched.push_back(
+                    std::string(reinterpret_cast<const char*>(buffer.data() + offset + 4), key_len) +
+                    "=" +
+                    std::string(reinterpret_cast<const char*>(buffer.data() + offset + 8 + key_len),
+                                value_len));
+                offset += 8 + key_len + value_len;
+            }
+            EXPECT_EQ(offset, bytes) << "the declared byte count must match what was decoded";
+        }
+        EXPECT_EQ(elysiumkv_iter_status(iter), ELYSIUMKV_OK);
+        elysiumkv_iter_destroy(iter);
+    }
+
+    ASSERT_EQ(one_at_a_time.size(), 500u);
+    EXPECT_EQ(one_at_a_time, batched);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+TEST_F(CApiTest, DataSurvivesCloseAndReopen) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 300; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), "v" + std::to_string(i)), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_close(db), 0u);
+
+    db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 300; ++i) {
+        const std::string key = "key:" + std::to_string(i);
+        uint8_t buffer[64];
+        size_t len = 0;
+        ASSERT_EQ(elysiumkv_get_copy(db, reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+                                   buffer, sizeof(buffer), &len),
+                  ELYSIUMKV_OK)
+            << key;
+        EXPECT_EQ(std::string(reinterpret_cast<const char*>(buffer), len), "v" + std::to_string(i));
+    }
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// Null handles are what a buggy binding passes; none of these may crash.
+TEST_F(CApiTest, NullArgumentsAreRejectedNotDereferenced) {
+    const uint8_t* value = nullptr;
+    size_t len = 0;
+    uint64_t pin = 0;
+
+    EXPECT_EQ(elysiumkv_get(nullptr, nullptr, 0, &value, &len, &pin), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_put(nullptr, nullptr, 0, nullptr, 0), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_delete(nullptr, nullptr, 0), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_flush(nullptr), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_write(nullptr, nullptr), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_open(nullptr, nullptr), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_close(nullptr), 0u);
+    EXPECT_EQ(elysiumkv_batch_size(nullptr), 0u);
+    size_t stats_bytes = 0;
+    EXPECT_EQ(elysiumkv_stats_snapshot(nullptr, nullptr, 0, &stats_bytes), ELYSIUMKV_CONFIG);
+    EXPECT_FALSE(elysiumkv_iter_next(nullptr));
+    elysiumkv_unpin(nullptr, 7);
+    elysiumkv_iter_destroy(nullptr);
+    elysiumkv_batch_destroy(nullptr);
+    elysiumkv_options_destroy(nullptr);
+}
+
+// ARCHITECTURE.md "The ABI boundary" — the seams stay pluggable across the ABI — a binding can supply a store
+// written in its own language. This one is written in C++ but reached only
+// through the function-pointer vtable, which is the same path.
+TEST_F(CApiTest, ABindingCanSupplyItsOwnBlobStore) {
+    struct MemoryStore {
+        std::map<std::string, std::string> objects;
+        int puts = 0;
+        int bulk_removes = 0;   // calls, not names
+        int removed_names = 0;
+    };
+    static MemoryStore backing;
+    backing = MemoryStore{};
+
+    elysiumkv_blob_store_vtable vtable{};
+    vtable.context = &backing;
+    vtable.id = [](void*) -> const char* { return "vtable-store"; };
+    vtable.get = [](void* context, const char* name, uint64_t offset, size_t len, uint8_t* out,
+                    size_t* out_len) -> elysiumkv_status {
+        auto* self = static_cast<MemoryStore*>(context);
+        auto it = self->objects.find(name);
+        if (it == self->objects.end()) return ELYSIUMKV_NOT_FOUND;
+        if (offset >= it->second.size()) {
+            *out_len = 0;
+            return ELYSIUMKV_OK;
+        }
+        const size_t available = it->second.size() - offset;
+        const size_t to_copy = available < len ? available : len;
+        std::memcpy(out, it->second.data() + offset, to_copy);
+        *out_len = to_copy;
+        return ELYSIUMKV_OK;
+    };
+    vtable.put = [](void* context, const char* name, const uint8_t* bytes,
+                    size_t len) -> elysiumkv_status {
+        auto* self = static_cast<MemoryStore*>(context);
+        if (self->objects.count(name) != 0) return ELYSIUMKV_UNUSABLE;  // write-once
+        self->objects[name] = std::string(reinterpret_cast<const char*>(bytes), len);
+        ++self->puts;
+        return ELYSIUMKV_OK;
+    };
+    vtable.remove = [](void* context, const char* name) -> elysiumkv_status {
+        auto* self = static_cast<MemoryStore*>(context);
+        self->objects.erase(name);
+        ++self->removed_names;
+        return ELYSIUMKV_OK;
+    };
+    // The optional callback. A binding that leaves it NULL gets the engine's loop
+    // over `remove`; supplying it is what lets a store written in the binding's
+    // own language batch, which is the only way it can match what the built-in
+    // remote store does.
+    vtable.remove_many = [](void* context, const char* const* names,
+                            size_t count) -> elysiumkv_status {
+        auto* self = static_cast<MemoryStore*>(context);
+        ++self->bulk_removes;
+        for (size_t i = 0; i < count; ++i) {
+            self->objects.erase(names[i]);
+            ++self->removed_names;
+        }
+        return ELYSIUMKV_OK;
+    };
+    vtable.list = [](void* context, const char* prefix,
+                     void (*emit)(void*, const char*), void* emit_context) -> elysiumkv_status {
+        auto* self = static_cast<MemoryStore*>(context);
+        for (const auto& [name, bytes] : self->objects) {
+            if (name.compare(0, std::strlen(prefix), prefix) == 0) emit(emit_context, name.c_str());
+        }
+        return ELYSIUMKV_OK;
+    };
+
+    void* store = elysiumkv_blob_store_from_vtable(&vtable);
+    ASSERT_NE(store, nullptr);
+
+    elysiumkv_options* options = elysiumkv_options_create();
+    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 32u << 10, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_level(options, 1, ELYSIUMKV_COMPRESSION_NONE, 0, 0, 0, 0, 0),
+              ELYSIUMKV_OK);
+
+    elysiumkv_db* db = nullptr;
+    ASSERT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_OK) << elysiumkv_last_error();
+    elysiumkv_options_destroy(options);
+
+    for (int i = 0; i < 400; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), std::string(80, 'v')), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    EXPECT_GT(backing.puts, 0) << "the engine really did write through the vtable";
+
+    for (int i = 0; i < 400; ++i) {
+        const std::string key = "key:" + std::to_string(i);
+        uint8_t buffer[128];
+        size_t len = 0;
+        ASSERT_EQ(elysiumkv_get_copy(db, reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+                                   buffer, sizeof(buffer), &len),
+                  ELYSIUMKV_OK)
+            << key;
+        EXPECT_EQ(len, 80u);
+    }
+
+    // Obsolete-object collection must reach a binding-supplied store the same way
+    // it reaches the built-in ones: in bulk. A level-0 compaction is the ordinary
+    // occasion, so force one.
+    ASSERT_EQ(elysiumkv_compact_level(db, 0), ELYSIUMKV_OK) << elysiumkv_last_error();
+    EXPECT_GT(backing.removed_names, 0) << "nothing was collected, so this proves nothing";
+    EXPECT_GT(backing.bulk_removes, 0)
+        << "collection bypassed the vtable's remove_many and went per object";
+    EXPECT_LT(backing.bulk_removes, backing.removed_names)
+        << backing.bulk_removes << " calls for " << backing.removed_names
+        << " objects — the batch callback is being used one name at a time";
+
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+    elysiumkv_blob_store_destroy(store);
+}
+
+// ARCHITECTURE.md "Dependencies and artifacts" — **the ABI's shape does not vary with the build.** The remote
+// constructors are declared and defined in every configuration, and
+// elysiumkv_features() is how a binding learns whether they will work. If they
+// vanished instead, a binding resolving symbols at load time would fail to load
+// rather than fail to find a feature, and its coverage test could no longer be a
+// set comparison.
+//
+// This test does not know which build it is in — ELYSIUMKV_WITH_AWS is private to
+// the library — so it asserts the two configurations are each *self-consistent*,
+// which is the property that matters.
+TEST_F(CApiTest, TheRemoteConstructorsAgreeWithWhatTheBuildReports) {
+    const bool has_aws = (elysiumkv_features() & ELYSIUMKV_FEATURE_AWS) != 0;
+
+    void* store = reinterpret_cast<void*>(-1);
+    const elysiumkv_status status = elysiumkv_s3_blob_store_create(
+        "bucket", "prefix", nullptr, "http://127.0.0.1:1", "key", "secret", 0, 0, nullptr, &store);
+
+    if (!has_aws) {
+        EXPECT_EQ(status, ELYSIUMKV_CONFIG)
+            << "a build without the remote implementations must say so as a configuration error, "
+               "not as ELYSIUMKV_IO — there is nothing to retry";
+        EXPECT_NE(std::string(elysiumkv_last_error()).find("ELYSIUMKV_BUILD_AWS"), std::string::npos)
+            << "the message must name the missing build option, or the failure reads as 'S3 is "
+               "broken' rather than 'this library does not contain it': "
+            << elysiumkv_last_error();
+        EXPECT_EQ(store, nullptr) << "the out-parameter is cleared even on the failing path";
+
+        void* catalog = reinterpret_cast<void*>(-1);
+        EXPECT_EQ(elysiumkv_s3_manifest_catalog_create("bucket", "prefix", nullptr, nullptr, nullptr,
+                                                     nullptr, 0, 0, &catalog),
+                  ELYSIUMKV_CONFIG);
+        EXPECT_EQ(catalog, nullptr);
+        catalog = reinterpret_cast<void*>(-1);
+        EXPECT_EQ(elysiumkv_dynamo_manifest_catalog_create("table", "store", nullptr, nullptr, nullptr,
+                                                         nullptr, 0, 0, &catalog),
+                  ELYSIUMKV_CONFIG);
+        EXPECT_EQ(catalog, nullptr);
+        return;
+    }
+
+    // Construction reaches no network — an S3 client is configuration, not a
+    // connection — so this succeeds against an endpoint nothing is listening on.
+    // That is what lets a binding's coverage test exercise these without a
+    // service behind them.
+    ASSERT_EQ(status, ELYSIUMKV_OK) << elysiumkv_last_error();
+    ASSERT_NE(store, nullptr);
+    elysiumkv_blob_store_destroy(store);
+
+    void* catalog = nullptr;
+    ASSERT_EQ(elysiumkv_s3_manifest_catalog_create("bucket", "manifest", nullptr,
+                                                 "http://127.0.0.1:1", "key", "secret", 0, 0,
+                                                 &catalog),
+              ELYSIUMKV_OK)
+        << elysiumkv_last_error();
+    elysiumkv_manifest_catalog_destroy(catalog);
+
+    catalog = nullptr;
+    ASSERT_EQ(elysiumkv_dynamo_manifest_catalog_create("table", "store", nullptr,
+                                                     "http://127.0.0.1:1", "key", "secret", 0,
+                                                     /*create_table_if_missing=*/0, &catalog),
+              ELYSIUMKV_OK)
+        << elysiumkv_last_error();
+    elysiumkv_manifest_catalog_destroy(catalog);
+
+    // The arguments that are wrong rather than absent, each named separately so a
+    // single over-broad check cannot stand in for all three.
+    void* rejected = reinterpret_cast<void*>(-1);
+    EXPECT_EQ(elysiumkv_s3_blob_store_create("", nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0,
+                                           nullptr, &rejected),
+              ELYSIUMKV_CONFIG)
+        << "an empty bucket is a configuration error, not a store pointing at nothing";
+    EXPECT_EQ(rejected, nullptr);
+
+    rejected = reinterpret_cast<void*>(-1);
+    EXPECT_EQ(elysiumkv_s3_blob_store_create("bucket", nullptr, nullptr, nullptr, nullptr, nullptr,
+                                           -1, 0, nullptr, &rejected),
+              ELYSIUMKV_CONFIG)
+        << "a negative timeout would become an enormous unsigned duration — 'never time out' is "
+           "not what the caller asked for";
+    EXPECT_EQ(rejected, nullptr);
+
+    rejected = reinterpret_cast<void*>(-1);
+    EXPECT_EQ(elysiumkv_dynamo_manifest_catalog_create("table", "", nullptr, nullptr, nullptr,
+                                                     nullptr, 0, 0, &rejected),
+              ELYSIUMKV_CONFIG)
+        << "an empty store_id would share one partition with every other store on the table";
+    EXPECT_EQ(rejected, nullptr);
+
+    // A null out-parameter must be reported, not dereferenced.
+    EXPECT_EQ(elysiumkv_s3_blob_store_create("bucket", nullptr, nullptr, nullptr, nullptr, nullptr, 0,
+                                           0, nullptr, nullptr),
+              ELYSIUMKV_CONFIG);
+}
+
+}  // namespace
+}  // namespace elysiumkv::test

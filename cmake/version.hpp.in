@@ -1,0 +1,19 @@
+// Generated from cmake/version.hpp.in — do not edit the generated copy.
+//
+// `elysiumkv_version()` used to return a string literal, which meant the number existed twice:
+// once in the build and once in the C ABI. Releasing a new tag moved the jar's version and left
+// the native library reporting the old one, so the binding's `nativeVersion()` — the whole point
+// of which is to tell you what you loaded — lied.
+//
+// The value comes from `ELYSIUMKV_VERSION`, which the publish workflow sets from the release tag.
+// It carries any pre-release suffix (`1.0.1-rc1`), unlike PROJECT_VERSION, which CMake requires
+// to be numeric.
+//
+// Internal: the *declaration* is public (`elysiumkv.h`), only the value comes from here.
+
+#ifndef ELYSIUMKV_GENERATED_VERSION_HPP
+#define ELYSIUMKV_GENERATED_VERSION_HPP
+
+#define ELYSIUMKV_VERSION_STRING "@ELYSIUMKV_VERSION@"
+
+#endif  // ELYSIUMKV_GENERATED_VERSION_HPP

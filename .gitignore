@@ -1,0 +1,12 @@
+/.idea
+/build
+/cmake-build-*
+/vcpkg_installed
+compile_commands.json
+# Benchmark baselines are per-machine measurements, not source: a number from
+# one machine is not a threshold for another. Each machine bootstraps its own.
+/bench/baselines
+/bindings/java/target
+
+# Assembled by the publish workflow: one directory per platform's libelysiumkv_jni.
+bindings/java/native-staging/

@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.veridia</groupId>
+  <artifactId>elysiumkv</artifactId>
+  <!-- A development placeholder, not a number to bump. The release tag is the only place the
+       version is written down: the publish workflow runs `versions:set` from it and builds the
+       native library with the same value, so `ElysiumKV.nativeVersion()` and the jar's coordinates
+       cannot disagree. 0.0.0 mirrors CMake's ELYSIUMKV_VERSION default so a development jar does not
+       claim to be a release; the suffix differs because -SNAPSHOT is what Maven understands. -->
+  <version>0.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>ElysiumKV Java binding</name>
+  <description>JNI binding over the ElysiumKV C ABI</description>
+  <url>https://github.com/veridia-io/elysiumkv</url>
+
+  <!-- Published metadata: a consumer resolving this artifact should be able to see the licence
+       without fetching the repository. The jar also embeds a native library that statically links
+       zstd and lz4 — see NOTICE.md, which is what a redistributor needs. -->
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/licenses/MIT</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <!-- Maven Central validates that these are present, and consumers follow them. -->
+  <scm>
+    <url>https://github.com/veridia-io/elysiumkv</url>
+    <connection>scm:git:git://github.com/veridia-io/elysiumkv.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/veridia-io/elysiumkv.git</developerConnection>
+  </scm>
+
+  <developers>
+    <developer>
+      <id>veridia</id>
+      <name>Veridia</name>
+      <email>oss@veridia.io</email>
+      <organization>Veridia</organization>
+      <organizationUrl>https://github.com/veridia-io</organizationUrl>
+    </developer>
+  </developers>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!-- Java 11, not 22+. ARCHITECTURE.md "The ABI boundary" chose JNI over Panama FFM precisely for reach:
+         FFM needs Java 22, which excludes most production deployments. -->
+    <maven.compiler.release>11</maven.compiler.release>
+
+    <!-- Where the CMake build left libelysiumkv_jni. Override with
+         -Delysiumkv.native.dir=... to package a different build. -->
+    <elysiumkv.native.dir>${project.basedir}/../../build/release</elysiumkv.native.dir>
+
+    <!-- A release jar carries *every* platform, not just the one that built it, because
+         NativeLibrary resolves native/{os}-{arch}/ out of its own classpath — so a consumer on
+         a platform the jar omits gets an UnsatisfiedLinkError at first use rather than a
+         resolution failure at build time. The publish workflow builds each platform on its own
+         runner and drops the results here as native-staging/{os}-{arch}/libelysiumkv_jni.*.
+         Absent in a developer build, where the single directory above supplies the local
+         platform; maven-resources skips a resource directory that does not exist. -->
+    <elysiumkv.native.staging>${project.basedir}/native-staging</elysiumkv.native.staging>
+
+    <!-- Set by the OS profiles below; determines the jar path the loader looks
+         under, so it must match NativeLibrary.platform(). -->
+    <elysiumkv.platform>unknown</elysiumkv.platform>
+
+    <!-- Empty on a JDK that has never heard of the native-access flag; the
+         profile below fills it in. An unknown JVM option is not a warning, it
+         is a refusal to start, so this cannot be set unconditionally while
+         Java 11 is the declared floor. -->
+    <elysiumkv.surefire.args></elysiumkv.surefire.args>
+
+    <junit.version>5.13.4</junit.version>
+    <testcontainers.version>1.21.3</testcontainers.version>
+    <!-- Must match the slf4j-api Testcontainers brings (1.7.x): a 2.x binding
+         on a 1.x api silently binds nothing and logs "Failed to load class
+         StaticLoggerBinder", which looks like a missing dependency rather than a
+         version mismatch. -->
+    <slf4j.version>1.7.36</slf4j.version>
+    <jmh.version>1.37</jmh.version>
+  </properties>
+
+  <profiles>
+    <!-- Signing runs only under -Prelease. Maven Central requires signatures, so the publish step
+         must pass it — but an ordinary CI or fork PR build has no signing key, and a pom that always
+         signed would fail every one of those for a reason unrelated to the change. -->
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.7</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+              </execution>
+            </executions>
+            <configuration>
+              <!-- Loopback pinentry with no agent: a runner has no interactive terminal, and the
+                   passphrase arrives through MAVEN_GPG_PASSPHRASE. -->
+              <useAgent>false</useAgent>
+              <gpgArguments>
+                <arg>--batch</arg>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- JDK 19 accepts the native-access flag; 11 rejects it outright and the
+         JVM will not start. From 24 (JEP 472) its absence means a warning on
+         every JNI load, so it is worth passing wherever it is understood. -->
+    <profile>
+      <id>native-access-flag</id>
+      <activation><jdk>[19,)</jdk></activation>
+      <properties>
+        <elysiumkv.surefire.args>--enable-native-access=ALL-UNNAMED</elysiumkv.surefire.args>
+      </properties>
+    </profile>
+
+    <profile>
+      <id>linux-x86_64</id>
+      <activation><os><name>linux</name><arch>amd64</arch></os></activation>
+      <properties><elysiumkv.platform>linux-x86_64</elysiumkv.platform></properties>
+    </profile>
+    <profile>
+      <id>linux-aarch64</id>
+      <activation><os><name>linux</name><arch>aarch64</arch></os></activation>
+      <properties><elysiumkv.platform>linux-aarch64</elysiumkv.platform></properties>
+    </profile>
+    <profile>
+      <id>darwin-aarch64</id>
+      <activation><os><family>mac</family><arch>aarch64</arch></os></activation>
+      <properties><elysiumkv.platform>darwin-aarch64</elysiumkv.platform></properties>
+    </profile>
+    <profile>
+      <id>darwin-x86_64</id>
+      <activation><os><family>mac</family><arch>x86_64</arch></os></activation>
+      <properties><elysiumkv.platform>darwin-x86_64</elysiumkv.platform></properties>
+    </profile>
+
+    <!-- Benchmarks are opt-in: ARCHITECTURE.md "Benchmarks" wants the crossing-cost number recorded,
+         not gated, and a JVM microbenchmark on a shared runner is not a gate. -->
+    <profile>
+      <id>jmh</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <configuration>
+              <testExcludes combine.self="override"/>
+            </configuration>
+          </plugin>
+          <!-- The benchmarks are not tests; running them under surefire would
+               make an unstable measurement into a build gate. -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <skipTests>true</skipTests>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+      <dependencies>
+        <dependency>
+          <groupId>org.openjdk.jmh</groupId>
+          <artifactId>jmh-core</artifactId>
+          <version>${jmh.version}</version>
+          <scope>test</scope>
+        </dependency>
+        <dependency>
+          <groupId>org.openjdk.jmh</groupId>
+          <artifactId>jmh-generator-annprocess</artifactId>
+          <version>${jmh.version}</version>
+          <scope>test</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Testcontainers *core* only, driving a plain GenericContainer. The
+         org.testcontainers:localstack module would add nothing this needs beyond
+         getEndpointOverride(), which is getHost() and getMappedPort() spelled
+         differently, and it historically dragged the AWS Java SDK v1 onto the test
+         classpath — a second, unrelated AWS client in a suite whose whole subject
+         is the native one. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers</artifactId>
+      <version>${testcontainers.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Without an SLF4J binding, Testcontainers' diagnostics go to a no-op logger:
+         every container failure reads "Could not find a valid Docker environment.
+         Please see logs" and there are no logs. That cost real time once. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <!-- The jar carries native/{os}-{arch}/libelysiumkv_jni.*, which
+           NativeLibrary extracts at first load (ARCHITECTURE.md "Dependencies and artifacts"). A build machine produces
+           its own platform only; a release jar is assembled from several. -->
+      <resource>
+        <directory>${elysiumkv.native.dir}</directory>
+        <targetPath>native/${elysiumkv.platform}</targetPath>
+        <includes>
+          <include>libelysiumkv_jni.so</include>
+          <include>libelysiumkv_jni.dylib</include>
+          <include>elysiumkv_jni.dll</include>
+        </includes>
+      </resource>
+      <!-- The multi-platform half: subdirectories are already named {os}-{arch}, so they land
+           directly under native/. -->
+      <resource>
+        <directory>${elysiumkv.native.staging}</directory>
+        <targetPath>native</targetPath>
+        <includes>
+          <include>*/libelysiumkv_jni.so</include>
+          <include>*/libelysiumkv_jni.dylib</include>
+          <include>*/elysiumkv_jni.dll</include>
+        </includes>
+      </resource>
+    </resources>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+            <!-- Any annotation processor on the path (JMH's, under -Pjmh) makes
+                 javac warn that nothing claimed JUnit's annotations. That is
+                 plumbing noise, not a defect, and -Werror would otherwise turn
+                 enabling the benchmarks into a build failure. -->
+            <arg>-Xlint:-processing</arg>
+            <arg>-Werror</arg>
+          </compilerArgs>
+          <!-- Benchmarks compile only under -Pjmh, which supplies JMH. Keeping
+               them out of the ordinary build means the test suite needs no
+               benchmark dependency to run, on CI or anywhere else. -->
+          <testExcludes>
+            <testExclude>io/veridia/elysiumkv/bench/**</testExclude>
+          </testExcludes>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration>
+          <argLine>${elysiumkv.surefire.args}</argLine>
+          <!-- Iterators and pins are single-threaded; so is the suite. -->
+          <forkCount>1</forkCount>
+          <reuseForks>true</reuseForks>
+          <systemPropertyVariables>
+            <!-- docker-java defaults to Docker API v1.32, and a current daemon
+                 refuses it: Docker Desktop 4.x reports a minimum of 1.40 and answers
+                 /v1.32/info with a 400 carrying an empty body. Testcontainers reads
+                 that as "could not find a valid Docker environment", which sends you
+                 looking for a socket that was never the problem.
+
+                 1.41 is Docker 20.10 (December 2020) — old enough to be safe, new
+                 enough to be accepted. Override with -Dapi.version=... on a daemon
+                 that needs something else. -->
+            <api.version>1.41</api.version>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+
+      <!-- Pinned like every other tool here (compiler, surefire, vcpkg, CMake, LocalStack). The
+           publish workflow calls `versions:set` to stamp a release tag, and an unpinned plugin
+           means that step resolves whatever is newest at release time — the one moment nobody
+           wants a surprise. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>versions-maven-plugin</artifactId>
+        <version>2.17.1</version>
+      </plugin>
+
+      <!-- Central requires a sources jar and a javadoc jar alongside the main artifact. Both are
+           attached on every build, not only on release, so a PR proves they can be produced rather
+           than discovering a javadoc error on release day. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.11.2</version>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <!-- The binding's docs are prose about behaviour, not a reference manual; doclint would
+               fail the build over missing @param tags on self-evident setters. -->
+          <additionalJOptions><additionalJOption>-Xdoclint:none</additionalJOption></additionalJOptions>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.9.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <!-- Publish without a manual step in the Central UI, and do not report success until
+               Central says it is published: a deploy that returns while validation is still
+               pending would let a failed release look green. -->
+          <autoPublish>true</autoPublish>
+          <waitUntil>published</waitUntil>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

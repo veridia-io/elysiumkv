@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "elysiumkv",
+  "description": "Embedded LSM key-value store",
+  "builtin-baseline": "39344dff01c5a5a0134caf2624cdd492f05d30ea",
+  "dependencies": [
+    "lz4",
+    "zstd"
+  ],
+  "features": {
+    "tests": {
+      "description": "Unit, differential, fault-injection and contract test suites",
+      "dependencies": [
+        "gtest"
+      ]
+    },
+    "bench": {
+      "description": "Google Benchmark micro-benchmarks",
+      "dependencies": [
+        "benchmark"
+      ]
+    },
+    "aws": {
+      "description": "S3BlobStore, S3ManifestCatalog and DynamoManifestCatalog",
+      "dependencies": [
+        {
+          "name": "aws-sdk-cpp",
+          "default-features": false,
+          "features": [
+            "dynamodb",
+            "s3"
+          ]
+        }
+      ]
+    }
+  }
+}

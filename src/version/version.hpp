@@ -1,0 +1,69 @@
+#ifndef ELYSIUMKV_VERSION_VERSION_HPP
+#define ELYSIUMKV_VERSION_VERSION_HPP
+
+#include "version/version_edit.hpp"
+
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace elysiumkv {
+
+/// ARCHITECTURE.md "Versions are immutable snapshots" — immutable after construction. Every mutation produces a *new* Version;
+/// nothing is ever edited in place, which is what lets an iterator hold one for
+/// its whole lifetime without a lock.
+class Version {
+public:
+    Version() = default;
+    Version(std::vector<std::vector<FileMetadata>> levels, uint64_t next_file_number,
+            std::map<int, std::string> compaction_pointers)
+        : levels_(std::move(levels)),
+          next_file_number_(next_file_number),
+          compaction_pointers_(std::move(compaction_pointers)) {}
+
+    const std::vector<std::vector<FileMetadata>>& levels() const { return levels_; }
+    size_t num_levels() const { return levels_.size(); }
+    const std::vector<FileMetadata>& files_at(int level) const;
+
+    uint64_t next_file_number() const { return next_file_number_; }
+    const std::map<int, std::string>& compaction_pointers() const { return compaction_pointers_; }
+
+    uint64_t total_bytes(int level) const;
+    size_t file_count(int level) const;
+    /// Oldest write held anywhere at this level, or 0 when the level is empty.
+    uint64_t oldest_write_time_ms(int level) const;
+
+    /// Files whose `[smallest, largest]` intersects the **half-open** interval
+    /// `[lower, upper)`; an empty `upper` means "to the end of the keyspace".
+    /// This is the *read* shape — ARCHITECTURE.md "Absence is an answer, not an error" makes iterator bounds half-open.
+    std::vector<FileMetadata> overlapping_half_open(int level, Slice lower, Slice upper) const;
+
+    /// Files whose `[smallest, largest]` intersects the **closed** interval
+    /// `[first, last]`. This is the *compaction* shape, and the distinction is
+    /// load-bearing rather than pedantic: a file's `smallest_key..largest_key`
+    /// includes both ends, so asking the half-open question about it silently
+    /// misses an output-level file that begins exactly where the input ends.
+    /// The compaction then writes its output beside the file it should have
+    /// merged, leaving two files covering that key at a level required to be
+    /// non-overlapping — and a committed write reverts to its previous value.
+    /// There is no "unbounded" sentinel here: an empty key is a key, not a flag.
+    std::vector<FileMetadata> overlapping_inclusive(int level, Slice first, Slice last) const;
+
+    /// Every file in the version, in level order.
+    std::vector<FileMetadata> all_files() const;
+
+    /// Applies an edit and returns the resulting version. L1+ files are kept
+    /// sorted by smallest key (they are non-overlapping); L0 by descending file
+    /// number, which is the recency order the merging iterator relies on (ARCHITECTURE.md "Positional recency").
+    static std::shared_ptr<const Version> apply(const Version& base, const VersionEdit& edit);
+
+private:
+    std::vector<std::vector<FileMetadata>> levels_;
+    uint64_t next_file_number_ = 1;
+    std::map<int, std::string> compaction_pointers_;
+};
+
+}  // namespace elysiumkv
+
+#endif  // ELYSIUMKV_VERSION_VERSION_HPP
