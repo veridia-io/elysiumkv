@@ -52,7 +52,7 @@ std::string take_string(const std::string& bytes, size_t& offset) {
     return out;
 }
 
-// --- §5, footer --------------------------------------------------------------
+// --- FORMAT.md §5, footer --------------------------------------------------------------
 
 TEST(WireFormat, FooterFieldsSitAtTheDocumentedOffsets) {
     Footer footer;
@@ -101,7 +101,7 @@ TEST(WireFormat, TheInvariantTrailerIsTheLastTwelveBytesAndIsReadableAlone) {
     EXPECT_EQ(read_u64(trailer, 4), Footer::kMagic);
 }
 
-// --- §2, block framing -------------------------------------------------------
+// --- FORMAT.md §2, block framing -------------------------------------------------------
 
 TEST(WireFormat, BlockFramingIsPayloadThenLengthThenCodecThenCrc) {
     const std::string payload = "the-block-payload";
@@ -141,7 +141,7 @@ TEST(WireFormat, ABlockThatCompressionDoesNotShrinkIsStoredRawWithCodecNone) {
     EXPECT_EQ(read_u32(framed, covered - 5), payload.size());
 }
 
-// --- §3, block content -------------------------------------------------------
+// --- FORMAT.md §3, block content -------------------------------------------------------
 
 TEST(WireFormat, EntryLayoutIsSharedUnsharedTypeLengthKeyValue) {
     BlockBuilder builder(16);
@@ -204,7 +204,7 @@ TEST(WireFormat, ARestartPointStoresTheFullKey) {
     EXPECT_EQ(take_varint(content, at), 5u) << "the whole key follows";
 }
 
-// --- §4, filter block --------------------------------------------------------
+// --- FORMAT.md §4, filter block --------------------------------------------------------
 
 TEST(WireFormat, FilterTrailerIsBlockCountThenProbeCount) {
     BloomBuilder builder(10, 6);
@@ -231,7 +231,7 @@ TEST(WireFormat, AMalformedFilterIsTreatedAsMayContain) {
     EXPECT_TRUE(bloom_may_contain(Slice::from(zero_blocks), Slice::from(std::string("k"))));
 }
 
-// --- §6, manifest records ----------------------------------------------------
+// --- FORMAT.md §6, manifest records ----------------------------------------------------
 
 TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     FileMetadata file;
@@ -313,7 +313,7 @@ TEST(WireFormat, ManifestSnapshotIsZstdFramedAndRoundTrips) {
     EXPECT_EQ(decoded->files[7].smallest_key, snapshot.files[7].smallest_key);
 }
 
-// --- §8, entry limits --------------------------------------------------------
+// --- FORMAT.md §8, entry limits --------------------------------------------------------
 
 TEST(WireFormat, DocumentedEntryLimits) {
     EXPECT_EQ(kMaxValueBytes, 1u << 20);

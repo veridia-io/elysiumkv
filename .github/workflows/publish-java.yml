@@ -95,7 +95,7 @@ jobs:
           echo "vcpkg pinned to $BASELINE"
 
       - name: Cache vcpkg binary archives
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/vcpkg/archives
           key: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
@@ -109,7 +109,7 @@ jobs:
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
       # CMake builds the glue only when it finds a JDK, so this comes before configuring.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '11'
@@ -127,7 +127,7 @@ jobs:
           ELYSIUMKV_VERSION: ${{ needs.version.outputs.version }}
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: native-${{ matrix.platform }}
           path: build/release/${{ matrix.library }}
@@ -147,7 +147,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           # ARCHITECTURE.md "The ABI boundary" — the declared floor. Compiling the released artifact with it is what keeps the
@@ -163,7 +163,7 @@ jobs:
           gpg-private-key: ${{ secrets.MAVEN_CENTRAL_GPG_PRIV_KEY }}
 
       - name: Collect the native libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: bindings/java/native-staging
           pattern: native-*
