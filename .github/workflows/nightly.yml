@@ -1,0 +1,66 @@
+name: Nightly full differential
+
+# Split out of "Build and Test" so a nightly failure is distinguishable at a glance and can be
+# re-run on its own. It is also the only job here that takes hours, which makes it the one you
+# want to trigger by hand after a risky change — hence workflow_dispatch.
+on:
+  schedule:
+    # 03:00 UTC. The full ARCHITECTURE.md "The differential oracle" profile: 100 seeds per config.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  VCPKG_DISABLE_METRICS: '1'
+
+jobs:
+  differential-full:
+    name: full differential (1M ops x 100 seeds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # Same CMake pin as the build job — see the comment there.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          CMAKE_DIR=cmake-4.4.0-linux-x86_64
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+      # **Derived, never written down here.** `vcpkg.json`'s `builtin-baseline` already pins the
+      # port versions, and the checked-out revision has to agree with it. Two files holding one
+      # hash is a bug generator. Must precede the cache step: that step's key is an expression,
+      # evaluated before it runs, so the value has to be in the environment by then.
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+          echo "vcpkg pinned to $BASELINE"
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      # A ctest TIMEOUT *property* beats `ctest --timeout`, so the longer budget this job
+      # needs has to be set at configure time. One hour per test, against a measured ~6.5
+      # minutes for the heaviest config on a developer machine, leaves ample room for a slower
+      # runner.
+      - run: |
+          cmake --preset release -DELYSIUMKV_TEST_TIMEOUT=3600
+          cmake --build --preset release
+      # ARCHITECTURE.md "The differential oracle" — the synchronous pass is gating and shrinkable; the threaded pass samples
+      # interleavings. Neither covers the other.
+      #
+      # `--parallel` is the parallelism that matters here: each differential configuration is
+      # one ctest test, so this is per-config parallelism without duplicating the config list
+      # into this file, where it would drift from the C++ one. `--output-on-failure` is what
+      # names the failing config.
+      - run: |
+          ctest --preset release -R 'Diff|Fault|KillPoint|Soak|Migration' \
+            --parallel "$(getconf _NPROCESSORS_ONLN)" --output-on-failure
+        env:
+          ELYSIUMKV_DIFF_FULL: '1'
+          ELYSIUMKV_SOAK_OPS: '2000000'

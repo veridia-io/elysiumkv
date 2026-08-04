@@ -1,16 +1,11 @@
-name: ci
+name: Build and Test
 
 on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    # Nightly: the full ARCHITECTURE.md "The differential oracle" differential profile (1M ops x 100 seeds).
-    - cron: '0 3 * * *'
 
 env:
-  # Must match builtin-baseline in vcpkg.json.
-  VCPKG_COMMIT: 39344dff01c5a5a0134caf2624cdd492f05d30ea
   VCPKG_DISABLE_METRICS: '1'
 
 jobs:
@@ -64,6 +59,16 @@ jobs:
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja
+
+      # **Derived, never written down here.** `vcpkg.json`'s `builtin-baseline` already pins the
+      # port versions, and the checked-out revision has to agree with it. Two files holding one
+      # hash is a bug generator. Must precede the cache step: that step's key is an expression,
+      # evaluated before it runs, so the value has to be in the environment by then.
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+          echo "vcpkg pinned to $BASELINE"
 
       - name: Cache vcpkg binary archives
         uses: actions/cache@v6
@@ -155,6 +160,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ninja
 
+      # **Derived, never written down here.** `vcpkg.json`'s `builtin-baseline` already pins the
+      # port versions, and the checked-out revision has to agree with it. Two files holding one
+      # hash is a bug generator. Must precede the cache step: that step's key is an expression,
+      # evaluated before it runs, so the value has to be in the environment by then.
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+          echo "vcpkg pinned to $BASELINE"
+
       - name: Cache vcpkg binary archives
         uses: actions/cache@v4
         with:
@@ -190,7 +205,16 @@ jobs:
       # leave a jar that works on the build machine and nowhere else.
       - name: Check the jar carries a native library for this platform
         run: |
-          jar tf bindings/java/target/elysiumkv-*.jar | grep -E 'native/.*/libelysiumkv_jni' \
+          # Select the main jar explicitly. `elysiumkv-*.jar` used to match one file; since the pom
+          # attaches sources and javadoc jars for Maven Central it matches three, and `jar t` treats
+          # arguments after the first as *entry names to look up inside it* — so the glob silently
+          # listed nothing and this check failed on every run.
+          JARS=$(ls bindings/java/target/*.jar 2>/dev/null | grep -vE -- '-(sources|javadoc)\.jar$' || true)
+          COUNT=$(printf '%s' "$JARS" | grep -c . || true)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "expected exactly one main jar, found $COUNT:" >&2; echo "$JARS" >&2; exit 1
+          fi
+          jar tf "$JARS" | grep -E 'native/.*/libelysiumkv_jni' \
             || { echo "the jar has no native library for this platform" >&2; exit 1; }
 
   # ARCHITECTURE.md "The ABI boundary", ARCHITECTURE.md "Ownership is one compare-and-set" — the remote implementations, against LocalStack. One job, on
@@ -229,6 +253,16 @@ jobs:
             "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_DIR}.tar.gz" \
             | sudo tar xz -C /opt
           echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      # **Derived, never written down here.** `vcpkg.json`'s `builtin-baseline` already pins the
+      # port versions, and the checked-out revision has to agree with it. Two files holding one
+      # hash is a bug generator. Must precede the cache step: that step's key is an expression,
+      # evaluated before it runs, so the value has to be in the environment by then.
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+          echo "vcpkg pinned to $BASELINE"
 
       - name: Cache vcpkg binary archives
         uses: actions/cache@v4
@@ -333,6 +367,16 @@ jobs:
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja
+      # **Derived, never written down here.** `vcpkg.json`'s `builtin-baseline` already pins the
+      # port versions, and the checked-out revision has to agree with it. Two files holding one
+      # hash is a bug generator. Must precede the cache step: that step's key is an expression,
+      # evaluated before it runs, so the value has to be in the environment by then.
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+          echo "vcpkg pinned to $BASELINE"
+
       - name: Set up vcpkg
         run: |
           git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
@@ -386,46 +430,3 @@ jobs:
           path: |
             bench-results.json
             bench/baselines/
-
-  differential-full:
-    name: full differential (1M ops x 100 seeds)
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-      # Same CMake pin as the build job — see the comment there.
-      - run: |
-          sudo apt-get update && sudo apt-get install -y ninja-build
-          CMAKE_DIR=cmake-4.4.0-linux-x86_64
-          curl -fsSL --retry 3 \
-            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
-            | sudo tar xz -C /opt
-          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
-      - name: Set up vcpkg
-        run: |
-          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
-          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
-          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
-      # A ctest TIMEOUT *property* beats `ctest --timeout`, so the longer budget this job
-      # needs has to be set at configure time. One hour per test, against a measured ~6.5
-      # minutes for the heaviest config on a developer machine, leaves ample room for a slower
-      # runner.
-      - run: |
-          cmake --preset release -DELYSIUMKV_TEST_TIMEOUT=3600
-          cmake --build --preset release
-      # ARCHITECTURE.md "The differential oracle" — the synchronous pass is gating and shrinkable; the threaded pass samples
-      # interleavings. Neither covers the other.
-      #
-      # `--parallel` is the parallelism that matters here: each differential configuration is
-      # one ctest test, so this is per-config parallelism without duplicating the config list
-      # into this file, where it would drift from the C++ one. `--output-on-failure` is what
-      # names the failing config.
-      - run: |
-          ctest --preset release -R 'Diff|Fault|KillPoint|Soak|Migration' \
-            --parallel "$(getconf _NPROCESSORS_ONLN)" --output-on-failure
-        env:
-          ELYSIUMKV_DIFF_FULL: '1'
-          ELYSIUMKV_SOAK_OPS: '2000000'
