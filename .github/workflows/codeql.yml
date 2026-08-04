@@ -1,10 +1,10 @@
 name: CodeQL
 
-# **Advanced setup, because the engine is compiled.** GitHub's default setup can only analyze
-# languages that need no build, which is why it found `bench/check_regression.py` and nothing else —
-# the C++ that is the entire product went unanalysed. CodeQL has to observe a real compilation to
-# see C++ at all, and autobuild cannot drive this project: it needs a pinned CMake, a bootstrapped
-# vcpkg and a toolchain file before a single file compiles.
+# **Advanced setup, because the engine is compiled.** CodeQL has to observe a real compilation to
+# see C++ at all, and default setup can only reach compiled languages through autobuild — which
+# cannot drive this project: it needs a pinned CMake, a bootstrapped vcpkg and a toolchain file
+# before a single file compiles. Here the build is explicit, so what CodeQL analyzes is the same
+# code CI builds.
 #
 # Default setup and this workflow are mutually exclusive. Switch the repository to Advanced under
 # Settings -> Code security -> Code scanning, or the uploads from here are rejected.
@@ -39,7 +39,7 @@ jobs:
       # Must come before the build: CodeQL instruments the compiler, so anything compiled earlier is
       # invisible to it.
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
 
@@ -54,13 +54,37 @@ jobs:
             | sudo tar xz -C /opt
           echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
 
-      # Derived from vcpkg.json rather than written here, as in the other workflows.
-      - name: Resolve the vcpkg pin
+      # Derived from vcpkg.json rather than written here, as in the other workflows. Also decides
+      # the scan scope, because the cache key below is an expression and needs it beforehand.
+      - name: Resolve the vcpkg pin and scan scope
         if: matrix.language == 'c-cpp'
         run: |
           BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
           echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
           echo "vcpkg pinned to $BASELINE"
+
+          # The S3 and DynamoDB implementations are the most security-relevant code in the
+          # repository — they parse remote responses and carry credentials — so they are worth
+          # scanning. Building the AWS SDK costs far more than the engine does, so they go in the
+          # weekly run rather than on every push and pull request.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "SCAN_AWS=ON" >> "$GITHUB_ENV"
+          else
+            echo "SCAN_AWS=OFF" >> "$GITHUB_ENV"
+          fi
+
+      # **Third-party binaries only.** This caches what vcpkg built for zstd, lz4 and — on the
+      # weekly run — the AWS SDK. It never caches our objects, so every file of ours still compiles
+      # under CodeQL's tracer; without it the weekly AWS scan would rebuild the SDK from source
+      # every time. The scope is part of the key because the two feature sets install different
+      # binaries.
+      - name: Cache vcpkg binary archives
+        if: matrix.language == 'c-cpp'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-codeql-aws${{ env.SCAN_AWS }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-codeql-aws${{ env.SCAN_AWS }}-${{ env.VCPKG_COMMIT }}-
 
       - name: Set up vcpkg
         if: matrix.language == 'c-cpp'
@@ -71,24 +95,26 @@ jobs:
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
       # A JDK is needed even for the C++ language: CMake builds the JNI glue only when it finds one,
-      # and that glue is C++ worth analysing.
-      - uses: actions/setup-java@v4
+      # and that glue is C++ worth analyzing.
+      - uses: actions/setup-java@v5
         if: matrix.language == 'c-cpp'
         with:
           distribution: temurin
           java-version: '11'
 
-      # No build cache, deliberately: a cache hit would skip compilation, and CodeQL would then see
-      # nothing. `release` rather than a sanitizer preset — the sanitizers instrument the runtime,
-      # which does nothing for static analysis and only slows the build.
+      # Our own objects are never cached, deliberately: a cache hit would skip compilation and
+      # CodeQL would analyze nothing while still reporting success. `release` rather than a
+      # sanitizer preset — sanitizers instrument the runtime, which does nothing for static
+      # analyzis and only slows the build.
       - name: Build the engine
         if: matrix.language == 'c-cpp'
         run: |
-          cmake --preset release
+          echo "ELYSIUMKV_BUILD_AWS=$SCAN_AWS"
+          cmake --preset release -DELYSIUMKV_BUILD_AWS="$SCAN_AWS"
           cmake --build --preset release
 
       # --- Java ---------------------------------------------------------------------------------
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         if: matrix.language == 'java-kotlin'
         with:
           distribution: temurin
@@ -101,8 +127,8 @@ jobs:
         if: matrix.language == 'java-kotlin'
         run: mvn -B -f bindings/java/pom.xml package -DskipTests
 
-      # --- analysis -----------------------------------------------------------------------------
-      - name: Analyse
-        uses: github/codeql-action/analyze@v3
+      # --- analyzis -----------------------------------------------------------------------------
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
         with:
           category: /language:${{ matrix.language }}
