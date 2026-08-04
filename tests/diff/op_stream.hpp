@@ -9,8 +9,8 @@
 namespace elysiumkv::test {
 
 /// ARCHITECTURE.md "The differential oracle" — the op stream is a **flat list**, deliberately. Shrinking is
-/// straightforward while it is one, and awkward once it has structure; the spec
-/// says to build the shrinker now for exactly that reason.
+/// straightforward while it is one, and awkward once it has structure, which is
+/// why the shrinker exists from the start rather than being added later.
 struct DiffOp {
     enum class Kind {
         Put,

@@ -175,8 +175,8 @@ private:
     /// died before its edit was durable.
     void collect_orphans(const std::map<std::string, std::vector<std::string>>& listings);
     Status fail_terminal(Status status, std::string detail);
-    /// ARCHITECTURE.md "A process-wide memory budget" — sheds memory when the shared budget is exceeded, in the order the spec
-    /// gives: evict the block cache, then flush memtables, then let the caller stall.
+    /// ARCHITECTURE.md "A process-wide memory budget" — sheds memory when the shared budget is exceeded, in that
+    /// order: evict the block cache, then flush memtables, then let the caller stall.
     /// Returns whether the budget is still over after shedding.
     bool shed_if_over_budget();
     std::shared_ptr<SkiplistMemtable> new_memtable();

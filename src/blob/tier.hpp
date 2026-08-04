@@ -25,7 +25,7 @@ struct ResolvedTiers {
     /// not in the configuration at all.
     int tier_of_store(const std::string& store_id) const;
     /// A store may be discarded only if *every* tier naming it is Transient.
-    /// The spec no longer forbids one store backing two durabilities, so the
+    /// Nothing forbids one store from backing two durabilities, so the
     /// ambiguity is resolved toward the non-destructive reading (ARCHITECTURE.md "A tier is not a level").
     bool store_is_discardable(const std::string& store_id) const;
 };
