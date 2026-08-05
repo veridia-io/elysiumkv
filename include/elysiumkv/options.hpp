@@ -119,6 +119,24 @@ struct Options {
     /// files, and small files mean more compaction to merge them away. Pick it from
     /// how much recent data you are willing to lose, not from a latency target.
     std::optional<Duration> flush_interval;
+
+    /// How often the maintenance coordinator reconciles: it evaluates every background
+    /// policy — flush, compaction, migration off a transient tier, capacity eviction,
+    /// obsolete-object collection — against current state and the clock, and dispatches what
+    /// is due.
+    ///
+    /// **It exists because a policy driven by time needs a trigger that is not a write.** Every
+    /// age bound in this engine used to be evaluated only when something arrived, so a store
+    /// that went quiet with a file sitting on a transient tier left it there indefinitely. The
+    /// coordinator is what asks.
+    ///
+    /// Short and boring on purpose. It is not a latency knob: the interval is the smallest term
+    /// in the exposure window — `max_age + interval + queueing behind an in-flight compaction +
+    /// the migration itself` — so spending accuracy here buys nothing. An idle tick is two
+    /// comparisons and no version scan, which is what makes a one-second default affordable
+    /// across dozens of instances in one process.
+    Duration maintenance_interval{1000};
+
     size_t block_bytes = 4096;
     int restart_interval = 16;
     int bloom_bits_per_key = 10;

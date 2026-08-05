@@ -55,6 +55,7 @@ elysiumkv_status to_c(Status status) {
         case Status::Config: return ELYSIUMKV_CONFIG;
         case Status::Io: return ELYSIUMKV_IO;
         case Status::Stalled: return ELYSIUMKV_STALLED;
+        case Status::Unsupported: return ELYSIUMKV_UNSUPPORTED;
     }
     return ELYSIUMKV_UNUSABLE;
 }
@@ -182,6 +183,7 @@ private:
             case ELYSIUMKV_CONFIG: return Status::Config;
             case ELYSIUMKV_IO: return Status::Io;
             case ELYSIUMKV_STALLED: return Status::Stalled;
+            case ELYSIUMKV_UNSUPPORTED: return Status::Unsupported;
         }
         // An unknown code is emphatically not absence: treat it as "could not
         // determine", which is the non-destructive reading (ARCHITECTURE.md - Immutable named objects).
@@ -316,7 +318,8 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
                                          size_t max_compaction_bytes,
                                          int manifest_edits_per_generation, int paranoid_checks,
                                          int block_on_stall, int reclaim_orphans_at_open,
-                                         uint64_t flush_interval_ms) {
+                                         uint64_t flush_interval_ms,
+                                         uint64_t maintenance_interval_ms) {
     return guard([&]() -> elysiumkv_status {
         if (options == nullptr) {
             return fail(Status::Config, "elysiumkv_options_configure: null options");
@@ -342,6 +345,10 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
         if (block_on_stall >= 0) options->options.block_on_stall = block_on_stall > 0;
         if (flush_interval_ms > 0) {
             options->options.flush_interval = std::chrono::milliseconds(flush_interval_ms);
+        }
+        if (maintenance_interval_ms > 0) {
+            options->options.maintenance_interval =
+                std::chrono::milliseconds(maintenance_interval_ms);
         }
         if (reclaim_orphans_at_open >= 0) {
             options->options.reclaim_orphans_at_open = reclaim_orphans_at_open > 0;
@@ -1070,7 +1077,11 @@ void elysiumkv_iter_destroy(elysiumkv_iter* iter) {
 namespace {
 
 constexpr uint32_t kStatsFormatVersion = 1;
-constexpr uint32_t kStatsHeaderBytes = 192;  // 32 fixed + 20 u64 scalars
+// 32 fixed + 22 u64 scalars + the watermark presence byte and its padding. **No version bump:**
+// the header declares its own length, so a decoder that starts records at `header_bytes` skips
+// what it does not recognise — which is the property that made the previous seven appended
+// scalars a non-event too.
+constexpr uint32_t kStatsHeaderBytes = 216;
 constexpr uint32_t kStatsLevelRecordBytes = 32;
 constexpr uint32_t kStatsTierRecordBytes = 32;
 
@@ -1138,6 +1149,11 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.u64(stats.memory_budget_used);
     out.u64(stats.memory_budget_total);
     out.u64(stats.budget_sheds);
+    out.u64(stats.flushes);
+    // The live frontier, and its presence byte beside it because zero is a valid position.
+    out.u64(stats.durable_watermark.value_or(0));
+    out.u8(stats.durable_watermark.has_value() ? 1u : 0u);
+    out.pad(7);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);
@@ -1183,6 +1199,34 @@ elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db* db, uint8_t* buf, 
 
 void elysiumkv_mark_recovery_complete(elysiumkv_db* db) {
     if (db != nullptr) db->db->mark_recovery_complete();
+}
+
+// --- watermark ----------------------------------------------------------------
+
+elysiumkv_status elysiumkv_set_watermark(elysiumkv_db* db, uint64_t position) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr) return fail(Status::Config, "elysiumkv_set_watermark: null db");
+        const Status status = db->db->set_watermark(position);
+        if (status == Status::Config) {
+            return fail(status, "elysiumkv_set_watermark: watermarks must be non-decreasing");
+        }
+        return to_c(status);
+    });
+}
+
+elysiumkv_status elysiumkv_watermark(elysiumkv_db* db, uint64_t* out, bool* present) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr || out == nullptr || present == nullptr) {
+            return fail(Status::Config, "elysiumkv_watermark: null db, out or present");
+        }
+        const std::optional<uint64_t> watermark = db->db->recovered_watermark();
+        *present = watermark.has_value();
+        // Left untouched when absent: a caller that ignores `present` must not read a plausible
+        // zero out of `out`, because zero is a valid position and the two are not the same
+        // answer.
+        if (watermark.has_value()) *out = *watermark;
+        return ELYSIUMKV_OK;
+    });
 }
 
 }  // extern "C"

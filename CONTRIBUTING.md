@@ -55,6 +55,32 @@ for a PR:
   throughput is recorded but never a pass/fail condition, because a shared runner fails for reasons
   unrelated to your change.
 
+## Two rules about background work
+
+Both come from the same defect, found three times.
+
+> **A policy driven by time needs a trigger that is not a write.** If a decision reads
+> `options_.clock()`, it needs a wake-up that does not depend on input arriving.
+
+The three instances were the flush interval, age-driven migration between durable tiers, and the L0
+escape off a mismatched tier. Each failed identically: the only thing that could have noticed was the
+thing that had stopped happening, so a store that went quiet stayed wrong indefinitely. Generalised:
+any policy driven by a quantity that changes without input needs a trigger that is not input.
+
+> **A maintenance predicate must be cheap enough to evaluate before the gate, or must declare every
+> state transition that invalidates it.** The reconcile loop skips evaluation when nothing relevant
+> has changed; a predicate that does not participate in that judgement can be skipped forever.
+
+The gate that makes an idle tick free is itself a push dependency — much narrower than the one it
+replaced, checked in one place rather than at scattered call sites, but real. **Wake notifications
+are optional; epoch invalidation is not.** The periodic gate bypass bounds the damage from getting
+this wrong to *late* rather than *never*; the rule is what stops it happening. What neither covers is
+a task nobody wrote a predicate for.
+
+`ConvergenceTest` catches instances after the fact — *placement converges when idle* — with one
+negative control per constituent, because a single control that removed the whole timer would be
+satisfied by any partial implementation. The rules are what stop the next one being written.
+
 ## Formats are frozen
 
 The SST layout, the manifest records and the stats buffer are compatibility contracts, documented in

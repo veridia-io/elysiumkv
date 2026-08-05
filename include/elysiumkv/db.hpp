@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -164,6 +165,46 @@ public:
     /// *finish*: a key range receiving no writes is never swept, and
     /// `LevelStats::files_stale_codec` reports how much remains.
     virtual Status compact_level(int level) = 0;
+
+    /// Records that every write completed so far is at a position at or before `position` in
+    /// whatever log the embedder is replaying — a changelog offset, typically. The engine orders
+    /// it, carries it with the data, and hands it back at the next open; it never invents,
+    /// interpolates or interprets one.
+    ///
+    /// **It is a position, not a time**, and unrelated to `min_write_time_ms` or a tier's
+    /// `max_age`, which are wall-clock quantities driving placement. Nothing here relates them.
+    ///
+    /// Cheap and non-blocking: one store under the lock the write path already takes. It forces
+    /// no flush and writes no manifest, so it can be called as often as the embedder commits.
+    /// The value becomes durable when the memtable holding it is flushed, which is why
+    /// `flush()` promotes it immediately and why `Options::flush_interval` is what bounds the lag
+    /// on a quiet store.
+    ///
+    /// Positions must be **non-decreasing**. A decreasing one is a caller bug and is refused with
+    /// `Status::Config` rather than clamped, because clamping would hide it.
+    ///
+    /// **This is a resume point, not a durability improvement.** There is no write-ahead log, so
+    /// an unflushed memtable is still lost on a crash; the watermark tells you where to resume,
+    /// it does not reduce what you lost.
+    virtual Status set_watermark(uint64_t position) = 0;
+
+    /// The last position whose effect on the store is known to have survived, as established at
+    /// **open** — a fixed property of the recovered state, not a live value. `Stats` carries the
+    /// live one, under a different name, precisely so this one's meaning cannot change after the
+    /// first write.
+    ///
+    /// The guarantee: replaying only the positions **after** the returned value onto the
+    /// recovered database yields the same logical key–value state as replaying the entire log.
+    /// Exclusive, not inclusive — `80` means resume at `81`, and the boundary is exactly where
+    /// the proof is tight. Stated as state equivalence rather than record retention because
+    /// compaction drops superseded values and dead tombstones, so no physical-retention claim
+    /// would be true; state equivalence is what a changelog consumer actually needs.
+    ///
+    /// `nullopt` means nothing can be certified and the embedder should replay from the
+    /// beginning: either no watermark was ever set, or a lost transient store held data that
+    /// predates the first one. Distinct from zero, which is a valid position.
+    virtual std::optional<uint64_t> recovered_watermark() const = 0;
+
     virtual Stats stats() const = 0;
     virtual void mark_recovery_complete() = 0;
 

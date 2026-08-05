@@ -12,12 +12,19 @@ Current versions:
 | Format | Version | Constant |
 | --- | --- | --- |
 | SST file | 1 | `Footer::kFormatVersion1` |
-| Manifest edit | 1 | `kEditFormatVersion` |
-| Manifest snapshot | 1 | `kSnapshotFormatVersion` |
+| Manifest edit | 2 | `kEditFormatVersion` |
+| Manifest snapshot | 2 | `kSnapshotFormatVersion` |
 | Stats buffer | 1 | `kStatsFormatVersion` |
 
 Conventions throughout: **little-endian** fixed-width integers; `varint32`/`varint64` are
 LEB128-style, 7 bits per byte, low group first, high bit set to continue. `‖` means concatenation.
+
+**Manifest version 2 is a clean break: there is no dual-read path.** A manifest written at version 1
+is refused with `Status::Unsupported` — not `Status::Corrupt`, which would tell an operator their
+bytes are damaged when they are merely older, and not read-with-defaults, which would mean carrying
+two shapes forever. [CONTRIBUTING.md](CONTRIBUTING.md) asks that a format change teach the reader
+both shapes; this is a deliberate exception for a `0.x` engine, stated here rather than left
+implicit. **A store written by an earlier version has to be deleted and rebuilt from its log.**
 
 ---
 
@@ -167,11 +174,21 @@ num_entries        varint64
 num_tombstones     varint64
 compression        varint64   0 = none, 1 = lz4, 2 = zstd
 min_write_time_ms  varint64
+watermark_flags    varint64   bit 0 = low present, bit 1 = high present; other values invalid
+watermark_low      varint64   zero when bit 0 is clear
+watermark_high     varint64   zero when bit 1 is clear
 ```
 
 `store_id` is persisted rather than derived: tier and level are independent, so a file's store cannot
 be computed from its level. `min_write_time_ms` is carried over unchanged by migration, so placement
 stays monotone across a renumber.
+
+The **watermark interval** is the embedder's durability frontier for this file's data: `low` is a
+strict lower bound on the positions it contains, `high` an upper bound. Presence is encoded because
+zero is a valid position. `low` present with `high` absent is invalid — a `low` is only ever a
+previously established `high` — and so is `low > high`; both are rejected at decode. A flushed file
+takes its memtable's interval, a compaction output takes `min` of the lows and `max` of the highs,
+and a migration carries it unchanged.
 
 **Compaction pointers** are `varint64 count ‖ (varint64 level ‖ string key)*`.
 
@@ -180,7 +197,7 @@ stays monotone across a renumber.
 Framed with `compression_type = 0`.
 
 ```
-format_version     varint32   1
+format_version     varint32   2
 next_file_number   varint64
 added_count        varint64
 added              file entry × added_count
@@ -194,7 +211,7 @@ compaction_pointers
 Framed with **zstd**, because a snapshot is always read whole.
 
 ```
-format_version     varint32   1
+format_version     varint32   2
 next_file_number   varint64
 file_count         varint64
 files              file entry × file_count
@@ -208,25 +225,33 @@ size of each record type, so a decoder built against an older layout locates the
 and skips fields it does not know. **Locate records by the declared sizes, never by summing the
 fields you happen to know.**
 
-Header — `kStatsHeaderBytes = 192`:
+Header — `kStatsHeaderBytes = 216`:
 
 | Offset | Field | Type |
 | --- | --- | --- |
 | 0 | `format_version` | uint32 (1) |
-| 4 | `header_bytes` | uint32 (192) |
+| 4 | `header_bytes` | uint32 (216) |
 | 8 | `level_record_bytes` | uint32 (32) |
 | 12 | `tier_record_bytes` | uint32 (32) |
 | 16 | `level_count` | uint32 |
 | 20 | `tier_count` | uint32 |
 | 24 | `requires_recovery` | uint8 (0/1) |
 | 25 | *padding* | 7 bytes, zero |
-| 32 | 20 × uint64 scalars | see below |
+| 32 | 22 × uint64 scalars | see below |
+| 208 | `watermark_present` | uint8 (0/1) |
+| 209 | *padding* | 7 bytes, zero |
 
-The 20 scalars, in order from offset 32: `memtable_bytes`, `memtable_age_ms`, `compactions`,
+The 22 scalars, in order from offset 32: `memtable_bytes`, `memtable_age_ms`, `compactions`,
 `compaction_bytes_read`, `compaction_bytes_written`, `migrations`, `migration_bytes`,
 `stalled_total_ms`, `stall_count`, `block_cache_hits`, `block_cache_misses`, `block_cache_bytes`,
 `pins_outstanding`, `reader_cache_hits`, `reader_cache_misses`, `reader_cache_bytes`, `open_readers`,
-`memory_budget_used`, `memory_budget_total`, `budget_sheds`.
+`memory_budget_used`, `memory_budget_total`, `budget_sheds`, `flushes` (offset 192),
+`durable_watermark` (offset 200).
+
+`flushes` and `durable_watermark` were **appended without a version bump**, which is what the
+self-describing header is for: a decoder that locates records at `header_bytes` skips fields it does
+not know, and seven earlier scalars arrived the same way. `watermark_present` is 0 when no watermark
+has been set — zero is a valid position, so an exporter omits the series rather than publishing zero.
 
 Then `level_count` level records at offset `header_bytes`, then `tier_count` tier records.
 

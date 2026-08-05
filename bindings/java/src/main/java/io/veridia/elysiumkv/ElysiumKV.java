@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.Set;
 
 /**
@@ -226,6 +227,52 @@ public final class ElysiumKV implements AutoCloseable {
     /** Clears {@code requiresRecovery} after a discard. The only way to (ARCHITECTURE.md "A tier is not a level"). */
     public void markRecoveryComplete() {
         Native.markRecoveryComplete(handle());
+    }
+
+    // --- watermark -----------------------------------------------------------
+
+    /**
+     * Records that every write completed so far is at a position at or before {@code position} in
+     * whatever log this store is replaying — a changelog offset, typically. The engine orders it,
+     * carries it with the data and hands it back at the next open; it never invents, interpolates
+     * or interprets one.
+     *
+     * <p>It is a <em>position</em>, not a time, and unrelated to a tier's {@code maxAge}.
+     * Positions must be non-decreasing; a decreasing one raises {@link ConfigException} rather
+     * than being clamped, because clamping would hide a replay that went backwards.
+     *
+     * <p>Cheap and non-blocking: it forces no flush and writes no manifest, so it can be called
+     * as often as the caller commits. The value becomes durable when the memtable holding it is
+     * flushed, which is why {@link #flush()} promotes it immediately and why
+     * {@code flushIntervalMs} is what bounds the lag on a quiet partition.
+     *
+     * <p>Together with {@link #flush()} this is the whole of a KIP-1035 store-managed offset:
+     * {@code commit(offsets)} is {@code setWatermark(offset)} then {@code flush()}, and
+     * {@code committedOffset()} is {@link #recoveredWatermark()}.
+     */
+    public void setWatermark(long position) {
+        Native.setWatermark(handle(), position);
+    }
+
+    /**
+     * The last position whose effect on this store is known to have survived, as established at
+     * <em>open</em>. Replaying only the positions <strong>after</strong> it yields the same
+     * logical key-value state as replaying the entire log — exclusive, so {@code 80} means resume
+     * at {@code 81}.
+     *
+     * <p>Fixed at open and never changes. The <em>live</em> frontier is
+     * {@link ElysiumKVStats#durableWatermark()}, under a different name so that this one's meaning
+     * cannot change after the first write.
+     *
+     * <p>Empty when nothing can be certified — no watermark was ever set, or a lost transient
+     * store held data predating the first one — and the caller should replay from the beginning.
+     * Distinct from a watermark of zero, which is a valid position.
+     *
+     * <p>A restore must use this value and not one that has been through a metrics pipeline.
+     */
+    public OptionalLong recoveredWatermark() {
+        long value = Native.watermark(handle());
+        return value < 0 ? OptionalLong.empty() : OptionalLong.of(value);
     }
 
     // --- lifecycle -----------------------------------------------------------

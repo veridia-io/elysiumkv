@@ -90,6 +90,21 @@ uint64_t Compaction::min_write_time_ms() const {
     return oldest;
 }
 
+WatermarkInterval Compaction::watermark() const {
+    const std::vector<FileMetadata> files = all_inputs();
+    WatermarkInterval merged;
+    bool first = true;
+    for (const FileMetadata& file : files) {
+        if (first) {
+            merged = file.watermark;
+            first = false;
+        } else {
+            merged.merge(file.watermark);
+        }
+    }
+    return merged;
+}
+
 uint64_t Compaction::input_bytes() const { return total_bytes(all_inputs()); }
 
 std::string Compaction::largest_key() const {

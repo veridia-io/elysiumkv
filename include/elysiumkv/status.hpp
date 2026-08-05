@@ -18,6 +18,10 @@ enum class Status : uint8_t {
     Config,     ///< terminal: invalid configuration
     Io,         ///< retryable: could not determine
     Stalled,    ///< write blocked by backpressure
+    /// terminal: the data is intact but this build cannot read it — a manifest written by a
+    /// newer format version. Distinct from `Corrupt`, which says the bytes are damaged; the
+    /// operator's remedy here is a different binary, not a restore.
+    Unsupported,
 };
 
 /// Stable lowercase name, for error text and test failure messages.
@@ -27,7 +31,7 @@ std::string_view status_name(Status) noexcept;
 /// and reopen rather than retry. ARCHITECTURE.md "A tier is not a level", ARCHITECTURE.md "Ownership is one compare-and-set".
 constexpr bool is_terminal(Status s) noexcept {
     return s == Status::Corrupt || s == Status::Unusable || s == Status::Fenced ||
-           s == Status::Config;
+           s == Status::Config || s == Status::Unsupported;
 }
 
 /// True for the one status class that means "ask again later". Never evidence of

@@ -245,6 +245,7 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     file.num_tombstones = 3;
     file.compression = Compression::Zstd;
     file.min_write_time_ms = 1'700'000'000'000ull;
+    file.watermark = {80u, 100u};
 
     VersionEdit edit;
     edit.next_file_number = 4243;
@@ -261,7 +262,7 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     const std::string content = framed.substr(0, content_len);
 
     size_t at = 0;
-    EXPECT_EQ(take_varint(content, at), 1u) << "format_version";
+    EXPECT_EQ(take_varint(content, at), 2u) << "format_version";
     EXPECT_EQ(take_varint(content, at), 4243u) << "next_file_number";
     ASSERT_EQ(take_varint(content, at), 1u) << "added_count";
 
@@ -275,6 +276,9 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     EXPECT_EQ(take_varint(content, at), 3u) << "num_tombstones";
     EXPECT_EQ(take_varint(content, at), 2u) << "compression: zstd";
     EXPECT_EQ(take_varint(content, at), 1'700'000'000'000ull) << "min_write_time_ms";
+    EXPECT_EQ(take_varint(content, at), 3u) << "watermark flags: both bounds present";
+    EXPECT_EQ(take_varint(content, at), 80u) << "watermark_low";
+    EXPECT_EQ(take_varint(content, at), 100u) << "watermark_high";
 
     ASSERT_EQ(take_varint(content, at), 1u) << "deleted_count";
     EXPECT_EQ(take_varint(content, at), 1u) << "deleted level";

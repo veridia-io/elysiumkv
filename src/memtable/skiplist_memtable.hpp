@@ -3,6 +3,7 @@
 
 #include "memtable/arena.hpp"
 #include "memtable/memtable.hpp"
+#include "version/watermark.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -47,6 +48,18 @@ public:
     uint64_t creation_time_ms() const { return creation_time_ms_; }
     void set_creation_time_ms(uint64_t ms) { creation_time_ms_ = ms; }
 
+    /// The watermark interval the flush will stamp onto this memtable's file. Both halves are
+    /// set by `DbImpl`, which owns the notion of "the last established watermark": `low` when
+    /// the memtable is created, `high` every time `set_watermark` is called while it is live.
+    /// Guarded by `mem_mutex_`, the same lock as the write path — which is what makes "every
+    /// write completed before the call" a well-defined set.
+    const WatermarkInterval& watermark() const { return watermark_; }
+    /// Records a watermark established while this memtable is live. Only the upper bound moves:
+    /// the lower bound is fixed at creation, because it is what asserts the memtable holds no
+    /// write at or below it, and a later call says nothing about writes already in here.
+    void set_watermark_high(uint64_t position) { watermark_.high = position; }
+    void set_watermark_bounds(const WatermarkInterval& bounds) { watermark_ = bounds; }
+
     uint64_t num_entries() const { return entries_.load(std::memory_order_relaxed); }
 
     struct ValueRecord {
@@ -84,6 +97,7 @@ private:
     std::atomic<int> max_height_{1};
     std::atomic<uint64_t> entries_{0};
     uint64_t creation_time_ms_ = 0;
+    WatermarkInterval watermark_;
     uint32_t rng_state_ = 0x2545F491u;
 };
 

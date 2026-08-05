@@ -67,7 +67,8 @@ final class Native {
                                         long readerCacheBytes, int bloomBitsPerKey,
                                         long maxCompactionBytes, int manifestEditsPerGeneration,
                                         int paranoidChecks, int blockOnStall,
-                                        int reclaimOrphansAtOpen, long flushIntervalMs);
+                                        int reclaimOrphansAtOpen, long flushIntervalMs,
+                                        long maintenanceIntervalMs);
 
     // --- seams ---------------------------------------------------------------
 
@@ -227,4 +228,11 @@ final class Native {
     static native int statsSnapshot(long db, byte[] out);
 
     static native void markRecoveryComplete(long db);
+
+    // --- watermark -----------------------------------------------------------
+
+    static native void setWatermark(long db, long position);
+
+    /** The recovered watermark, or {@code -1} when there is none. Zero is a valid watermark. */
+    static native long watermark(long db);
 }

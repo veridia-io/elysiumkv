@@ -57,6 +57,11 @@ struct DecodedStats {
     uint64_t memory_budget_used = 0;
     uint64_t memory_budget_total = 0;
     uint64_t budget_sheds = 0;
+    uint64_t flushes = 0;
+    /// Absent, not zero, when no watermark has been set — zero is a valid position, so an
+    /// exporter must omit the series rather than publish it.
+    uint64_t durable_watermark = 0;
+    bool watermark_present = false;
     std::vector<DecodedLevel> levels;
     std::vector<DecodedTier> tiers;
 
@@ -128,6 +133,9 @@ inline DecodedStats decode_stats(const uint8_t* buf, size_t size) {
     out.memory_budget_used = read_u64(scalars + 136);
     out.memory_budget_total = read_u64(scalars + 144);
     out.budget_sheds = read_u64(scalars + 152);
+    out.flushes = read_u64(scalars + 160);              // buffer offset 192
+    out.durable_watermark = read_u64(scalars + 168);    // buffer offset 200
+    out.watermark_present = scalars[176] != 0;          // buffer offset 208
 
     size_t offset = header_bytes;
     for (size_t i = 0; i < level_count && offset + level_record_bytes <= size; ++i) {

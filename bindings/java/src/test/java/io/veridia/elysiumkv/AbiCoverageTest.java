@@ -244,6 +244,15 @@ class AbiCoverageTest {
             exercise("markRecoveryComplete");
             db.markRecoveryComplete();
 
+            // The two halves of a store-managed changelog offset. Behaviour is asserted in
+            // WatermarkTest; what is asserted here is that the JNI signatures are right, which
+            // nothing but a call can establish.
+            exercise("setWatermark");
+            db.setWatermark(9_000L);
+            exercise("watermark");
+            assertTrue(db.recoveredWatermark().isEmpty(),
+                       "nothing was flushed under a watermark in this fixture");
+
             exercise("statsSnapshot");
             ElysiumKVStats stats = db.stats();
             assertEquals(2, stats.levels().size());

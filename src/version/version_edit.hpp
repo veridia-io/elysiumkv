@@ -4,6 +4,7 @@
 #include "elysiumkv/options.hpp"
 #include "elysiumkv/slice.hpp"
 #include "elysiumkv/status.hpp"
+#include "version/watermark.hpp"
 
 #include <cstdint>
 #include <string>
@@ -42,6 +43,15 @@ struct FileMetadata {
     /// its inputs. Sole input to the recovery horizon (ARCHITECTURE.md "Migration between tiers"), and it cannot be
     /// recomputed after a restart — hence persisted.
     uint64_t min_write_time_ms = 0;
+
+    /// The embedder-supplied watermark interval this file's data lies within — see
+    /// `WatermarkInterval` for why it is an interval and not a scalar. A flushed L0 file takes
+    /// its source memtable's; a compaction output takes `min` of the lows and `max` of the highs;
+    /// a migration carries it unchanged, since a byte copy does not change what the file holds.
+    ///
+    /// Persisted, and it cannot be recomputed after a restart — the same reason
+    /// `min_write_time_ms` is persisted, and the only reason either is in the manifest.
+    WatermarkInterval watermark;
 
     bool operator==(const FileMetadata&) const = default;
 };

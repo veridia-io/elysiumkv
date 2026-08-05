@@ -59,7 +59,8 @@ typedef enum {
     ELYSIUMKV_FENCED,
     ELYSIUMKV_CONFIG,
     ELYSIUMKV_IO,
-    ELYSIUMKV_STALLED
+    ELYSIUMKV_STALLED,
+    ELYSIUMKV_UNSUPPORTED
 } elysiumkv_status;
 
 typedef enum { ELYSIUMKV_COMPRESSION_NONE = 0, ELYSIUMKV_COMPRESSION_LZ4, ELYSIUMKV_COMPRESSION_ZSTD }
@@ -133,7 +134,16 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, i
  * `flush_interval_ms` is the second, independent flush trigger: the memtable is flushed once it
  * has been open this long even if it never reaches `memtable_bytes`. Zero leaves it unset, so
  * size alone decides. It bounds how long a write can sit in memory under a trickle of traffic,
- * which no tier age bound can do — those act on files, and an unflushed memtable is not one. */
+ * which no tier age bound can do — those act on files, and an unflushed memtable is not one.
+ *
+ * `maintenance_interval_ms` is how often the maintenance coordinator reconciles: it evaluates
+ * every background policy — flush, compaction, migration off a transient tier, capacity eviction,
+ * obsolete-object collection — against current state and the clock, and dispatches what is due.
+ * It exists because a policy driven by time needs a trigger that is not a write. Zero leaves the
+ * default of one second. Not a latency knob: the interval is the smallest term in the exposure
+ * window `max_age + interval + queueing behind an in-flight compaction + the migration itself`.
+ * An idle tick performs no version scan, which is what makes a short default affordable across
+ * many instances in one process. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, void* manifest_catalog,
                                                      void* memory_budget,
                                                      size_t memtable_bytes, size_t block_bytes,
@@ -144,7 +154,8 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
                                                      int manifest_edits_per_generation,
                                                      int paranoid_checks, int block_on_stall,
                                                      int reclaim_orphans_at_open,
-                                                     uint64_t flush_interval_ms);
+                                                     uint64_t flush_interval_ms,
+                                                     uint64_t maintenance_interval_ms);
 
 /* --- seams -----------------------------------------------------------------
  *
@@ -431,7 +442,16 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *         block_cache_hits, block_cache_misses, block_cache_bytes,
  *         pins_outstanding,
  *         reader_cache_hits, reader_cache_misses, reader_cache_bytes, open_readers,
- *         memory_budget_used, memory_budget_total, budget_sheds
+ *         memory_budget_used, memory_budget_total, budget_sheds,
+ *         flushes                                     offset 192
+ *     u64 durable_watermark                            offset 200
+ *     u8  watermark_present                            offset 208, 0 when unset
+ *     u8  reserved[7]                                  offset 209
+ *                                                      header_bytes = 216
+ *
+ * `watermark_present` exists because **zero is a valid watermark** — a store at the
+ * start of its log — so the value alone cannot express absence. An exporter omits
+ * the series entirely when the flag is zero rather than publishing zero.
  *   level record, level_count of them
  *     i32 level, i32 file_count, u64 bytes, u64 oldest_file_age_ms,
  *     i32 files_stale_codec, u8 age_triggered, u8 stalling, u8 reserved[2]
@@ -452,6 +472,42 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db*, uin
 
 /* Clears requires_recovery after a discard (ARCHITECTURE.md "A tier is not a level"). The only way to clear it. */
 ELYSIUMKV_API void elysiumkv_mark_recovery_complete(elysiumkv_db*);
+
+/* --- watermark --------------------------------------------------------------
+ *
+ * Records that every write completed so far is at a position at or before
+ * `position` in whatever log the embedder replays — a changelog offset, typically.
+ * The engine orders it, carries it with the data and hands it back at the next
+ * open; it never invents, interpolates or interprets one.
+ *
+ * It is a *position*, not a time, and unrelated to a tier's max_age. Positions
+ * must be non-decreasing; a decreasing one returns ELYSIUMKV_CONFIG rather than
+ * being clamped, because clamping would hide a replay that went backwards.
+ *
+ * Cheap: one store under the lock the write path already takes. It forces no
+ * flush and writes no manifest, so it can be called as often as the embedder
+ * commits — the value becomes durable when the memtable holding it is flushed,
+ * which is why elysiumkv_flush promotes it immediately. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_set_watermark(elysiumkv_db*, uint64_t position);
+
+/* The last position whose effect on the store is known to have survived, as
+ * established at *open*. Replaying only the positions **after** it yields the
+ * same logical key-value state as replaying the entire log — exclusive, so `80`
+ * means resume at `81`.
+ *
+ * A getter on the database rather than another out-parameter on
+ * elysiumkv_open_with_result, which already carries five: the recovered watermark
+ * is a property of the opened store, not of the open event.
+ *
+ * `*present` is set to 0 when nothing can be certified — no watermark was ever
+ * set, or a lost transient store held data predating the first one — and the
+ * embedder should replay from the beginning. Distinct from a watermark of zero.
+ * `*out` is untouched when `*present` is 0.
+ *
+ * A restore must use this value, never one that has been through a metrics
+ * pipeline: the stats buffer carries the *live* frontier for observation, and
+ * many metrics systems round a uint64 through a double. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_watermark(elysiumkv_db*, uint64_t* out, bool* present);
 
 #ifdef __cplusplus
 }  /* extern "C" */

@@ -3,6 +3,7 @@ package io.veridia.elysiumkv;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.OptionalLong;
 
 /**
  * One instant of the engine, decoded from a single native call.
@@ -112,6 +113,9 @@ public final class ElysiumKVStats {
     private final long memoryBudgetUsed;
     private final long memoryBudgetTotal;
     private final long budgetSheds;
+    private final long flushes;
+    private final long durableWatermark;
+    private final boolean watermarkPresent;
     private final List<Level> levels;
     private final List<Tier> tiers;
 
@@ -144,6 +148,12 @@ public final class ElysiumKVStats {
         memoryBudgetUsed = readLong(buffer, 168);
         memoryBudgetTotal = readLong(buffer, 176);
         budgetSheds = readLong(buffer, 184);
+        // Appended after the twenty original scalars. Located by the offsets the format fixes,
+        // and read only when the header says they are there: a store built against an older
+        // native library reports a shorter header, and reading past it would be reading padding.
+        flushes = headerBytes > 192 ? readLong(buffer, 192) : 0L;
+        durableWatermark = headerBytes > 200 ? readLong(buffer, 200) : 0L;
+        watermarkPresent = headerBytes > 208 && buffer[208] != 0;
 
         List<Level> levelList = new ArrayList<>(levelCount);
         int offset = headerBytes;
@@ -231,6 +241,34 @@ public final class ElysiumKVStats {
     public long memoryBudgetTotal() { return memoryBudgetTotal; }
 
     public long budgetSheds() { return budgetSheds; }
+
+    /**
+     * Memtable rotations that became an L0 file. The first place a {@code flushIntervalMs} set
+     * too short shows up — small L0 files mean more compaction — and the only way to confirm the
+     * interval fires at all on a quiet partition, since {@link #memtableAgeMs()} is a gauge read
+     * at scrape time and a flush between two scrapes leaves no trace in it.
+     */
+    public long flushes() { return flushes; }
+
+    /**
+     * The <em>live</em> watermark frontier: the position up to which this store's state would
+     * survive losing every transient tier. Deliberately not the newest watermark over current
+     * files, which would advance on a flush to transient storage and so report progress an
+     * operator cannot rely on.
+     *
+     * <p><strong>This is the numerator of the only margin an operator can act on.</strong> When
+     * migration is failing it stops advancing while the changelog keeps expiring, and the distance
+     * between the log's earliest retained offset and this value is how much recovery capability is
+     * left.
+     *
+     * <p>Empty when no watermark has been set. Zero is a valid position, so an exporter must omit
+     * the series rather than publish zero. Observational: export it for the retention margin and
+     * for alerting, but a restore must use {@link ElysiumKV#recoveredWatermark()}, whose value has
+     * not been through a metrics pipeline that may carry it as a double.
+     */
+    public OptionalLong durableWatermark() {
+        return watermarkPresent ? OptionalLong.of(durableWatermark) : OptionalLong.empty();
+    }
 
     public long levelBytesTotal() {
         long total = 0;

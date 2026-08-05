@@ -48,6 +48,7 @@ void VersionSet::observe_file_number(uint64_t number) {
 }
 
 void VersionSet::install(std::shared_ptr<const Version> version) {
+    installs_.fetch_add(1, std::memory_order_relaxed);
     live_versions_.push_back(version);
     std::lock_guard<std::mutex> lock(current_mutex_);
     current_ = std::move(version);
@@ -205,6 +206,17 @@ Status VersionSet::apply(VersionEdit edit) {
 
     auto base = current();
 
+    // **This does not validate that `edit.deleted` is still live**, and a second concurrent
+    // deleting task would be unsound because of it: two tasks picking inputs from the same
+    // version snapshot can both commit, producing a double delete or a compaction reading a
+    // file a migration has already moved and unlinked. Today it holds because compaction,
+    // migration and capacity eviction share one executor and run one at a time — asserted
+    // under `ELYSIUMKV_PARANOID` in `DbImpl`, so adding a second deleting worker fails on the
+    // first test run instead of in production. Flush is exempt: it only adds.
+    //
+    // A second deleting worker therefore needs either a set of files claimed by a running
+    // task, or optimistic validation here, **before** the worker — not after.
+
     // Capture the metadata of what is being removed *before* the swap: the
     // store_id says where the object physically lives, and after the swap it is
     // no longer in any version.
@@ -225,6 +237,8 @@ Status VersionSet::apply(VersionEdit edit) {
         for (const FileMetadata& file : base->files_at(ref.level)) {
             if (file.file_number == ref.file_number) {
                 pending_deletions_.push_back(file);
+                pending_deletions_hint_.store(pending_deletions_.size(),
+                                              std::memory_order_relaxed);
                 break;
             }
         }
@@ -298,6 +312,7 @@ void VersionSet::collect_obsolete_locked() {
         }
     }
     pending_deletions_ = std::move(still_pending);
+    pending_deletions_hint_.store(pending_deletions_.size(), std::memory_order_relaxed);
 }
 
 }  // namespace elysiumkv

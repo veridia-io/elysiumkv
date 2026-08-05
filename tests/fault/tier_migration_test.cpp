@@ -13,6 +13,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace elysiumkv::test {
@@ -309,6 +310,12 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     options.background = BackgroundMode::Threaded;
     options.block_on_stall = false;
     options.clock = [this] { return now_.load(std::memory_order_relaxed); };
+    // **The valve now engages on a coordinator tick, not on the writing thread.** One evaluator:
+    // the maintenance loop owns the `stall_age` predicate and publishes the answer, so the write
+    // path cannot compute a different one. The cost is that engaging lags by up to one interval,
+    // which is the `+ interval` term the exposure window already carries — so the test waits for
+    // it rather than assuming the very next `put` sees it.
+    options.maintenance_interval = Duration(20);
 
     // Hold migration back the way a slow durable store would, rather than by
     // arranging for nothing to run: the valve has to fire because migration
@@ -334,10 +341,11 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     EXPECT_TRUE(tier(0).stalling);
 
     bool stalled = false;
-    for (int i = 0; i < 50 && !stalled; ++i) {
+    for (int i = 0; i < 400 && !stalled; ++i) {
         if (db_->put(Slice::from(key_at(1000 + i)), Slice::from("x")) == Status::Stalled) {
             stalled = true;
         }
+        if (!stalled) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     EXPECT_TRUE(stalled) << "writes must stop rather than let exposure grow without bound";
     EXPECT_GT(db_->stats().stall_count, 0u);

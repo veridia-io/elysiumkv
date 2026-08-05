@@ -90,6 +90,19 @@ public:
     /// Files awaiting collection — a live iterator is the usual reason.
     size_t pending_deletions() const;
 
+    /// The same count, readable **without taking `mutex_`** — which matters because the
+    /// maintenance coordinator asks every tick and that mutex is held across manifest writes
+    /// to remote storage. A hint rather than a value: it may be a moment stale, which is
+    /// harmless for a predicate that only decides whether to look.
+    size_t pending_deletions_hint() const {
+        return pending_deletions_hint_.load(std::memory_order_relaxed);
+    }
+
+    /// How many versions have been installed. The maintenance coordinator folds this into its
+    /// epoch: a new version is the single largest source of predicate-relevant change, and
+    /// counting installs is cheaper than asking each predicate whether anything moved.
+    uint64_t installs() const { return installs_.load(std::memory_order_relaxed); }
+
 private:
     Status write_snapshot_and_install(uint64_t generation,
                                       const std::shared_ptr<const Version>& version);
@@ -119,6 +132,8 @@ private:
 
     std::atomic<uint64_t> next_file_number_{1};
     std::atomic<bool> fenced_{false};
+    std::atomic<size_t> pending_deletions_hint_{0};
+    std::atomic<uint64_t> installs_{0};
 };
 
 }  // namespace elysiumkv

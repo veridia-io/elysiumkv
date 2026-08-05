@@ -42,13 +42,18 @@ useful rather than to be novel.
   reclamation.
 - **Storage tiers**: several object stores per database, with files migrating
   between them by age and size (see below).
+- **A durable watermark**: tell the store where you have reached in the log you
+  are replaying, and it hands the position back at the next open — including
+  rolled back to what a lost transient tier could not have held. This is the
+  resume point for a changelog-backed store; see
+  [ARCHITECTURE.md](ARCHITECTURE.md#the-watermark-is-an-interval-and-only-its-lower-bound-is-load-bearing).
 - **Zero-copy reads**: a lookup can hand back a pointer into the block cache,
   pinned until you release it, with no copy at any layer — including through the
   Java binding.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (39 functions, C99) and a Java binding over JNI
+- **Bindings**: a stable C ABI (50 functions, C99) and a Java binding over JNI
   needing only Java 11.
 
 Keys are ordered as unsigned bytes. There are no column families, no snapshots and
@@ -426,6 +431,10 @@ and a 1M-key store must cost about the same, or file pruning is not working.
 
 - **Range deletes.** The entry encoding reserves room for them; the compaction
   interaction is not designed.
+- **A write-ahead log.** Deliberate: the changelog you are already replaying is
+  the log, so duplicating it would double every write. The watermark is what
+  makes that trade workable — it tells you where to resume, and an unflushed
+  memtable is still lost.
 - **Windows.**
 
 ## Contributing

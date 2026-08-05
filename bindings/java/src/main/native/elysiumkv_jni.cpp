@@ -181,7 +181,8 @@ void JNICALL options_configure(JNIEnv* env, jclass, jlong options, jlong catalog
                                jlong reader_cache_bytes, jint bloom_bits_per_key,
                                jlong max_compaction_bytes, jint manifest_edits_per_generation,
                                jint paranoid_checks, jint block_on_stall,
-                               jint reclaim_orphans_at_open, jlong flush_interval_ms) {
+                               jint reclaim_orphans_at_open, jlong flush_interval_ms,
+                               jlong maintenance_interval_ms) {
     guard_void(env, [&] {
         check(env, elysiumkv_options_configure(
                        as_options(options), as_pointer(catalog), as_pointer(budget),
@@ -190,7 +191,8 @@ void JNICALL options_configure(JNIEnv* env, jclass, jlong options, jlong catalog
                        static_cast<size_t>(reader_cache_bytes), bloom_bits_per_key,
                        static_cast<size_t>(max_compaction_bytes), manifest_edits_per_generation,
                        paranoid_checks, block_on_stall, reclaim_orphans_at_open,
-                       static_cast<uint64_t>(flush_interval_ms)));
+                       static_cast<uint64_t>(flush_interval_ms),
+                       static_cast<uint64_t>(maintenance_interval_ms)));
     });
 }
 
@@ -801,6 +803,40 @@ void JNICALL mark_recovery_complete(JNIEnv*, jclass, jlong db) {
     elysiumkv_mark_recovery_complete(as_db(db));
 }
 
+// --- watermark ----------------------------------------------------------------
+
+void JNICALL set_watermark(JNIEnv* env, jclass, jlong db, jlong position) {
+    guard_void(env, [&] {
+        // Java has no unsigned long, so the position crosses as a signed 64-bit value and is
+        // reinterpreted here. A changelog offset is never negative in practice; the reinterpret
+        // is what keeps the ABI a plain `uint64_t` rather than inventing a wider representation
+        // for a range nobody uses.
+        check(env, elysiumkv_set_watermark(as_db(db),
+                                          static_cast<uint64_t>(static_cast<int64_t>(position))));
+    });
+}
+
+/* Returns the recovered watermark, or -1 when there is none.
+ *
+ * A sentinel rather than an out-parameter because absence has to survive the crossing and a boxed
+ * `OptionalLong` would mean a class lookup in the glue. Zero could not serve — it is a valid
+ * position, a store at the start of its log — whereas a negative value cannot come from any
+ * position Java can represent: the crossing is a signed 64-bit value, so positions at or above 2^63
+ * are already outside what this binding can carry, and the sentinel shares that limit rather than
+ * adding one. A changelog offset is nowhere near it. The Java side turns -1 back into an empty
+ * `OptionalLong`. */
+jlong JNICALL watermark(JNIEnv* env, jclass, jlong db) {
+    return guard(env,
+                 [&]() -> jlong {
+                     uint64_t value = 0;
+                     bool present = false;
+                     check(env, elysiumkv_watermark(as_db(db), &value, &present));
+                     if (!present) return static_cast<jlong>(-1);
+                     return static_cast<jlong>(value);
+                 },
+                 static_cast<jlong>(-1));
+}
+
 /* ARCHITECTURE.md "The ABI boundary" — registered explicitly, so a rename or a signature change fails at load
  * naming the method, rather than as an UnsatisfiedLinkError the first time a
  * rarely-used call runs. */
@@ -819,7 +855,7 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(options_add_tier)},
     {const_cast<char*>("optionsSetLevel"), const_cast<char*>("(JIIJIIIJ)V"),
      reinterpret_cast<void*>(options_set_level)},
-    {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJIIIIJ)V"),
+    {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJIIIIJJ)V"),
      reinterpret_cast<void*>(options_configure)},
 
     {const_cast<char*>("localBlobStoreCreate"),
@@ -918,6 +954,10 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(stats_snapshot)},
     {const_cast<char*>("markRecoveryComplete"), const_cast<char*>("(J)V"),
      reinterpret_cast<void*>(mark_recovery_complete)},
+    {const_cast<char*>("setWatermark"), const_cast<char*>("(JJ)V"),
+     reinterpret_cast<void*>(set_watermark)},
+    {const_cast<char*>("watermark"), const_cast<char*>("(J)J"),
+     reinterpret_cast<void*>(watermark)},
 };
 
 jclass global_class(JNIEnv* env, const char* name) {

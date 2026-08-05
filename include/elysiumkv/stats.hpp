@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace elysiumkv {
@@ -46,7 +47,17 @@ struct TierStats {
     /// Files whose placement no longer matches this tier: past `max_age`, or the
     /// tier is over `max_bytes`.
     int files_pending_migration = 0;
-    /// `Transient` only: past `stall_age`, so writes are being held.
+    /// `Transient` only: the oldest file here is past `stall_age`.
+    ///
+    /// **The condition as observed at this instant, which is a moment ahead of the valve.** The
+    /// maintenance coordinator owns the decision the write path acts on and publishes it on its
+    /// tick, so this can read true up to one `maintenance_interval` before writes are actually
+    /// held. That is the right direction for an alarm and the wrong one for control flow, which is
+    /// why the write path reads the published flag and not this.
+    ///
+    /// Read it as: from here on, the log is expiring while the durable position stops advancing.
+    /// **Recovery capability is what degrades, on a deadline** — the action is to extend log
+    /// retention, and `durable_watermark` against the log's earliest offset is the margin.
     bool stalling = false;
 };
 
@@ -66,6 +77,14 @@ struct Stats {
     size_t memtable_bytes = 0;
     /// Age of the oldest write in the memtable; zero when it holds nothing.
     Duration memtable_age{0};
+
+    /// Memtable rotations that became an L0 file. Beside `compactions` because it is the *cause*
+    /// of most of them: `Options::flush_interval` set too short produces many small L0 files and
+    /// therefore more compaction, and flush rate is the first place that shows up. It is also the
+    /// only way to confirm the interval fires at all on a quiet partition — `memtable_age` is a
+    /// gauge read at scrape time, so a flush between two scrapes leaves no trace in it, and a
+    /// counter cannot be derived from a gauge.
+    uint64_t flushes = 0;
 
     uint64_t compactions = 0;
     uint64_t compaction_bytes_read = 0;
@@ -104,6 +123,32 @@ struct Stats {
     /// ARCHITECTURE.md "The ABI boundary" — nonzero at close is a leak. A leaked pin holds a block-cache entry
     /// forever, so this is a first-class invariant rather than a diagnostic.
     uint64_t pins_outstanding = 0;
+
+    /// The **live** watermark frontier: the position up to which the store's state would survive
+    /// losing every transient tier. Deliberately *not* the maximum watermark over current files,
+    /// which is tier-blind and would advance on a flush to transient storage — a flush that
+    /// changes nothing an operator can rely on.
+    ///
+    ///     durable_watermark = min(low) over files currently on a transient tier,
+    ///                         or max(high) when no transient files remain
+    ///
+    /// the same expression recovery uses, evaluated live instead of at open. Distinct from
+    /// `DB::recovered_watermark()`, which is fixed at open and must not be confused with this:
+    /// sharing a name would silently change the getter's meaning after the first write.
+    ///
+    /// **This is the numerator of the only margin an operator can act on.** When migration is
+    /// failing, this value stops advancing while the changelog keeps expiring, and the distance
+    /// between the log's earliest retained offset and this value is how much recovery capability
+    /// is left. Without it that distance is not computable.
+    ///
+    /// Absent — not zero — when no watermark has been set. Zero is a valid position, so an
+    /// exporter must omit the series rather than publish zero.
+    ///
+    /// A precision caveat for exporters: many metrics systems carry gauge samples as IEEE-754
+    /// doubles, exact only below 2^53. The metric is observational, for the retention margin and
+    /// for alerting; **a restore must use the exact value** from `DB::recovered_watermark()`,
+    /// never one that has been through a metrics pipeline.
+    std::optional<uint64_t> durable_watermark;
 };
 
 }  // namespace elysiumkv

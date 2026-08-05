@@ -22,6 +22,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
 
     private long memtableBytes;
     private long flushIntervalMs;
+    private long maintenanceIntervalMs;
     private long blockBytes;
     private long blockCacheBytes;
     private long readerCacheBytes;
@@ -110,6 +111,26 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * How often the maintenance coordinator reconciles: it evaluates every background policy —
+     * flush, compaction, migration off a transient tier, capacity eviction, obsolete-object
+     * collection — against current state and the clock, and dispatches what is due. Zero (the
+     * default) leaves the engine default of one second.
+     *
+     * <p>It exists because <strong>a policy driven by time needs a trigger that is not a
+     * write</strong>. Without it a store that goes quiet with a file on a transient tier leaves it
+     * there indefinitely, however the tiers are configured.
+     *
+     * <p>Not a latency knob. The interval is the smallest term in the exposure window
+     * {@code maxAge + interval + queueing behind an in-flight compaction + the migration itself},
+     * so shortening it buys very little; an idle tick performs no version scan, which is what
+     * makes the default affordable across many partition stores in one process.
+     */
+    public ElysiumKVOptions maintenanceIntervalMs(long millis) {
+        maintenanceIntervalMs = millis;
+        return this;
+    }
+
     public ElysiumKVOptions memtableBytes(long bytes) {
         memtableBytes = bytes;
         return this;
@@ -184,7 +205,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
                                 blockCacheBytes,
                                 readerCacheBytes, bloomBitsPerKey, maxCompactionBytes,
                                 manifestEditsPerGeneration, paranoidChecks, blockOnStall,
-                                reclaimOrphansAtOpen, flushIntervalMs);
+                                reclaimOrphansAtOpen, flushIntervalMs, maintenanceIntervalMs);
         return handle();
     }
 
