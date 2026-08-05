@@ -295,10 +295,25 @@ jobs:
         # provisioned infrastructure, and creating one silently would hide a
         # misconfigured name behind a working store. The DynamoDB table needs no
         # equivalent — createTableIfMissing is a real option there.
+        #
+        # Uses the AWS CLI v2 that the runner image already ships, rather than
+        # `pip install awscli-local awscli`. That installed two *unpinned*
+        # packages to run one command, and awscli v1 bundles an s3transfer that
+        # imports `botocore.vendored` — which botocore has since removed. So the
+        # step broke on a day when nothing in this repository had changed, which
+        # is the failure mode of depending on unpinned transitive versions for
+        # something the environment already provides. A preinstalled tool cannot
+        # drift out from under the workflow.
+        #
+        # head-bucket is not redundant: it asserts the bucket exists under the
+        # name the tests actually use. Without it a provisioning mistake surfaces
+        # much later as remote cases that skip or fail for an unrelated-looking
+        # reason.
         run: |
-          pip install --quiet awscli-local awscli
-          awslocal s3 mb s3://elysiumkv
+          aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket elysiumkv
+          aws --endpoint-url "$AWS_ENDPOINT" s3api head-bucket --bucket elysiumkv
         env:
+          AWS_ENDPOINT: http://localhost:4566
           AWS_ACCESS_KEY_ID: test
           AWS_SECRET_ACCESS_KEY: test
           AWS_DEFAULT_REGION: us-east-1

@@ -550,12 +550,17 @@ constexpr uint64_t kGateBypassEveryTicks = 60;
 
 }  // namespace
 
-uint64_t DbImpl::maintenance_epoch() const {
-    if (pin_maintenance_epoch_.load()) return 0;   // negative control; see the header
+uint64_t DbImpl::live_maintenance_epoch() const {
     // Two monotone counters added together: the sum is monotone, which is all an equality gate
     // needs. Version installs dominate — compaction, migration, eviction and flush all install —
     // and `maintenance_bumps_` carries what installs nothing.
     return versions_->installs() + maintenance_bumps_.load(std::memory_order_relaxed);
+}
+
+uint64_t DbImpl::maintenance_epoch() const {
+    const int64_t pinned = pinned_maintenance_epoch_.load();
+    if (pinned >= 0) return static_cast<uint64_t>(pinned);   // negative control; see the header
+    return live_maintenance_epoch();
 }
 
 void DbImpl::invalidate_maintenance() {
@@ -647,7 +652,7 @@ void DbImpl::reconcile(bool force_full) {
     // The negative control drops both clock-driven ways in, leaving only an epoch change — which
     // means a write. See `suppress_timed_maintenance_for_test`.
     const bool timed = !suppress_timed_maintenance_.load();
-    const bool gate_open = (force_full && timed) || epoch != last_reconciled_epoch_ ||
+    const bool gate_open = (force_full && timed) || epoch != last_reconciled_epoch_.load() ||
                            (timed && now >= next_time_transition_ms_);
 
     if (!gate_open) {
@@ -660,7 +665,7 @@ void DbImpl::reconcile(bool force_full) {
         if (versions_->pending_deletions_hint() != 0) versions_->collect_obsolete();
         return;
     }
-    last_reconciled_epoch_ = epoch;
+    last_reconciled_epoch_.store(epoch);
 
     // --- 3. The full evaluation, which is the only O(files) part.
     {

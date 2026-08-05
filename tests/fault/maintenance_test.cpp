@@ -283,11 +283,14 @@ TEST_F(MaintenanceTest, WorkStillRunsWithTheWakeNotificationSuppressed) {
 TEST_F(MaintenanceTest, AnUnInvalidatedPredicateStillRunsOnThePeriodicBypass) {
     open(base(capacity_bound_options()));
     // The epoch is frozen from here, and there is no age bound anywhere so `next_time_transition`
-    // is unbounded: the gate can never open on state. The pause lets the coordinator observe the
-    // pinned value once, so the *only* thing left that can open it is the periodic bypass.
+    // is unbounded: the gate can never open on state.
     engine().pin_maintenance_epoch_for_test(true);
     engine().suppress_maintenance_wakes_for_test(true);
-    std::this_thread::sleep_for(kTick * 4);
+    // **Wait for the gate to be closed, rather than sleeping for a few ticks and assuming it is.**
+    // Until the coordinator has caught up it will open the gate once more, and that single opening
+    // is enough to drain the capacity this test claims only the bypass can drain — which would make
+    // it pass while proving nothing.
+    ASSERT_TRUE(settle([&] { return engine().maintenance_gate_closed_for_test(); }));
 
     fill_over_capacity();
     EXPECT_TRUE(settle([&] { return tier(0).bytes <= kTierBudget; }))
@@ -301,8 +304,11 @@ TEST_F(MaintenanceTest, WithTheClockOutOfTheGateTheUnInvalidatedPredicateNeverRu
     open(base(capacity_bound_options()));
     engine().pin_maintenance_epoch_for_test(true);
     engine().suppress_maintenance_wakes_for_test(true);
+    // Same wait as the positive case, and here it is what the test *is*: a coordinator that has not
+    // yet caught up opens the gate once, drains the capacity, and the assertion below then fails on
+    // a slow machine while passing on a fast one. That is how this failed under tsan on macOS.
+    ASSERT_TRUE(settle([&] { return engine().maintenance_gate_closed_for_test(); }));
     engine().suppress_timed_maintenance_for_test(true);
-    std::this_thread::sleep_for(kTick * 4);
 
     fill_over_capacity();
     EXPECT_FALSE(settle([&] { return tier(0).bytes <= kTierBudget; },

@@ -140,7 +140,19 @@ public:
     /// invalidating transitions were never wired up looks like from the gate's side. The periodic
     /// bypass is then the only thing that can find the work, which is the bound this exists to
     /// demonstrate.
-    void pin_maintenance_epoch_for_test(bool on) { pin_maintenance_epoch_.store(on); }
+    /// Freezes at **the epoch as it is now**, not at zero. Freezing at zero would itself be a
+    /// change the gate notices, so it would open once more before settling — and that one extra
+    /// opening is enough to drain the work a negative control says cannot be drained, or to let a
+    /// positive control pass without the mechanism it is supposed to be testing.
+    void pin_maintenance_epoch_for_test(bool on) {
+        pinned_maintenance_epoch_.store(on ? static_cast<int64_t>(live_maintenance_epoch()) : -1);
+    }
+    /// Whether the coordinator has caught up with the current epoch, i.e. its gate is now closed on
+    /// state. **A test waits on this rather than sleeping**: "long enough for a few ticks" is a
+    /// guess about a machine, and it was wrong on a loaded CI runner.
+    bool maintenance_gate_closed_for_test() const {
+        return last_reconciled_epoch_.load() == maintenance_epoch();
+    }
     /// ARCHITECTURE.md "Negative controls" — pins the published stall flag, so what the write path
     /// reads and what the clock says can be made to disagree. That disagreement is the only way to
     /// tell a write path that *reads* the flag from one that *computes* the predicate, and it works
@@ -217,6 +229,8 @@ private:
     void maintenance_loop();
     /// One reconcile pass. `force_full` skips the gate.
     void reconcile(bool force_full);
+    /// The epoch ignoring any test pin. Split out so pinning can capture the live value.
+    uint64_t live_maintenance_epoch() const;
     /// The gate's epoch: every predicate-relevant change that is *not* the passage of time.
     /// Version installs dominate it; `maintenance_bumps_` carries the rest — memtable rotation,
     /// an executor that did work, a change in storage or recovery state.
@@ -362,14 +376,17 @@ private:
     std::thread maintenance_thread_;
     /// Non-clock predicate invalidations that are not version installs.
     std::atomic<uint64_t> maintenance_bumps_{0};
-    /// Coordinator-local; touched only from `reconcile`, which is single-threaded apart from
-    /// the synchronous pass `open` performs before any caller can reach the instance.
-    uint64_t last_reconciled_epoch_ = 0;
+    /// Written only by `reconcile`, which is single-threaded apart from the synchronous pass `open`
+    /// performs before any caller can reach the instance. Atomic because a test reads it to tell
+    /// "the coordinator has caught up" from "it has not looked yet", and reading a plain member
+    /// across threads is a race whatever the intended ordering.
+    std::atomic<uint64_t> last_reconciled_epoch_{0};
     uint64_t next_time_transition_ms_ = 0;
     uint64_t reconcile_ticks_ = 0;
     std::atomic<bool> transient_stalled_{false};
     std::atomic<bool> suppress_maintenance_wakes_{false};
-    std::atomic<bool> pin_maintenance_epoch_{false};
+    /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
+    std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};
     /// Tri-state: -1 not pinned, 0 pinned clear, 1 pinned set. **Atomic, and an `optional<bool>`
     /// here was a data race** — the coordinator thread reads this while a test thread writes it, and
