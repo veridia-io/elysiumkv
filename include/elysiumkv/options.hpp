@@ -60,15 +60,24 @@ enum class BackgroundMode : uint8_t {
 
 /// ARCHITECTURE.md "A tier is not a level" — **where files live.** Tier and level are independent axes: level is
 /// LSM structure, tier is storage. A file lives in exactly one store, chosen per
-/// file by age and size, so a single level routinely spans several tiers at
+/// file by its **age**, so a single level routinely spans several tiers at
 /// once — recent files on fast storage, older ones on cheap storage.
 struct Tier {
     std::shared_ptr<BlobStore> store;  ///< may itself be a cache chain
     Durability durability = Durability::Durable;
 
     std::optional<Duration> max_age;        ///< files older than this move to the next tier
-    std::optional<size_t> max_file_bytes;   ///< files larger than this skip this tier
-    std::optional<size_t> max_bytes;        ///< tier capacity; oldest files evicted first
+
+    /// Tier capacity; oldest files evicted first.
+    ///
+    /// **Not to be confused with a per-*file* size bound**, which this type used to have and no
+    /// longer does. That gave size a second, independent route to a colder tier, and placement has
+    /// to be a monotone function of age alone: a file's age only ever grows, so its tier only ever
+    /// descends, whereas a size bound could place a *new* file cold on the day it was written. If
+    /// the intent is to cap what a tier holds, this is the field — it evicts oldest-first, which is
+    /// the mechanism that was actually wanted. If the intent is to keep large files off a small fast
+    /// tier, lower that level's `target_file_bytes` so large files are not produced.
+    std::optional<size_t> max_bytes;
     std::optional<Duration> stall_age;      ///< Transient only; default 2 * max_age
 };
 

@@ -50,7 +50,7 @@ final class Native {
     static native void optionsDestroy(long options);
 
     static native void optionsAddTier(long options, long store, int durability, long maxAgeMs,
-                                      long maxFileBytes, long maxBytes, long stallAgeMs);
+                                      long maxBytes, long stallAgeMs);
 
     static native void optionsSetLevel(long options, int level, int compression, long maxBytes,
                                        int maxFiles, int slowdownAt, int stopAt,

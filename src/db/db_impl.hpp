@@ -295,9 +295,10 @@ private:
     bool compact_l0_file_off_its_tier(Status& status);
     Status write_compaction_outputs(const Compaction& compaction,
                                     std::vector<FileMetadata>& outputs);
-    /// ARCHITECTURE.md "A tier is not a level" — where a finished file belongs. Evaluated *after* the bytes exist,
-    /// because `max_file_bytes` is one of its inputs.
-    const Tier& tier_for(uint64_t min_write_time_ms, uint64_t file_bytes) const;
+    /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. It no longer
+    /// depends on the file's size, so it no longer has to be evaluated after the bytes exist; the
+    /// call sites simply have not been moved earlier, and nothing requires them to be.
+    const Tier& tier_for(uint64_t min_write_time_ms) const;
     /// The store named in a file's metadata, or nullptr if the configuration no
     /// longer has it.
     BlobStore* store_for(const std::string& store_id) const;

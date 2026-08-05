@@ -604,26 +604,12 @@ TEST_F(TierMigrationTest, OneLevelSpansTwoTiersWhenPartOfTheKeyspaceGoesQuiet) {
     }
 }
 
-// ARCHITECTURE.md "A tier is not a level" — a file too large for a tier skips it, whatever its age.
-TEST_F(TierMigrationTest, SizePlacesAFileJustAsAgeDoes) {
-    Options options = make_options(store_, Compression::None, 1u << 20);
-    options.tiers = {
-        Tier{.store = store_.store(0),
-             .durability = Durability::Durable,
-             .max_age = Duration(1'000'000),
-             .max_file_bytes = 4096},
-        Tier{.store = store_.store(1), .durability = Durability::Durable},
-    };
-    open(options);
-
-    // Far more than 4 KiB, and brand new: too big for tier 0 despite its age.
-    write(2000, "a-reasonably-long-value-to-make-the-file-big");
-    ASSERT_EQ(db_->flush(), Status::Ok);
-
-    ASSERT_GT(tier(1).file_count, 0) << "size sends it past the hot tier on arrival";
-    EXPECT_EQ(tier(0).file_count, 0);
-    EXPECT_EQ(db_->stats().migrations, 0u) << "placed correctly at birth, never migrated";
-}
+// `SizePlacesAFileJustAsAgeDoes` lived here and is **deliberately deleted rather than inverted.**
+// It asserted that a large, brand-new file was placed on a cold tier at birth — which was the whole
+// problem with `Tier::max_file_bytes`: placement has to be monotone in age, and a file arriving cold
+// on the day it was written is the opposite of that. There is no replacement assertion, because
+// there is no longer a second input to placement to assert anything about. Keeping the test with its
+// expectations flipped would have implied the behaviour still had a size dimension.
 
 // ARCHITECTURE.md "Positional recency", ARCHITECTURE.md "Migration between tiers" — **an L0 file that leaves its tier must be the oldest one positionally.**
 //

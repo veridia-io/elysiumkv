@@ -77,13 +77,19 @@ public final class ElysiumKVOptions implements AutoCloseable {
 
     /**
      * Appends a tier, hot to cold. Zero means "no bound". ARCHITECTURE.md "A tier is not a level" — the last tier
-     * must be durable and must bound neither age nor file size — {@link
-     * ElysiumKV#open} rejects a configuration that breaks either rule rather than
-     * documenting it as a precondition.
+     * must be durable and must not bound age — {@link ElysiumKV#open} rejects a
+     * configuration that breaks either rule rather than documenting it as a
+     * precondition.
+     *
+     * <p>{@code maxBytes} is the <em>tier's</em> capacity, evicted oldest-first. There is no
+     * per-file size bound: this method used to take one, and it was removed because size gave a
+     * second, independent route to a colder tier while placement has to be monotone in age alone.
+     * To keep large files off a fast tier, lower that level's {@code targetFileBytes} so large
+     * files are not produced.
      */
     public ElysiumKVOptions addTier(BlobStore store, Durability durability, long maxAgeMs,
-                                  long maxFileBytes, long maxBytes, long stallAgeMs) {
-        Native.optionsAddTier(handle(), store.handle(), durability.code(), maxAgeMs, maxFileBytes,
+                                  long maxBytes, long stallAgeMs) {
+        Native.optionsAddTier(handle(), store.handle(), durability.code(), maxAgeMs,
                               maxBytes, stallAgeMs);
         return this;
     }

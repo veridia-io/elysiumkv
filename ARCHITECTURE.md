@@ -36,7 +36,7 @@ The life of data, end to end. Everything in the next section is a justification 
        └──── read (then) ────│  L1 … Ln     │  non-overlapping within a level
                              └──────────────┘
                                     │
-                     placement(age, size) decides which tier holds each file
+                     placement(age) decides which tier holds each file
                                     │
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                     ▼
@@ -208,10 +208,18 @@ A *level* is structure: how much data, how much overlap, when to compact. A *tie
 blob store holds the bytes. They are orthogonal, and placement is a pure function:
 
 ```
-placement(age, file_size) -> tier
+placement(age) -> tier
 ```
 
 It consults no keys and does not know whether anything in the file is still current.
+
+**Age is the only input, and narrowing it to that was a correction.** A per-file size bound used to
+be a second predicate, and it broke the property the rest of this section rests on: a file's age only
+ever increases, so placement only ever moves it colder, but a *size* bound could place a brand-new
+file on a cold tier the day it was written. One axis that only moves one way is what makes the design
+stable; two axes with different dynamics is what makes files thrash. Capping a tier's footprint is
+`Tier::max_bytes`, evicted oldest-first — which is what anyone reaching for a size bound actually
+wanted — and keeping large files off a fast tier is a matter of the level's `target_file_bytes`.
 
 **Why:** the tempting design is "level 3 lives on S3". That makes every compaction decision a
 storage decision and every storage change a rewrite of the LSM shape. Keeping the axes separate
@@ -227,7 +235,7 @@ means tuning read amplification and tuning storage cost are independent exercise
   buys storage cost, not immunity from compaction I/O. If a tier's age bound is short relative to
   how long compaction takes to reach that level, you pay for the round trip.
 
-The last tier must be durable and must bound neither age nor size, so a file always has somewhere to
+The last tier must be durable and must not bound age, so a file always has somewhere to
 land. Open rejects a configuration that breaks this instead of documenting it as a precondition.
 
 **Every tier knob is an expression of one underlying parameter: durability lag** — how long a write

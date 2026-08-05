@@ -130,7 +130,7 @@ class RemoteStorageTest {
                                    .memtableBytes(32 * 1024)
                                    .blockBytes(1024)
                                    .paranoidChecks(true)
-                                   .addTier(store, Durability.DURABLE, 0, 0, 0, 0)
+                                   .addTier(store, Durability.DURABLE, 0, 0, 0)
                                    .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                                    .level(1, Compression.ZSTD, 0, 0, 0, 0, 0));
     }
@@ -228,8 +228,8 @@ class RemoteStorageTest {
                             .memtableBytes(32 * 1024)
                             .blockBytes(1024)
                             .paranoidChecks(true)
-                            .addTier(hot, Durability.DURABLE, 1, 0, 0, 0)
-                            .addTier(cold, Durability.DURABLE, 0, 0, 0, 0)
+                            .addTier(hot, Durability.DURABLE, 1, 0, 0)
+                            .addTier(cold, Durability.DURABLE, 0, 0, 0)
                             .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                             .level(1, Compression.NONE, 0, 0, 0, 0, 0));
 
@@ -348,8 +348,8 @@ class RemoteStorageTest {
                                    .memtableBytes(32 * 1024)
                                    .blockBytes(1024)
                                    .paranoidChecks(true)
-                                   .addTier(hot, Durability.DURABLE, 86_400_000L, 0, 0, 0)
-                                   .addTier(cold, Durability.DURABLE, 0, 0, 0, 0)
+                                   .addTier(hot, Durability.DURABLE, 86_400_000L, 0, 0)
+                                   .addTier(cold, Durability.DURABLE, 0, 0, 0)
                                    .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                                    .level(1, Compression.NONE, 0, 0, 0, 0, 0));
     }

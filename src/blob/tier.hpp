@@ -32,9 +32,9 @@ struct ResolvedTiers {
 
 /// ARCHITECTURE.md "A tier is not a level" — validation, all `Status::Config`:
 ///
-/// - `max_age` and `max_file_bytes` must be non-decreasing across tiers.
-///   Otherwise placement is not monotone and files thrash.
-/// - The last tier must have neither — it catches everything.
+/// - `max_age` must be non-decreasing across tiers. Otherwise placement is not
+///   monotone and files thrash.
+/// - The last tier must not set it — it catches everything.
 /// - The last tier must be `Durable`.
 /// - `Transient` tiers must form a prefix.
 /// - A `Transient` tier must set `max_age`, and `stall_age > max_age`.
@@ -45,9 +45,14 @@ Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers);
 ///
 /// ```
 /// tier(file) = the first tier T, hot to cold, satisfying
-///                  age(file)  <= T.max_age          (or unset)
-///              and file_bytes <= T.max_file_bytes   (or unset)
+///                  age(file) <= T.max_age   (or unset)
 /// ```
+///
+/// **Age is the only input, and that is the whole of it.** A per-file size bound used to be a second
+/// predicate here and was removed: it gave size an independent route to a colder tier, so a large
+/// file could be placed cold on the day it was written, and placement is only well behaved because
+/// it is monotone. Capping a tier's footprint is `Tier::max_bytes`, which evicts oldest-first;
+/// keeping large files off a fast tier is a matter of the level's `target_file_bytes`.
 ///
 /// **Monotone**: `min_write_time_ms` propagates as `min()` over compaction
 /// inputs (ARCHITECTURE.md "The manifest is snapshots plus edits"), so it never increases — a file's age only grows and its tier
@@ -56,8 +61,7 @@ Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers);
 /// cold tier instead of being written hot and migrated straight back out.
 ///
 /// The last tier bounds nothing, so this always returns a valid index.
-int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t file_bytes,
-              uint64_t now_ms);
+int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t now_ms);
 
 }  // namespace elysiumkv
 

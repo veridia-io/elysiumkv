@@ -61,13 +61,12 @@ protected:
             const std::string cold = (dir_.path() / "cold").string();
             std::filesystem::create_directories(cold);
             second_store_ = elysiumkv_local_blob_store_create(cold.c_str(), "store-1");
-            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 0,
-                                               120'000),
+            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 120'000),
                       ELYSIUMKV_OK);
-            EXPECT_EQ(elysiumkv_options_add_tier(options, second_store_, ELYSIUMKV_DURABLE, 0, 0, 0, 0),
+            EXPECT_EQ(elysiumkv_options_add_tier(options, second_store_, ELYSIUMKV_DURABLE, 0, 0, 0),
                       ELYSIUMKV_OK);
         } else {
-            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_DURABLE, 0, 0, 0, 0),
+            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_DURABLE, 0, 0, 0),
                       ELYSIUMKV_OK);
         }
         EXPECT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 8, 12, 0),
@@ -270,7 +269,7 @@ TEST_F(CApiTest, StatusCodesAreDistinctAndCarryDetail) {
     elysiumkv_options* options = elysiumkv_options_create();
     ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0, 0), ELYSIUMKV_OK);
     // A transient last tier: rejected at open (ARCHITECTURE.md "A tier is not a level").
-    ASSERT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 0, 120'000),
+    ASSERT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 120'000),
               ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),
               ELYSIUMKV_OK);
@@ -814,7 +813,7 @@ TEST_F(CApiTest, ABindingCanSupplyItsOwnBlobStore) {
     elysiumkv_options* options = elysiumkv_options_create();
     ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 32u << 10, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0, 0),
               ELYSIUMKV_OK);
-    ASSERT_EQ(elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0), ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),
               ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 1, ELYSIUMKV_COMPRESSION_NONE, 0, 0, 0, 0, 0),

@@ -271,8 +271,7 @@ void elysiumkv_options_destroy(elysiumkv_options* options) { delete options; }
 
 elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* store,
                                         elysiumkv_durability durability, int64_t max_age_ms,
-                                        int64_t max_file_bytes, int64_t max_bytes,
-                                        int64_t stall_age_ms) {
+                                        int64_t max_bytes, int64_t stall_age_ms) {
     return guard([&]() -> elysiumkv_status {
         if (options == nullptr || store == nullptr) {
             return fail(Status::Config, "elysiumkv_options_add_tier: null options or store");
@@ -282,7 +281,6 @@ elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* st
         tier.durability =
             durability == ELYSIUMKV_TRANSIENT ? Durability::Transient : Durability::Durable;
         if (max_age_ms > 0) tier.max_age = Duration(max_age_ms);
-        if (max_file_bytes > 0) tier.max_file_bytes = static_cast<size_t>(max_file_bytes);
         if (max_bytes > 0) tier.max_bytes = static_cast<size_t>(max_bytes);
         if (stall_age_ms > 0) tier.stall_age = Duration(stall_age_ms);
         options->options.tiers.push_back(std::move(tier));

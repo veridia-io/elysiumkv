@@ -156,12 +156,12 @@ void JNICALL options_destroy(JNIEnv*, jclass, jlong options) {
 }
 
 void JNICALL options_add_tier(JNIEnv* env, jclass, jlong options, jlong store, jint durability,
-                              jlong max_age_ms, jlong max_file_bytes, jlong max_bytes,
+                              jlong max_age_ms, jlong max_bytes,
                               jlong stall_age_ms) {
     guard_void(env, [&] {
         check(env, elysiumkv_options_add_tier(as_options(options), as_pointer(store),
                                             static_cast<elysiumkv_durability>(durability), max_age_ms,
-                                            max_file_bytes, max_bytes, stall_age_ms));
+                                            max_bytes, stall_age_ms));
     });
 }
 
@@ -851,7 +851,7 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(options_create)},
     {const_cast<char*>("optionsDestroy"), const_cast<char*>("(J)V"),
      reinterpret_cast<void*>(options_destroy)},
-    {const_cast<char*>("optionsAddTier"), const_cast<char*>("(JJIJJJJ)V"),
+    {const_cast<char*>("optionsAddTier"), const_cast<char*>("(JJIJJJ)V"),
      reinterpret_cast<void*>(options_add_tier)},
     {const_cast<char*>("optionsSetLevel"), const_cast<char*>("(JIIJIIIJ)V"),
      reinterpret_cast<void*>(options_set_level)},

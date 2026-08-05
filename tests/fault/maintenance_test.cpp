@@ -643,7 +643,7 @@ protected:
         for (const FileMetadata& file : version->all_files()) {
             const int at = tiers.tier_of_store(file.store_id);
             if (at < 0) return "file names a store the configuration does not have";
-            const int wants = placement(tiers, file.min_write_time_ms, file.file_bytes, now);
+            const int wants = placement(tiers, file.min_write_time_ms, now);
             if (wants != at) {
                 return "file " + std::to_string(file.file_number) + " at L" +
                        std::to_string(file.level) + " sits on tier " + std::to_string(at) +

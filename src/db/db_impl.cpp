@@ -222,8 +222,8 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
     return result;
 }
 
-const Tier& DbImpl::tier_for(uint64_t min_write_time_ms, uint64_t file_bytes) const {
-    const int index = placement(tiers_, min_write_time_ms, file_bytes, options_.clock());
+const Tier& DbImpl::tier_for(uint64_t min_write_time_ms) const {
+    const int index = placement(tiers_, min_write_time_ms, options_.clock());
     return tiers_.tiers[static_cast<size_t>(index)];
 }
 
@@ -713,9 +713,8 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     if (!built) return built.error();
     if (built->num_entries == 0) return Status::Ok;
 
-    // ARCHITECTURE.md "A tier is not a level" — placement is evaluated once the bytes exist, because
-    // `max_file_bytes` is one of its inputs.
-    const Tier& tier = tier_for(memtable->creation_time_ms(), built->bytes.size());
+    // ARCHITECTURE.md "A tier is not a level" — placement from the memtable's age alone.
+    const Tier& tier = tier_for(memtable->creation_time_ms());
 
     auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
     if (!file_number) return file_number.error();
@@ -1116,7 +1115,7 @@ Stats DbImpl::stats() const {
             if (oldest_write == 0 || file.min_write_time_ms < oldest_write) {
                 oldest_write = file.min_write_time_ms;
             }
-            if (placement(tiers_, file.min_write_time_ms, file.file_bytes, now) > index) {
+            if (placement(tiers_, file.min_write_time_ms, now) > index) {
                 ++tier_stats.files_pending_migration;
             }
         }

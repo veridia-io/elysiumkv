@@ -98,12 +98,17 @@ ELYSIUMKV_API void elysiumkv_options_destroy(elysiumkv_options*);
 /* Tiers (ARCHITECTURE.md "A tier is not a level"), appended hot to cold. `store` is a handle from one of the
  * blob-store constructors below. A negative or zero bound means "unset".
  *
- * The last tier must bound neither age nor file size, and must be durable;
- * violations are reported by elysiumkv_open as ELYSIUMKV_CONFIG. */
+ * The last tier must not bound age, and must be durable; violations are reported
+ * by elysiumkv_open as ELYSIUMKV_CONFIG.
+ *
+ * `max_bytes` is the *tier's* capacity, evicted oldest-first. There is no
+ * per-file size bound: this function used to take one, and it was removed because
+ * size gave a second, independent route to a colder tier and placement has to be
+ * monotone in age alone. To keep large files off a fast tier, lower that level's
+ * target_file_bytes so large files are not produced. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options*, void* store,
                                         elysiumkv_durability durability, int64_t max_age_ms,
-                                        int64_t max_file_bytes, int64_t max_bytes,
-                                        int64_t stall_age_ms);
+                                        int64_t max_bytes, int64_t stall_age_ms);
 
 /* Levels (ARCHITECTURE.md "Compaction"), LSM structure only — no storage decisions. `level` may skip
  * numbers; gaps inherit the nearest shallower entry. A negative bound is

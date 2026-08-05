@@ -3,7 +3,7 @@
 An embedded LSM key-value store in C++, with a C ABI and a Java binding.
 
 ElysiumKV is built around one idea that most embedded stores leave to the operator:
-**where a file lives is decided per file, by its age and size, and it is decided
+**where a file lives is decided per file, by its age, and it is decided
 continuously.** Hot data sits on fast storage, cold data migrates to cheap
 storage, and the store keeps working while it happens. Everything else — leveled
 compaction, bloom filters, a block cache, prefix scans — is there to make that
@@ -41,7 +41,7 @@ useful rather than to be novel.
 - **Leveled compaction** with a background thread, write stalls and tombstone
   reclamation.
 - **Storage tiers**: several object stores per database, with files migrating
-  between them by age and size (see below).
+  between them by age (see below).
 - **A durable watermark**: tell the store where you have reached in the log you
   are replaying, and it hands the position back at the next open — including
   rolled back to what a lost transient tier could not have held. This is the
@@ -67,8 +67,8 @@ A **level** is LSM structure: overlap, capacity, compression, what compacts into
 what. A **tier** is storage: which object store physically holds a file. They are
 independent axes, and a single level routinely spans several tiers.
 
-Placement is a pure function of a file's age and size, evaluated continuously, and
-it only ever moves a file colder:
+Placement is a pure function of a file's age, evaluated continuously, and it only
+ever moves a file colder:
 
 ```cpp
 options.tiers = {

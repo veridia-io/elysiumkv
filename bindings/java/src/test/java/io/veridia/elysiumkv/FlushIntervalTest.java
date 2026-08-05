@@ -32,7 +32,7 @@ class FlushIntervalTest {
                 .memtableBytes(BIG_MEMTABLE)
                 .flushIntervalMs(flushIntervalMs)
                 .paranoidChecks(true)
-                .addTier(support.hot, Durability.DURABLE, 0, 0, 0, 0)
+                .addTier(support.hot, Durability.DURABLE, 0, 0, 0)
                 .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                 .level(1, Compression.NONE, 0, 0, 0, 0, 0));
     }

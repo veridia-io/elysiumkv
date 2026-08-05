@@ -80,7 +80,7 @@ public class CrossingCostBenchmark {
                 .manifestCatalog(catalog)
                 .memtableBytes(4L << 20)
                 .blockCacheBytes(256L << 20)   // everything hot: this measures the boundary
-                .addTier(store, Durability.DURABLE, 0, 0, 0, 0)
+                .addTier(store, Durability.DURABLE, 0, 0, 0)
                 .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                 .level(1, Compression.NONE, 0, 0, 0, 0, 0);
         db = ElysiumKV.open(options);
