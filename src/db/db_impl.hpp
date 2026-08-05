@@ -141,10 +141,22 @@ public:
     /// bypass is then the only thing that can find the work, which is the bound this exists to
     /// demonstrate.
     void pin_maintenance_epoch_for_test(bool on) { pin_maintenance_epoch_.store(on); }
-    /// ARCHITECTURE.md "Negative controls" — stops the coordinator publishing a stall, so the flag
-    /// the write path reads can never become true. If a write stalls on `stall_age` anyway, the
-    /// write path is evaluating the predicate itself and there are two definitions of it.
-    void suppress_stall_publication_for_test(bool on) { suppress_stall_publication_.store(on); }
+    /// ARCHITECTURE.md "Negative controls" — pins the published stall flag, so what the write path
+    /// reads and what the clock says can be made to disagree. That disagreement is the only way to
+    /// tell a write path that *reads* the flag from one that *computes* the predicate, and it works
+    /// in both directions:
+    ///
+    /// - pinned **true** with nothing actually past `stall_age`: a reader stalls, a computer does
+    ///   not;
+    /// - pinned **false** with the tier far past `stall_age`: a reader proceeds, a computer stalls.
+    ///
+    /// Neither involves timing, which matters — arranging for the flag to become true *naturally*
+    /// races the rescue that clears it again, and that race is what made an earlier version of this
+    /// test fail on CI while passing locally.
+    void pin_transient_stall_for_test(std::optional<bool> state) {
+        pinned_transient_stall_.store(state.has_value() ? (*state ? 1 : 0) : -1);
+        if (state.has_value()) transient_stalled_.store(*state);
+    }
     /// ARCHITECTURE.md "Negative controls" — **the engine as it was**: the coordinator's clock plays
     /// no part, so neither a time transition nor the periodic bypass opens the gate and only an
     /// epoch change — which means a write — can cause work. That is precisely the defect this
@@ -359,7 +371,12 @@ private:
     std::atomic<bool> suppress_maintenance_wakes_{false};
     std::atomic<bool> pin_maintenance_epoch_{false};
     std::atomic<bool> suppress_timed_maintenance_{false};
-    std::atomic<bool> suppress_stall_publication_{false};
+    /// Tri-state: -1 not pinned, 0 pinned clear, 1 pinned set. **Atomic, and an `optional<bool>`
+    /// here was a data race** — the coordinator thread reads this while a test thread writes it, and
+    /// "the test writes it before the writes it cares about" is an argument about *intent*, not
+    /// about synchronisation. TSAN reported it intermittently, which is what an unsynchronised
+    /// access looks like when the interleaving usually happens to be benign.
+    std::atomic<int8_t> pinned_transient_stall_{-1};
     std::atomic<uint32_t> suppressed_tasks_{0};
 #ifdef ELYSIUMKV_PARANOID
     /// ARCHITECTURE.md "Negative controls" — at most one *deleting* task may be in flight, because

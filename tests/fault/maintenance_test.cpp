@@ -52,9 +52,15 @@ namespace {
 /// periodic gate bypass — a fixed number of ticks — also lands inside a test's patience.
 constexpr Duration kTick{20};
 
-/// How long any of these tests will wait for the coordinator to converge before failing. Generous
-/// against a loaded CI machine; a failure reports rather than hangs.
-constexpr auto kSettle = std::chrono::seconds(10);
+/// How long any of these tests will wait for the coordinator to converge before failing.
+///
+/// **Pure patience, so it is set generously.** Every positive case here waits for a *terminal* state
+/// — a file has left a tier, a counter has advanced, a budget is met — so a longer bound cannot turn
+/// a failure into a pass; it can only stop a slow runner from reporting one spuriously. The negative
+/// cases pass their own short limits, and ctest's per-test timeout is the real backstop. The
+/// workloads that go through a fault-injected store pay their injected latency on every operation,
+/// which is several times slower on a shared CI runner than locally.
+constexpr auto kSettle = std::chrono::seconds(30);
 
 class MaintenanceTest : public ::testing::Test {
 protected:
@@ -396,33 +402,36 @@ TEST_F(MaintenanceTest, AForcedReconcileDoesTheWorkTheGateSkips) {
 
 // --- the stall predicate has one owner ----------------------------------------
 
-// The coordinator evaluates `stall_age` and publishes the answer; the write path reads the flag.
-// One owner, one definition — the same predicate in two places is how a valve ends up engaged by
-// one and not the other.
-TEST_F(MaintenanceTest, TheWritePathDoesNotEvaluateStallAgeItself) {
+/* The coordinator evaluates `stall_age` and publishes the answer; the write path reads the flag. One
+ * owner, one definition — the same predicate in two places is how a valve ends up engaged by one and
+ * not the other.
+ *
+ * **Both directions pin the flag against what the clock says**, and that is the only construction
+ * that discriminates. Letting the flag become true *naturally* — advance past `stall_age` and wait —
+ * proves nothing: a write path that computed the predicate itself would stall too, since the clock
+ * agrees. It is also a race, because the rescue that the advance makes due is exactly what clears the
+ * flag again; an earlier version of this test arranged the true state with a deliberately slow cold
+ * store and lost the window on a CI runner while passing locally. The end-to-end valve behaviour is
+ * `TierMigrationTest.TheStallValveFiresPastATierStallAge`; this pair is about who owns the decision.
+ */
+TEST_F(MaintenanceTest, TheWritePathStallsOnThePublishedFlagAloneAndNotOnTheClock) {
     Options options = base(make_transient_options(store_, kMaxAge, kStallAge));
     options.block_on_stall = false;
-    // Migration cannot keep up, which is the situation the valve exists for.
-    auto slow_cold = std::make_shared<FaultInjectingBlobStore>(store_.store(1));
-    slow_cold->set_latency(std::chrono::milliseconds(50));
-    options.tiers[1].store = slow_cold;
     open(std::move(options));
 
     write(40);
     ASSERT_EQ(db_->flush(), Status::Ok);
     ASSERT_TRUE(settle([&] { return files_on(0) > 0; }));
 
-    advance(Duration(200'000));   // past stall_age
-    ASSERT_TRUE(settle([&] { return engine().transient_stalled(); }))
-        << "the coordinator has to publish it before the write path can read it";
+    // The clock has not moved, so nothing is anywhere near `stall_age`: a write path evaluating the
+    // predicate itself would find no reason to hold anything.
+    ASSERT_FALSE(engine().transient_stalled());
+    EXPECT_EQ(db_->put(Slice::from(key_at(2000)), Slice::from("x")), Status::Ok);
 
-    bool stalled = false;
-    for (int i = 0; i < 400 && !stalled; ++i) {
-        if (db_->put(Slice::from(key_at(2000 + i)), Slice::from("x")) == Status::Stalled) {
-            stalled = true;
-        }
-    }
-    EXPECT_TRUE(stalled) << "writes must stop rather than let exposure grow without bound";
+    engine().pin_transient_stall_for_test(true);
+    EXPECT_EQ(db_->put(Slice::from(key_at(2001)), Slice::from("x")), Status::Stalled)
+        << "the write path is not reading the published flag";
+    EXPECT_GT(db_->stats().stall_count, 0u);
 }
 
 // The control: with the published flag forced clear, the write path must *not* stall on its own
@@ -434,11 +443,11 @@ TEST_F(MaintenanceTest, WithTheFlagClearTheWritePathDoesNotStallOnItsOwn) {
 
     write(40);
     ASSERT_EQ(db_->flush(), Status::Ok);
-    // The coordinator stops publishing, so the flag the write path reads can never become true —
-    // while the clock says the tier is far past `stall_age`, which a second evaluator would notice.
-    // Suppressing the coordinator's *timing* would not do: any epoch change wakes it and it then
-    // publishes for real, which is what made an earlier version of this control pass by accident.
-    engine().suppress_stall_publication_for_test(true);
+    // The flag is pinned clear, so what the write path reads can never become true — while the clock
+    // says the tier is far past `stall_age`, which a second evaluator would notice. Suppressing the
+    // coordinator's *timing* instead would not do: any epoch change wakes it and it then publishes
+    // for real, which is what made an earlier version of this control pass by accident.
+    engine().pin_transient_stall_for_test(false);
     advance(Duration(600'000));
     ASSERT_FALSE(engine().transient_stalled());
 

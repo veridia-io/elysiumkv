@@ -317,12 +317,14 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     // it rather than assuming the very next `put` sees it.
     options.maintenance_interval = Duration(20);
 
-    // Hold migration back the way a slow durable store would, rather than by
-    // arranging for nothing to run: the valve has to fire because migration
-    // cannot keep up, which is the situation it exists for.
-    auto slow_cold = std::make_shared<FaultInjectingBlobStore>(store_.store(1));
-    slow_cold->set_latency(std::chrono::milliseconds(50));
-    options.tiers[1].store = slow_cold;
+    // **Migration must be unable to keep up, not merely slow.** A slow cold store was the first
+    // shape here and it makes the stalled state a *window*: the rescue the age crossing makes due is
+    // exactly what clears the flag again, so the test was racing the thing it had slowed down, and it
+    // lost that race on a CI runner while passing locally. An unreachable cold store is the honest
+    // version of "migration cannot keep up" — the rescue keeps failing with `Io`, exposure genuinely
+    // grows, and the stalled state is stable rather than momentary.
+    auto cold = std::make_shared<FaultInjectingBlobStore>(store_.store(1));
+    options.tiers[1].store = cold;
 
     auto opened = DB::open_with_result(options);
     ASSERT_TRUE(opened.has_value());
@@ -333,13 +335,19 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     ASSERT_GT(tier(0).file_count, 0);
     EXPECT_FALSE(tier(0).stalling);
 
+    // From here the rescue can never succeed, so nothing will take the file off the hot tier.
+    cold->set_unreachable(true);
+
     now_.fetch_add(90'000, std::memory_order_relaxed);  // past max_age, short of stall_age
     EXPECT_GT(tier(0).files_pending_migration, 0) << "degraded";
     EXPECT_FALSE(tier(0).stalling) << "but not yet stalled";
 
     now_.fetch_add(60'000, std::memory_order_relaxed);  // past stall_age
-    EXPECT_TRUE(tier(0).stalling);
 
+    // The valve engages on a coordinator tick rather than on the writing thread — one evaluator, so
+    // the write path cannot compute a different answer — which costs up to one interval. That is the
+    // `+ interval` term the exposure window already carries. The wait converges rather than racing:
+    // the stalled state is now permanent until the cold store comes back.
     bool stalled = false;
     for (int i = 0; i < 400 && !stalled; ++i) {
         if (db_->put(Slice::from(key_at(1000 + i)), Slice::from("x")) == Status::Stalled) {
@@ -348,6 +356,7 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
         if (!stalled) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     EXPECT_TRUE(stalled) << "writes must stop rather than let exposure grow without bound";
+    EXPECT_TRUE(tier(0).stalling);
     EXPECT_GT(db_->stats().stall_count, 0u);
 }
 

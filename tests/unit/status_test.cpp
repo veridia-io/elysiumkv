@@ -7,9 +7,13 @@
 namespace elysiumkv {
 namespace {
 
+/// **Every enumerator, and adding one here is not optional.** `status_name` has a `switch` with no
+/// default, so a new status compiles — the switch falls through and returns "unknown" — and every
+/// property below is then simply never asked of it. Keep this list exhaustive.
 constexpr Status kAll[] = {
-    Status::Ok,     Status::NotFound, Status::Corrupt, Status::Unusable,
-    Status::Fenced, Status::Config,   Status::Io,      Status::Stalled,
+    Status::Ok,     Status::NotFound, Status::Corrupt,     Status::Unusable,
+    Status::Fenced, Status::Config,   Status::Io,          Status::Stalled,
+    Status::Unsupported,
 };
 
 TEST(Status, NamesAreDistinctAndKnown) {
@@ -37,9 +41,23 @@ TEST(Status, TerminalStatusesRequireReopen) {
     EXPECT_TRUE(is_terminal(Status::Unusable));
     EXPECT_TRUE(is_terminal(Status::Fenced));
     EXPECT_TRUE(is_terminal(Status::Config));
+    // A manifest this build cannot read will not become readable by retrying. The remedy is a
+    // different binary, so the caller must close rather than loop.
+    EXPECT_TRUE(is_terminal(Status::Unsupported));
     EXPECT_FALSE(is_terminal(Status::Ok));
     EXPECT_FALSE(is_terminal(Status::NotFound));
     EXPECT_FALSE(is_terminal(Status::Stalled));
+}
+
+// ARCHITECTURE.md "Absence is an answer, not an error" — `Unsupported` says the data is intact and
+// this build cannot read it. Collapsing it into `Corrupt` would tell an operator their bytes are
+// damaged and send them to a restore; collapsing it into `Config` would suggest they mis-set an
+// option. It has to be distinguishable from both, and programmatically — a better message in
+// `last_error` is not enough, because a caller cannot branch on prose.
+TEST(Status, UnsupportedIsNeitherCorruptionNorMisconfiguration) {
+    EXPECT_NE(status_name(Status::Unsupported), status_name(Status::Corrupt));
+    EXPECT_NE(status_name(Status::Unsupported), status_name(Status::Config));
+    EXPECT_FALSE(is_retryable(Status::Unsupported));
 }
 
 TEST(Status, ResultCarriesStatusAsTheErrorType) {

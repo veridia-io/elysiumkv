@@ -592,7 +592,7 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
 }
 
 void DbImpl::publish_transient_stall(const Version& version, uint64_t now) {
-    if (suppress_stall_publication_.load()) return;   // negative control; see the header
+    if (pinned_transient_stall_.load() >= 0) return;   // negative control; see the header
 
     bool stalled = false;
     for (const Tier& tier : tiers_.tiers) {
