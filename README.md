@@ -58,7 +58,7 @@ useful rather than to be novel.
   function-pointer vtables so a binding can supply its own.
 - **Bindings**: a stable C ABI (52 functions, C99) and a Java binding over JNI
   needing only Java 11, plus a Kafka Streams state store in
-  `bindings/kafka-streams`.
+  `bindings/kafka-streams-v3`.
 
 Keys are ordered as unsigned bytes. There are no column families, no snapshots and
 no sequence numbers — recency is positional, decided by which level and which file

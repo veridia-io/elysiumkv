@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Kafka Streams adapter, Phase 1: a KeyValueStore backed by ElysiumKV with Streams' changelog
+  and restore semantics untouched. The only thing that changes is where the bytes live.
+
+  A separate module rather than part of the core binding, because kafka-streams is a heavy
+  dependency that a plain key-value embedder has no reason to carry — and because the two have
+  genuinely different audiences.
+
+  **Versioned in the artifact name.** Phase 2 needs store-managed changelog offsets (KIP-1035), which
+  exist only on Kafka 4.x, and the two cannot be one artifact: `StateStore` gained methods that do
+  not compile against 3.x, and an application has exactly one Kafka on its classpath. So this is the
+  3.x adapter and a `-v4` one will sit beside it, rather than this taking the unqualified name and
+  leaving the other to be called something apologetic.
+
+  kafka-streams is `provided`: a Streams application already has it on the classpath, and a version
+  this module pinned would fight the one the application chose.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.veridia</groupId>
+  <artifactId>elysiumkv-kafka-streams-v3</artifactId>
+  <version>0.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>ElysiumKV Kafka Streams 3.x adapter</name>
+  <description>
+    A Kafka Streams state store backed by ElysiumKV, so state can live on tiered storage instead of
+    local disk alone. Built against the Kafka 3.x StateStore interface.
+  </description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>11</maven.compiler.release>
+    <kafka.version>3.9.1</kafka.version>
+    <junit.version>5.13.4</junit.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.veridia</groupId>
+      <artifactId>elysiumkv</artifactId>
+      <version>0.0.0-SNAPSHOT</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-streams</artifactId>
+      <version>${kafka.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-streams-test-utils</artifactId>
+      <version>${kafka.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
