@@ -30,9 +30,11 @@ public final class ElysiumKVStats {
         private final int filesStaleCodec;
         private final boolean ageTriggered;
         private final boolean stalling;
+        private final long entries;
+        private final long tombstones;
 
         Level(int level, int fileCount, long bytes, long oldestFileAgeMs, int filesStaleCodec,
-              boolean ageTriggered, boolean stalling) {
+              boolean ageTriggered, boolean stalling, long entries, long tombstones) {
             this.level = level;
             this.fileCount = fileCount;
             this.bytes = bytes;
@@ -40,6 +42,8 @@ public final class ElysiumKVStats {
             this.filesStaleCodec = filesStaleCodec;
             this.ageTriggered = ageTriggered;
             this.stalling = stalling;
+            this.entries = entries;
+            this.tombstones = tombstones;
         }
 
         public int level() { return level; }
@@ -55,6 +59,12 @@ public final class ElysiumKVStats {
          * finished.
          */
         public int filesStaleCodec() { return filesStaleCodec; }
+
+        /** Records at this level: superseded versions and tombstones included. See {@link ElysiumKVStats#entryCount()}. */
+        public long entries() { return entries; }
+
+        /** How many of {@link #entries()} are deletes. */
+        public long tombstones() { return tombstones; }
         public boolean ageTriggered() { return ageTriggered; }
         public boolean stalling() { return stalling; }
     }
@@ -114,6 +124,8 @@ public final class ElysiumKVStats {
     private final long memoryBudgetTotal;
     private final long budgetSheds;
     private final long flushes;
+    private final long memtableEntries;
+    private final long memtableTombstones;
     private final long durableWatermark;
     private final boolean watermarkPresent;
     private final List<Level> levels;
@@ -152,6 +164,8 @@ public final class ElysiumKVStats {
         // and read only when the header says they are there: a store built against an older
         // native library reports a shorter header, and reading past it would be reading padding.
         flushes = headerBytes > 192 ? readLong(buffer, 192) : 0L;
+        memtableEntries = headerBytes > 216 ? readLong(buffer, 216) : 0L;
+        memtableTombstones = headerBytes > 224 ? readLong(buffer, 224) : 0L;
         durableWatermark = headerBytes > 200 ? readLong(buffer, 200) : 0L;
         watermarkPresent = headerBytes > 208 && buffer[208] != 0;
 
@@ -161,7 +175,9 @@ public final class ElysiumKVStats {
             levelList.add(new Level(readInt(buffer, offset), readInt(buffer, offset + 4),
                                     readLong(buffer, offset + 8), readLong(buffer, offset + 16),
                                     readInt(buffer, offset + 24), buffer[offset + 28] != 0,
-                                    buffer[offset + 29] != 0));
+                                    buffer[offset + 29] != 0,
+                                    levelRecordBytes >= 48 ? readLong(buffer, offset + 32) : 0L,
+                                    levelRecordBytes >= 48 ? readLong(buffer, offset + 40) : 0L));
             offset += levelRecordBytes;
         }
         List<Tier> tierList = new ArrayList<>(tierCount);
@@ -249,6 +265,35 @@ public final class ElysiumKVStats {
      * at scrape time and a flush between two scrapes leaves no trace in it.
      */
     public long flushes() { return flushes; }
+
+    /** Records in the live and frozen memtables; the memtable deduplicates, so an overwrite adds none. */
+    public long memtableEntries() { return memtableEntries; }
+
+    /** How many of {@link #memtableEntries()} are deletes. */
+    public long memtableTombstones() { return memtableTombstones; }
+
+    /**
+     * An <strong>upper bound</strong> on the number of distinct live keys — {@code records -
+     * tombstones}, across the levels and the memtable.
+     *
+     * <p>Provable rather than typical: a live key's newest record is always a put, never a tombstone,
+     * so {@code records >= live + tombstones}. The slack is superseded versions that compaction has
+     * not merged yet, so on an update-heavy workload over a small key space this can exceed the true
+     * count substantially and then fall sharply when compaction catches up. It is exact once
+     * everything has merged into the bottommost level.
+     *
+     * <p>It is deliberately <em>not</em> named {@code approximateNumEntries}: that name belongs to the
+     * Kafka Streams interface, and an adapter can implement it in terms of this without the engine
+     * adopting Streams' accuracy contract.
+     *
+     * <p>Costs a {@link ElysiumKV#stats()} call, which is O(files). Fine on a reporting interval,
+     * wrong in a per-record path.
+     */
+    public long entryCount() {
+        long total = memtableEntries - memtableTombstones;
+        for (Level level : levels) total += level.entries() - level.tombstones();
+        return total;
+    }
 
     /**
      * The <em>live</em> watermark frontier: the position up to which this store's state would

@@ -82,6 +82,37 @@ class StatsSnapshotTest {
      * walk off into the next record and return nonsense.
      */
     @Test
+    void theEntryCountIsAnUpperBoundOnLiveKeys(@TempDir Path dir) throws Exception {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.open());
+            assertEquals(0L, db.stats().entryCount(), "an empty store counts nothing");
+
+            for (int i = 0; i < 200; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v"));
+            assertEquals(200L, db.stats().entryCount());
+            assertEquals(200L, db.stats().memtableEntries(), "nothing flushed yet");
+
+            db.flush();
+            assertEquals(200L, db.stats().entryCount(), "a flush moves records, it creates none");
+            assertEquals(0L, db.stats().memtableEntries());
+            assertTrue(db.stats().levels().get(0).entries() > 0, "the records are at a level now");
+
+            // Deleting every key: the tombstones are records, and the subtraction removes their own
+            // contribution — leaving the shadowed puts, which is why this is a bound and not a count.
+            for (int i = 0; i < 200; ++i) db.delete(TestSupport.key(i));
+            db.flush();
+            assertTrue(db.stats().entryCount() >= 0, "never negative");
+            long tombstones = 0;
+            for (ElysiumKVStats.Level level : db.stats().levels()) tombstones += level.tombstones();
+            assertTrue(tombstones > 0, "the deletes are recorded as tombstones");
+
+            // Compacted to the bottommost level, tombstones are dropped and nothing is left.
+            for (int level = 0; level < db.stats().levels().size(); ++level) db.compactLevel(level);
+            assertEquals(0L, db.stats().entryCount(), "nothing live, and nothing left to say so");
+            db.close();
+        }
+    }
+
+    @Test
     void aNewerFormatWithWiderRecordsStillDecodes(@TempDir Path dir) throws Exception {
         try (TestSupport support = new TestSupport(dir)) {
             ElysiumKV db = PinLeakExtension.watch(support.open());

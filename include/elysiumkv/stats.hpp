@@ -33,6 +33,29 @@ struct LevelStats {
     /// There is no `files_stale_store` counterpart: placement is no longer
     /// derived from the level, so the question does not arise.
     int files_stale_codec = 0;
+
+    /// **Records, not keys**, and the distinction is the whole contract. Every superseded version of
+    /// a key is a record until compaction merges it, and every tombstone is a record until a
+    /// compaction whose output is bottommost drops it. So a sum over levels is an **upper bound on
+    /// the number of distinct live keys** — provable rather than typical, and equal once everything
+    /// has merged into the bottommost level.
+    ///
+    /// Exact per file: the SST builder counts as it appends. The approximation is entirely in the
+    /// cross-file dimension, and nothing here is sampled.
+    ///
+    /// Reported per level rather than as one total because **the accuracy depends on the
+    /// distribution**: a million records in the bottommost level is close to a million keys, and a
+    /// million spread across L0 after an update storm is not.
+    uint64_t entries = 0;
+    /// How many of `entries` are deletes.
+    ///
+    /// **`entries - tombstones` is the tighter upper bound, and it is what a total should use.**
+    /// A live key's newest record is always a put, never a tombstone, so tombstones are disjoint
+    /// from the records representing live keys: `records >= live + tombstones`, hence
+    /// `records - tombstones >= live`. Both quantities converge on the true count once compaction
+    /// has merged everything into the bottommost level and dropped its tombstones — the subtraction
+    /// simply gets there sooner.
+    uint64_t tombstones = 0;
 };
 
 /// ARCHITECTURE.md "Statistics are a buffer, not a struct" — the storage axis. Tier and level are independent (ARCHITECTURE.md "A tier is not a level"), so a level's
@@ -77,6 +100,11 @@ struct Stats {
     size_t memtable_bytes = 0;
     /// Age of the oldest write in the memtable; zero when it holds nothing.
     Duration memtable_age{0};
+    /// Records in the live and frozen memtables together. Same meaning as `LevelStats::entries`:
+    /// puts and deletes alike. The memtable deduplicates on insert, so an overwrite does not add one.
+    uint64_t memtable_entries = 0;
+    /// How many of those are deletes.
+    uint64_t memtable_tombstones = 0;
 
     /// Memtable rotations that became an L0 file. Beside `compactions` because it is the *cause*
     /// of most of them: `Options::flush_interval` set too short produces many small L0 files and

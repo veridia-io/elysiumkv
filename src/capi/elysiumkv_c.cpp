@@ -1079,8 +1079,8 @@ constexpr uint32_t kStatsFormatVersion = 1;
 // the header declares its own length, so a decoder that starts records at `header_bytes` skips
 // what it does not recognise — which is the property that made the previous seven appended
 // scalars a non-event too.
-constexpr uint32_t kStatsHeaderBytes = 216;
-constexpr uint32_t kStatsLevelRecordBytes = 32;
+constexpr uint32_t kStatsHeaderBytes = 232;
+constexpr uint32_t kStatsLevelRecordBytes = 48;
 constexpr uint32_t kStatsTierRecordBytes = 32;
 
 /// Appends little-endian into a buffer it never overruns: once `full` is set the
@@ -1152,6 +1152,8 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.u64(stats.durable_watermark.value_or(0));
     out.u8(stats.durable_watermark.has_value() ? 1u : 0u);
     out.pad(7);
+    out.u64(stats.memtable_entries);
+    out.u64(stats.memtable_tombstones);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);
@@ -1162,6 +1164,10 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
         out.u8(level.age_triggered ? 1u : 0u);
         out.u8(level.stalling ? 1u : 0u);
         out.pad(2);
+        // Appended, which is why the record declares its own length: a decoder that steps by
+        // `level_record_bytes` skips these rather than mis-reading the record after them.
+        out.u64(level.entries);
+        out.u64(level.tombstones);
     }
     for (const TierStats& tier : stats.tiers) {
         out.i32(tier.tier);

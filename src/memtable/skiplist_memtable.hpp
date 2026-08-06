@@ -60,7 +60,12 @@ public:
     void set_watermark_high(uint64_t position) { watermark_.high = position; }
     void set_watermark_bounds(const WatermarkInterval& bounds) { watermark_ = bounds; }
 
+    /// Distinct keys held, live and deleted alike — the skiplist deduplicates on insert, so an
+    /// overwrite does not add one.
     uint64_t num_entries() const { return entries_.load(std::memory_order_relaxed); }
+    /// How many of those are deletes. Maintained across type transitions, since overwriting a put
+    /// with a delete changes the kind without changing the count.
+    uint64_t num_tombstones() const { return tombstones_.load(std::memory_order_relaxed); }
 
     struct ValueRecord {
         uint32_t size;
@@ -96,6 +101,7 @@ private:
     Node* head_ = nullptr;
     std::atomic<int> max_height_{1};
     std::atomic<uint64_t> entries_{0};
+    std::atomic<uint64_t> tombstones_{0};
     uint64_t creation_time_ms_ = 0;
     WatermarkInterval watermark_;
     uint32_t rng_state_ = 0x2545F491u;

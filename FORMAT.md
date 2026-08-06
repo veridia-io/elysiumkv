@@ -225,13 +225,13 @@ size of each record type, so a decoder built against an older layout locates the
 and skips fields it does not know. **Locate records by the declared sizes, never by summing the
 fields you happen to know.**
 
-Header — `kStatsHeaderBytes = 216`:
+Header — `kStatsHeaderBytes = 232`:
 
 | Offset | Field | Type |
 | --- | --- | --- |
 | 0 | `format_version` | uint32 (1) |
-| 4 | `header_bytes` | uint32 (216) |
-| 8 | `level_record_bytes` | uint32 (32) |
+| 4 | `header_bytes` | uint32 (232) |
+| 8 | `level_record_bytes` | uint32 (48) |
 | 12 | `tier_record_bytes` | uint32 (32) |
 | 16 | `level_count` | uint32 |
 | 20 | `tier_count` | uint32 |
@@ -240,22 +240,28 @@ Header — `kStatsHeaderBytes = 216`:
 | 32 | 22 × uint64 scalars | see below |
 | 208 | `watermark_present` | uint8 (0/1) |
 | 209 | *padding* | 7 bytes, zero |
+| 216 | `memtable_entries` | uint64 |
+| 224 | `memtable_tombstones` | uint64 |
 
 The 22 scalars, in order from offset 32: `memtable_bytes`, `memtable_age_ms`, `compactions`,
 `compaction_bytes_read`, `compaction_bytes_written`, `migrations`, `migration_bytes`,
 `stalled_total_ms`, `stall_count`, `block_cache_hits`, `block_cache_misses`, `block_cache_bytes`,
 `pins_outstanding`, `reader_cache_hits`, `reader_cache_misses`, `reader_cache_bytes`, `open_readers`,
 `memory_budget_used`, `memory_budget_total`, `budget_sheds`, `flushes` (offset 192),
-`durable_watermark` (offset 200).
+`durable_watermark` (offset 200), `memtable_entries` (offset 216), `memtable_tombstones`
+(offset 224).
 
-`flushes` and `durable_watermark` were **appended without a version bump**, which is what the
-self-describing header is for: a decoder that locates records at `header_bytes` skips fields it does
-not know, and seven earlier scalars arrived the same way. `watermark_present` is 0 when no watermark
+`flushes`, `durable_watermark`, `memtable_entries` and `memtable_tombstones` were **appended without
+a version bump**, and so were the level record's `entries` and `tombstones` — which is what the
+self-describing header is for: a decoder that locates records at `header_bytes` and steps by
+`level_record_bytes` skips fields it does not know, and seven earlier scalars arrived the same way.
+The level record growing is the first time the *record* size has moved rather than the header, and it
+is safe for the same reason and under the same rule. `watermark_present` is 0 when no watermark
 has been set — zero is a valid position, so an exporter omits the series rather than publishing zero.
 
 Then `level_count` level records at offset `header_bytes`, then `tier_count` tier records.
 
-Level record — 32 bytes:
+Level record — 48 bytes:
 
 | Offset | Field | Type |
 | --- | --- | --- |
@@ -267,6 +273,8 @@ Level record — 32 bytes:
 | 28 | `age_triggered` | uint8 (0/1) |
 | 29 | `stalling` | uint8 (0/1) |
 | 30 | *padding* | 2 bytes, zero |
+| 32 | `entries` | uint64 |
+| 40 | `tombstones` | uint64 |
 
 Tier record — 32 bytes:
 

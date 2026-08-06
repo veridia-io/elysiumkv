@@ -1087,8 +1087,12 @@ Stats DbImpl::stats() const {
         // ARCHITECTURE.md "Statistics are a buffer, not a struct" and "Inside an SST" — what has not yet been rewritten under the level's current
         // settings. A stale file is perfectly readable — the per-block codec byte
         // and the recorded store_id see to that — what it costs is completion.
+        // Free: this loop already runs for the codec check. `num_entries` and `num_tombstones` are
+        // written by the SST builder, so these sums are exact about records.
         for (const FileMetadata& file : version->files_at(level)) {
             if (file.compression != config.compression) ++level_stats.files_stale_codec;
+            level_stats.entries += file.num_entries;
+            level_stats.tombstones += file.num_tombstones;
         }
 
         // Compaction lag: what you want when diagnosing why a level is over its
@@ -1142,6 +1146,8 @@ Stats DbImpl::stats() const {
         for (const auto& memtable : {mem_, imm_}) {
             if (memtable == nullptr) continue;
             stats.memtable_bytes += memtable->approximate_bytes();
+            stats.memtable_entries += memtable->num_entries();
+            stats.memtable_tombstones += memtable->num_tombstones();
             if (memtable->num_entries() == 0) continue;
             const uint64_t created = memtable->creation_time_ms();
             if (oldest_write == 0 || created < oldest_write) oldest_write = created;

@@ -32,6 +32,7 @@ add_executable(elysiumkv_tests
     unit/key_edges_test.cpp
     unit/version_test.cpp
     unit/version_set_test.cpp
+    unit/entry_count_test.cpp
     support/alloc_counter.cpp
     perf/allocation_test.cpp
     soak/growth_test.cpp
