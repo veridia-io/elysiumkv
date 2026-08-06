@@ -434,6 +434,10 @@ TEST_F(DbFaultTest, ReclamationHappensOnTheSweepRatherThanAtOpen) {
     Options reclaiming = options();
     reclaiming.orphan_sweep_interval = Duration(1);
     reclaiming.orphan_retention = Duration(60'000);
+    // Inline: this case asks for each sweep explicitly, so a background sweeper running beside it
+    // would make what is observed depend on how fast the machine is. The rest of this fixture is
+    // threaded, which is why the mode is set here rather than in `options()`.
+    reclaiming.background = BackgroundMode::Inline;
 
     Oracle oracle;
     auto opened = DB::open(reclaiming);

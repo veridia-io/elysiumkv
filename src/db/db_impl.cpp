@@ -1625,15 +1625,24 @@ Status DbImpl::classify_read_failure(Status status) const {
 Status DbImpl::sweep_orphans() {
     if (read_only_ || !options_.orphan_sweep_interval.has_value()) return Status::Ok;
 
+    // One sweep at a time. In production only the maintenance executor calls this, so the lock is
+    // never contended — it is here because `sweep_orphans_for_test` lets a test call it too, and a
+    // hook that quietly corrupts `orphan_first_seen_` when used alongside a running engine is a
+    // trap rather than a hook.
+    std::lock_guard<std::mutex> sweeping(sweep_mutex_);
+
     // **Re-read the manifest before deciding anything.** This is what turns a repeated observation
     // into a sustained one: a file whose edit committed since the last sweep is referenced now and
     // leaves the candidate set on its own, rather than being argued about. It is also a fence
     // detector — a pointer that moved under us means another writer owns this store.
-    const uint64_t generation_before = versions_->generation();
-    auto pointer = options_.manifest_catalog->read();
-    if (!pointer) return pointer.error();               // failure to look is not evidence
-    if (!pointer->has_value()) return Status::Ok;       // nothing to compare against
-    if ((*pointer)->generation != generation_before) {
+    //
+    // **Through `manifest_advanced`, which compares under the manifest mutex.** Reading our own
+    // generation and then reading the pointer as two separate steps is not the same check: this
+    // writer rolls its own generation between them often enough — a sweep overlapping a compaction
+    // is the ordinary case — and the two would then differ for a reason that has nothing to do with
+    // another writer. That fenced the instance against itself, permanently, and it showed up as a
+    // slow CI runner failing a test that passes locally because the sweep never overlapped anything.
+    if (versions_->manifest_advanced()) {
         versions_->mark_fenced();
         return Status::Fenced;
     }

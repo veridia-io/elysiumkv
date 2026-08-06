@@ -343,6 +343,8 @@ private:
     /// have to serve.
     std::map<std::string, std::map<std::string, uint64_t>> orphan_first_seen_;
     uint64_t next_sweep_ms_ = 0;
+    /// Serialises `sweep_orphans`, which the maintenance executor and a test may both call.
+    std::mutex sweep_mutex_;
     Status fail_terminal(Status status, std::string detail);
     /// ARCHITECTURE.md "A process-wide memory budget" — sheds memory when the shared budget is exceeded, in that
     /// order: evict the block cache, then flush memtables, then let the caller stall.
