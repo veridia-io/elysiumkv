@@ -41,6 +41,7 @@
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>

@@ -8,12 +8,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
+#include <string>
 #include <thread>
-#include <cstdio>
 #include <utility>
+#include <vector>
 
 namespace elysiumkv {
 namespace {

@@ -25,11 +25,13 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>

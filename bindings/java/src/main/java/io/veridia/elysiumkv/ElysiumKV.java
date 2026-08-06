@@ -293,6 +293,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      *
      * <p>A restore must use this value and not one that has been through a metrics pipeline.
      */
+    @Override
     public OptionalLong recoveredWatermark() {
         long value = Native.watermark(handle());
         return value < 0 ? OptionalLong.empty() : OptionalLong.of(value);

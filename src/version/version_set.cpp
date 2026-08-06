@@ -1,8 +1,10 @@
 #include "version/version_set.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <set>
 #include <utility>
+#include <vector>
 
 namespace elysiumkv {
 

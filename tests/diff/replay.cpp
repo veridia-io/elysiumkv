@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace elysiumkv::test {
