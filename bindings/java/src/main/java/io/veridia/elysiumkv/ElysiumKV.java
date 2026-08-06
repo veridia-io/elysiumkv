@@ -38,7 +38,7 @@ import java.util.Set;
  * ElysiumKVOptions#paranoidChecks(boolean)} turns that from documentation into an
  * exception.
  */
-public final class ElysiumKV implements AutoCloseable {
+public final class ElysiumKV implements ReadOnlyStore {
     private final boolean checked;
     private final Set<ElysiumKVIterator> iterators =
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
@@ -88,6 +88,24 @@ public final class ElysiumKV implements AutoCloseable {
     public static ElysiumKV open(ElysiumKVOptions options) {
         Native.ensureLoaded();
         return new ElysiumKV(Native.open(options.prepare()), options.checked());
+    }
+
+    /**
+     * Opens without taking ownership: no manifest write of any kind, no background threads, no
+     * reclamation, no compare-and-set. Several may be open at once, alongside a writer, and there is
+     * no registration and so no limit on how many.
+     *
+     * <p>Returns the read-only <em>type</em>, so a caller cannot reach a write by accident. Refuses
+     * a store with no manifest rather than creating one, and refuses a store whose transient tier
+     * has lost files — repairing that is a manifest write, and serving a version with holes would
+     * present stale values as current.
+     *
+     * <p>The writer must set {@code obsoleteRetentionMs} for this to be safe; see
+     * {@link ReadOnlyStore}.
+     */
+    public static ReadOnlyStore openReadOnly(ElysiumKVOptions options) {
+        Native.ensureLoaded();
+        return new ElysiumKV(Native.openReadOnly(options.prepare()), options.checked());
     }
 
     /** Opens any configuration and reports what was discarded (ARCHITECTURE.md "A tier is not a level"). */
@@ -222,6 +240,11 @@ public final class ElysiumKV implements AutoCloseable {
             needed = Native.statsSnapshot(handle(), statsBuffer);
         }
         return ElysiumKVStats.decode(statsBuffer, needed);
+    }
+
+    @Override
+    public void refresh() {
+        Native.refresh(handle());
     }
 
     /** Clears {@code requiresRecovery} after a discard. The only way to (ARCHITECTURE.md "A tier is not a level"). */

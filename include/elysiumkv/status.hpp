@@ -22,6 +22,16 @@ enum class Status : uint8_t {
     /// newer format version. Distinct from `Corrupt`, which says the bytes are damaged; the
     /// operator's remedy here is a different binary, not a restore.
     Unsupported,
+    /// **Only a read-only instance sees this**: its version is older than the writer's retention
+    /// window, so an object that version references has been legitimately collected.
+    ///
+    /// Neither terminal nor retryable, for the same reason `Stalled` is neither: it is a definite
+    /// answer with a specific remedy, and repeating the same call will keep producing it. The
+    /// remedy is `refresh()` or a reopen. **It must never be reported as `Corrupt`** — the data is
+    /// not damaged and there is nothing to restore. Distinguished from real loss by re-reading the
+    /// manifest pointer: if it has advanced past the version holding the missing file, the writer
+    /// collected it legitimately.
+    Stale,
 };
 
 /// Stable lowercase name, for error text and test failure messages.

@@ -133,6 +133,23 @@ void DbImpl::background_compaction_loop() {
             }
         }
 
+        // The orphan sweep, when its interval has elapsed. On the maintenance executor rather than
+        // the coordinator because it is a paginated list per store — long-running work, which the
+        // coordinator does none of. It deletes objects but applies no version edit, so it is not a
+        // *deleting task* in the single-deleter sense and needs no guard.
+        if (options_.orphan_sweep_interval.has_value()) {
+            const uint64_t now = now_ms();
+            if (now >= next_sweep_ms_) {
+                next_sweep_ms_ =
+                    now + static_cast<uint64_t>(options_.orphan_sweep_interval->count());
+                const Status swept = sweep_orphans();
+                if (swept != Status::Ok && !is_retryable(swept)) {
+                    std::lock_guard<std::mutex> lock(mem_mutex_);
+                    if (bg_error_ == Status::Ok || is_retryable(bg_error_)) bg_error_ = swept;
+                }
+            }
+        }
+
         // **Only on work done.** The completion of a task can make the next one due, so the
         // coordinator has to be told — but telling it unconditionally would be a busy loop:
         // every pass would open the gate, which dispatches another pass, which finds nothing and
@@ -161,6 +178,7 @@ void DbImpl::background_compaction_loop() {
 }
 
 Status DbImpl::compact_level(int level) {
+    if (read_only_) return Status::Config;
     if (unusable_.load()) return Status::Unusable;
     if (versions_->fenced()) return Status::Fenced;
     if (level < 0 || level > config_.last()) return Status::Config;

@@ -1,6 +1,8 @@
 #include "diff/oracle.hpp"
 #include "fault/fault_injecting_blob_store.hpp"
 #include "support/temp_dir.hpp"
+#include "db/db_impl.hpp"
+
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/file_manifest_catalog.hpp"
 #include "elysiumkv/local_file_blob_store.hpp"
@@ -31,9 +33,13 @@ protected:
         catalog_ = std::make_shared<FileManifestCatalog>(dir_.path());
     }
 
+    mutable std::atomic<uint64_t> now_{1'000'000};
+
     Options options() const {
         Options options;
         options.manifest_catalog = catalog_;
+        // Injectable, so the sweep's retention can be crossed without waiting for it.
+        options.clock = [this] { return now_.load(); };
         // Large enough that nothing auto-flushes: every one of these cases is
         // about what happens at a flush the test asks for. (The arena allocates
         // in 4 KiB blocks, so a memtable budget near that size would freeze on
@@ -420,28 +426,38 @@ TEST_F(DbFaultTest, OpenLeavesAnotherWritersObjectsAlone) {
 
 // The same store, opened by something that *asserts* exclusivity. The capability still works —
 // which is what makes the case above a decision rather than an omission.
-TEST_F(DbFaultTest, ReclamationAtOpenIsAvailableWhenAsked) {
+// Reclamation still exists — it moved. Deleting at open rested on a *single instantaneous*
+// observation, which cannot tell a dead writer's residue from a live writer's just-committed file;
+// the sweep rests on a sustained one. So this asserts the capability, on the trigger it now has.
+TEST_F(DbFaultTest, ReclamationHappensOnTheSweepRatherThanAtOpen) {
     Options reclaiming = options();
-    reclaiming.reclaim_orphans_at_open = true;
+    reclaiming.orphan_sweep_interval = Duration(1);
+    reclaiming.orphan_retention = Duration(60'000);
 
     Oracle oracle;
-    {
-        auto opened = DB::open(reclaiming);
-        ASSERT_TRUE(opened.has_value());
-        auto db = std::move(*opened);
-        fill(*db, oracle, 50, "v1");
-        ASSERT_EQ(db->flush(), Status::Ok);
-    }
+    auto opened = DB::open(reclaiming);
+    ASSERT_TRUE(opened.has_value());
+    auto db = std::move(*opened);
+    fill(*db, oracle, 50, "v1");
+    ASSERT_EQ(db->flush(), Status::Ok);
+
     ASSERT_EQ(local_->put("000000004242.sst", Slice::from(std::string_view("residue"))).get(),
               Status::Ok);
 
-    auto opened = DB::open(reclaiming);
-    ASSERT_TRUE(opened.has_value());
+    auto& engine = static_cast<DbImpl&>(*db);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
     auto names = local_->list("").get();
     ASSERT_TRUE(names.has_value());
+    EXPECT_NE(std::find(names->begin(), names->end(), "000000004242.sst"), names->end())
+        << "one observation is not a sustained one";
+
+    now_.fetch_add(120'000);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+    names = local_->list("").get();
+    ASSERT_TRUE(names.has_value());
     EXPECT_EQ(std::find(names->begin(), names->end(), "000000004242.sst"), names->end())
-        << "an open that asked for reclamation must reclaim";
-    expect_matches(**opened, oracle);
+        << "continuously unreferenced for the whole window, so it goes";
+    expect_matches(*db, oracle);
 }
 
 // The mechanism that replaces deletion: open steps the file-number counter over whatever the

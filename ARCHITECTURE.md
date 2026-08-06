@@ -355,6 +355,38 @@ one prefix will not corrupt each other's committed history, but they can still i
 CAS cannot see — which is why open performs no destructive action (below), and why storage
 reclamation is opt-in.
 
+### Readers are outside the ownership protocol
+
+Any number of processes may open a store read-only while one writes it. That is close to free, and
+the reason is that three earlier decisions already paid for it: **a clean open writes nothing** (the
+manifest is read, replayed, and left alone), **objects are write-once** so a cached block can never
+become wrong, and **ownership is one compare-and-set** that a reader never performs — so it can
+neither fence the writer nor be fenced.
+
+`ReadOnlyDB` is a base of `DB` rather than a flag, so a read-only handle cannot be passed where a
+write happens and the compiler says so. The C ABI cannot express that and refuses at runtime instead;
+Java uses an interface, which can.
+
+**One thing did not already work, and it is the whole of the design.** The collector deletes an
+object once no live version *in its own process* references it — `live_versions_` is a process-local
+list of weak pointers. A reader elsewhere is invisible to it, so a compaction here deletes files a
+reader there is still reading. That is the same defect class as deleting orphans at open: *local
+knowledge justifying a destructive action whose blast radius is not local*.
+
+The fix is a retention window, `obsolete_retention`, and what recommends it is what it does **not**
+require. Reader registration or leases would give readers a write path — losing the property that
+makes this cheap — and would need expiry, so a merely-slow reader gets its files deleted anyway: the
+failure mode returns with a timer attached. The window needs no coordination at all, no registration,
+no new catalog operation, no limit on how many readers there are, and nothing goes wrong when one
+crashes. It costs storage, which is the right resource to spend, because every alternative spends
+correctness under partial failure.
+
+The reader's side of that contract is `refresh()`, and it is **explicit**. Automatic refresh would let
+two reads in one logical operation see different versions with nothing marking where — freshness is
+the embedder's requirement, not the engine's. A reader that falls behind the window gets
+`Status::Stale`, never `Corrupt`: telling them apart needs no coordination either, because re-reading
+the manifest says which happened. If the writer has moved on, it collected the object legitimately.
+
 ### Open never destroys anything
 
 Recovery reads the pointer, replays edits, and reconciles against what the stores hold. Crash
@@ -367,9 +399,17 @@ edit became durable between the moment the manifest was read and the moment the 
 rolling deploy with two pods briefly overlapping on one bucket would silently destroy committed
 data.
 
-So reclamation is a flag, off by default, and turning it on asserts something the engine cannot
-check: that nothing else has the store open. Leaving it off costs disk and nothing else; on S3 a
-lifecycle rule on the prefix is the other answer.
+So reclamation is **not** something open does, and there is no flag to make it one. That was the
+original shape and the defect was never the default — it was that a *single instantaneous*
+observation cannot support the conclusion. An object unreferenced at the moment we happen to look is
+indistinguishable from a concurrent writer's file whose edit committed a moment ago.
+
+A *sustained* observation can support it, and that is what the sweep does: an object is deletable
+once it has been continuously unreferenced for `orphan_retention`, checked against a **freshly
+re-read manifest** each pass — so a file whose edit has since landed leaves the candidate set on its
+own rather than being argued about, and the pointer re-read doubles as a fence detector. It is off
+unless `orphan_sweep_interval` is set, and off costs disk and nothing else. On S3 a lifecycle rule on
+the prefix is the other answer.
 
 ### Caches chain
 
@@ -471,6 +511,13 @@ They are also reported per level and per tier rather than as derived globals. Th
 independent axes (*A tier is not a level*), and a single global number would silently average over a
 distinction the engine spends real effort maintaining. One call returns the whole snapshot, because a
 snapshot assembled from per-field accessors is torn.
+
+`entries` and `tombstones` are per level for a reason worth stating, because the obvious move is one
+global: **the accuracy of an entry count depends on where the records are.** A million records in the
+bottommost level is close to a million keys; a million spread across L0 after an update storm is not.
+`records - tombstones` is an *upper bound* on distinct live keys — provable, since a live key's newest
+record is always a put and never a tombstone — and it becomes exact once compaction has merged
+everything down. Not an estimate: the per-file counts are exact, and all the slack is cross-file.
 
 Two of them are worth calling out as the ones an operator acts on. `flushes` is the first place a
 `flush_interval` set too short shows up, and the only way to see the interval fire at all on a quiet
@@ -606,10 +653,13 @@ Listed so their absence isn't mistaken for an oversight. Each would change the c
 extend it, and the reasoning above depends on their absence.
 
 - **Multiple writers.** Ownership is one compare-and-set; concurrent writers would need a different
-  ownership model entirely, not a bigger lock.
+  ownership model entirely, not a bigger lock. Multiple *readers* are supported and cheap — see
+  *Readers are outside the ownership protocol* — and this is the asymmetry that makes that true.
 - **Snapshots as of a point in time.** There are no sequence numbers to name a point with.
 - **Transactions** beyond an atomic write batch.
 - **Secondary indexes.** A key–value store that also maintains derived state is two systems.
+- **Reader registration or leases.** See *Readers are outside the ownership protocol*: the retention
+  window buys the same safety with no coordination and no failure mode when a reader dies.
 - **A write-ahead log.** The changelog the embedder is already replaying is the log; duplicating it
   would double every write for a durability guarantee the embedder can make more cheaply itself. The
   watermark exists because of this decision, not despite it: it says where to resume, and it does not
@@ -631,7 +681,10 @@ defects:
 | Set a short `flush_interval` | Many small L0 files, so more compaction | Every flush produces a file regardless of how full it was |
 | Run one instance per partition on defaults | Memory scales with partition count | Sizing is per instance unless a shared budget is given |
 | Make stalls non-blocking | Writes are silently refused under pressure | The valve cannot be disabled, only redirected |
-| Enable orphan reclamation | Another process's in-flight files may be deleted | Open cannot detect a concurrent writer |
+| Open a reader without setting `obsolete_retention` | The reader eventually reports `Stale` | The writer's collector cannot see a reader in another process |
+| Set `orphan_retention` below `obsolete_retention` | Refused at open | A crash turns superseded objects into orphans, protected by the orphan window alone |
+| Restart the writer more often than `orphan_retention` | Orphans are never collected | First-observation times are in memory, so a restart resets them |
+| Read `entryCount()` on an update-heavy store | It far exceeds the live key count, then drops sharply | It counts records; compaction is what merges them |
 | Run two writers on one prefix | The loser is fenced at its next manifest write, not immediately | Fencing happens at the CAS, which is not on every write |
 | Set a watermark and crash before a flush | The previous watermark is what comes back | A watermark becomes durable with the memtable holding it |
 | Lose a transient store | The recovered position rolls back to before anything that store held | Only the discarded files' lower bounds can be trusted |

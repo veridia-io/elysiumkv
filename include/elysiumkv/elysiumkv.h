@@ -60,7 +60,8 @@ typedef enum {
     ELYSIUMKV_CONFIG,
     ELYSIUMKV_IO,
     ELYSIUMKV_STALLED,
-    ELYSIUMKV_UNSUPPORTED
+    ELYSIUMKV_UNSUPPORTED,
+    ELYSIUMKV_STALE
 } elysiumkv_status;
 
 typedef enum { ELYSIUMKV_COMPRESSION_NONE = 0, ELYSIUMKV_COMPRESSION_LZ4, ELYSIUMKV_COMPRESSION_ZSTD }
@@ -130,11 +131,24 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, i
  * a write that would stall then returns ELYSIUMKV_STALLED instead of blocking.
  * The stall valve itself is not configurable off.
  *
- * `reclaim_orphans_at_open` defaults to *disabled*, and turning it on asserts something the
- * engine cannot check: that no other process has this store open. Open takes no lock and
- * performs no compare-and-set, so an unreferenced object is indistinguishable from a
- * concurrent writer's in-flight or just-committed file — deleting it destroys committed data.
- * The engine does not need the reclamation; leaving it off costs storage and nothing else.
+ * `obsolete_retention_ms` defers deleting an object this instance superseded, so a
+ * *read-only* instance in another process holding an older version can still read
+ * it. The collector cannot see that reader — liveness is tracked per process — so
+ * this delay is the only thing protecting it. Zero deletes immediately, which is
+ * correct when nothing else has the store open.
+ *
+ * `orphan_retention_ms` is how long an object must be *continuously observed*
+ * unreferenced before the sweep deletes it, and it protects a concurrently-writing
+ * process. Zero leaves the engine default of 24 hours; there is no configuration in
+ * which deleting an object seen unreferenced once is correct, which is why the way
+ * to switch the sweep off is orphan_sweep_interval_ms rather than this. Must be at
+ * least obsolete_retention_ms — elysiumkv_open reports ELYSIUMKV_CONFIG otherwise,
+ * because a crash empties the pending queue and a superseded object comes back as
+ * an orphan protected by this window alone.
+ *
+ * `orphan_sweep_interval_ms` is how often to list the stores looking for orphans.
+ * Zero disables the sweep, which costs storage and nothing else: correctness never
+ * depends on reclamation happening.
  *
  * `flush_interval_ms` is the second, independent flush trigger: the memtable is flushed once it
  * has been open this long even if it never reaches `memtable_bytes`. Zero leaves it unset, so
@@ -158,9 +172,11 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
                                                      size_t max_compaction_bytes,
                                                      int manifest_edits_per_generation,
                                                      int paranoid_checks, int block_on_stall,
-                                                     int reclaim_orphans_at_open,
                                                      uint64_t flush_interval_ms,
-                                                     uint64_t maintenance_interval_ms);
+                                                     uint64_t maintenance_interval_ms,
+                                                     uint64_t obsolete_retention_ms,
+                                                     uint64_t orphan_retention_ms,
+                                                     uint64_t orphan_sweep_interval_ms);
 
 /* --- seams -----------------------------------------------------------------
  *
@@ -493,6 +509,34 @@ ELYSIUMKV_API void elysiumkv_mark_recovery_complete(elysiumkv_db*);
  * flush and writes no manifest, so it can be called as often as the embedder
  * commits — the value becomes durable when the memtable holding it is flushed,
  * which is why elysiumkv_flush promotes it immediately. */
+/* --- read-only -------------------------------------------------------------
+ *
+ * Opens without taking ownership: no manifest write of any kind, no background
+ * threads, no reclamation, no compare-and-set. Several may be open at once,
+ * alongside a writer, and there is no registration and so no limit on how many.
+ *
+ * Refuses a store with no manifest (ELYSIUMKV_NOT_FOUND) rather than creating one,
+ * and refuses a store whose Transient tier has lost files, because repairing that
+ * is a manifest write and serving a version with holes presents stale values as
+ * current.
+ *
+ * **The C ABI cannot express the C++ split**, where a read-only handle is a
+ * different type and passing it somewhere that writes is a compile error. Here
+ * there is one handle type and the write entry points — put, remove, write, flush,
+ * compact_level, set_watermark — return ELYSIUMKV_CONFIG on a read-only handle.
+ *
+ * The writer must set obsolete_retention_ms for any of this to be safe: its
+ * collector cannot see a reader in another process, so that delay is the only
+ * thing standing between a compaction there and a vanished file here. A reader
+ * that falls behind the window is told ELYSIUMKV_STALE, never ELYSIUMKV_CORRUPT. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_open_read_only(const elysiumkv_options*, elysiumkv_db** out);
+
+/* Re-reads the manifest and installs the newest version. Explicit, never
+ * automatic: two reads in one logical operation must be able to see one version.
+ * Open iterators are unaffected — an iterator holds the version it started on.
+ * A no-op returning ELYSIUMKV_OK on a writable handle. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_refresh(elysiumkv_db*);
+
 ELYSIUMKV_API elysiumkv_status elysiumkv_set_watermark(elysiumkv_db*, uint64_t position);
 
 /* The last position whose effect on the store is known to have survived, as

@@ -437,10 +437,11 @@ TEST_F(TierMigrationTest, AKillBeforeTheEditLeavesTheOriginalServing) {
 
 TEST_F(TierMigrationTest, AKillBetweenTheEditAndTheDeleteLeavesACollectableOrphan) {
     Options options = make_tiered_options(store_, Duration(20'000));
-    // Reclamation is opt-in (ARCHITECTURE.md "Immutable named objects"): open cannot tell a dead writer's residue from a live
-    // writer's committed file, so it deletes nothing unless asked. This case is about the
-    // residue being *collectable*, so it asks.
-    options.reclaim_orphans_at_open = true;
+    // Reclamation is on the sweep (ARCHITECTURE.md "Immutable named objects"): open cannot tell a dead
+    // writer's residue from a live writer's committed file, so it deletes nothing at all. This case
+    // is about the residue being *collectable*, so it configures the sweep.
+    options.orphan_sweep_interval = Duration(1);
+    options.orphan_retention = Duration(10'000);
     auto hot = std::make_shared<FaultInjectingBlobStore>(store_.store(0));
     options.tiers[0].store = hot;
     open(options);
@@ -466,15 +467,31 @@ TEST_F(TierMigrationTest, AKillBetweenTheEditAndTheDeleteLeavesACollectableOrpha
         EXPECT_TRUE(db_->get(Slice::from(key_at(i))).has_value()) << i;
     }
 
-    // Reopen collects it: nothing references it.
+    // **While this process lives the object is not an orphan**, it is a *pending deletion* whose
+    // delete failed — it has an exact unreferenced-since time and `obsolete_retention` of its own,
+    // and the sweep deliberately leaves it alone rather than double-counting it.
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+    now_.fetch_add(60'000, std::memory_order_relaxed);
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+    auto still_pending = store_.store(0)->list("").get();
+    ASSERT_TRUE(still_pending.has_value());
+    EXPECT_FALSE(still_pending->empty()) << "the pending queue owns it, so the sweep must not";
+
+    // A restart empties that queue, and the same object comes back as an orphan — governed by the
+    // orphan window and nothing else. That composition is why open validates
+    // `orphan_retention >= obsolete_retention`.
     db_.reset();
     auto reopened = DB::open_with_result(options_);
     ASSERT_TRUE(reopened.has_value()) << status_name(reopened.error());
     db_ = std::move(reopened->db);
 
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+    now_.fetch_add(60'000, std::memory_order_relaxed);
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+
     auto swept = store_.store(0)->list("").get();
     ASSERT_TRUE(swept.has_value());
-    EXPECT_TRUE(swept->empty()) << "an unreferenced object must not survive an open";
+    EXPECT_TRUE(swept->empty()) << "an unreferenced object must not survive its retention window";
     for (int i = 0; i < 50; ++i) {
         EXPECT_TRUE(db_->get(Slice::from(key_at(i))).has_value()) << i;
     }

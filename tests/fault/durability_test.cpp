@@ -304,14 +304,15 @@ TEST_F(DurabilityTest, AMissingRootIsNotAbsence) {
 
 // ARCHITECTURE.md "Open and recovery" — objects no version references are the residue of work that died before
 // its edit was durable. Open collects them.
-// ARCHITECTURE.md "Immutable named objects" — reclamation is **opt-in**, so this case asks for it. Open does not delete by default:
-// it cannot tell a dead writer's residue from a live writer's committed file, having taken no
-// lock and performed no compare-and-set. The engine no longer needs the deletion either — a
-// stale file number is stepped over at open — so this tests a storage-reclamation feature
-// rather than a correctness mechanism.
-TEST_F(DurabilityTest, OrphansAreCollectedAtOpenWhenAskedFor) {
+// ARCHITECTURE.md "Immutable named objects" — reclamation happens on the **sweep**, not at open: open
+// cannot tell a dead writer's residue from a live writer's committed file, having taken no lock and
+// performed no compare-and-set, and no default fixes an observation that weak. The engine does not
+// need the deletion either — a stale file number is stepped over at open — so this tests a
+// storage-reclamation feature rather than a correctness mechanism.
+TEST_F(DurabilityTest, OrphansAreCollectedBySweeping) {
     Options options = durable_options();
-    options.reclaim_orphans_at_open = true;
+    options.orphan_sweep_interval = Duration(1);
+    options.orphan_retention = Duration(60'000);
     {
         auto db = open_reporting(options);
         ASSERT_NE(db, nullptr);
@@ -328,10 +329,14 @@ TEST_F(DurabilityTest, OrphansAreCollectedAtOpenWhenAskedFor) {
 
     auto db = open_reporting(options);
     ASSERT_NE(db, nullptr);
+    auto& engine = static_cast<DbImpl&>(*db);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+    now_ += 120'000;
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
     auto names = store_.store(0)->list("").get();
     ASSERT_TRUE(names.has_value());
     EXPECT_EQ(std::find(names->begin(), names->end(), "000000009999.sst"), names->end())
-        << "an unreferenced object must not survive an open that asked for reclamation";
+        << "unreferenced for the whole window, so the sweep takes it";
     for (int i = 0; i < 100; ++i) {
         EXPECT_TRUE(db->get(Slice::from(key_at(i))).has_value()) << i;
     }

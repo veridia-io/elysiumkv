@@ -67,8 +67,9 @@ final class Native {
                                         long readerCacheBytes, int bloomBitsPerKey,
                                         long maxCompactionBytes, int manifestEditsPerGeneration,
                                         int paranoidChecks, int blockOnStall,
-                                        int reclaimOrphansAtOpen, long flushIntervalMs,
-                                        long maintenanceIntervalMs);
+                                        long flushIntervalMs, long maintenanceIntervalMs,
+                                        long obsoleteRetentionMs, long orphanRetentionMs,
+                                        long orphanSweepIntervalMs);
 
     // --- seams ---------------------------------------------------------------
 
@@ -127,6 +128,10 @@ final class Native {
     // --- open and close ------------------------------------------------------
 
     static native long open(long options);
+
+    static native long openReadOnly(long options);
+
+    static native void refresh(long db);
 
     /**
      * Opens any configuration — including one with a transient tier, which

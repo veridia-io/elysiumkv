@@ -119,23 +119,22 @@ struct OpenResult {
     bool requires_recovery = false;
 };
 
-class DB {
+/// The read surface, and nothing else.
+///
+/// **A separate type rather than a runtime refusal**: a read-only handle cannot be passed where a
+/// write happens, and the compiler says so. `DB` extends this, so the declarations below are not
+/// duplicated — a writable handle is a readable one.
+///
+/// Multiple processes may hold one of these against a store another process is writing. That works
+/// because objects are immutable and write-once, so a cached block can never become wrong, and
+/// because a reader performs no compare-and-set and is therefore outside the ownership protocol
+/// entirely. What it does require is that the writer defer deleting superseded objects — see
+/// `Options::obsolete_retention`, which is the one thing standing between a compaction over there
+/// and a vanished file over here.
+class ReadOnlyDB {
 public:
-    /// Opens a store whose configuration cannot discard on open — every level
-    /// `Durable`. Returns `Status::Config` if any level is `Transient`: **a
-    /// check, not a documented precondition**, because a configuration change
-    /// must not silently turn existing call sites into stale-data readers.
-    static Result<std::unique_ptr<DB>> open(const Options&);
-
-    /// Opens any configuration, reporting discard state.
-    static Result<OpenResult> open_with_result(const Options&);
-
     virtual Result<Pinned> get(Slice key) = 0;  ///< zero-copy
     virtual Result<std::vector<uint8_t>> get_copy(Slice key) = 0;
-
-    virtual Status put(Slice key, Slice value) = 0;
-    virtual Status remove(Slice key) = 0;
-    virtual Status write(WriteBatch&) = 0;
 
     virtual std::unique_ptr<Iterator> iterator() = 0;
     virtual std::unique_ptr<Iterator> iterator(Slice lower_inclusive, Slice upper_exclusive) = 0;
@@ -146,6 +145,56 @@ public:
     /// only be spelled by inventing a maximum key, which does not exist.
     virtual std::unique_ptr<Iterator> iterator(Slice lower_inclusive) = 0;
     virtual std::unique_ptr<Iterator> prefix_iterator(Slice prefix) = 0;
+
+    /// Re-reads the manifest and installs the newest version.
+    ///
+    /// **Explicit, never automatic.** A background refresh would mean two `get`s in one logical
+    /// operation could observe different versions, with nothing in the API marking where that can
+    /// happen — and a reader that wants a stable view for the length of a query must be able to have
+    /// one. Freshness is the embedder's requirement, not the engine's.
+    ///
+    /// Open iterators are unaffected: an iterator holds its version, which is what already keeps its
+    /// files alive locally. So this is safe to call at any time and a long scan does not block it.
+    ///
+    /// On a writable instance this is a no-op returning `Status::Ok` — the writer's version is
+    /// already the newest by construction.
+    virtual Status refresh() = 0;
+
+    /// The last position whose effect on the store is known to have survived, as established at
+    /// **open** — see `DB::set_watermark`. Fixed for the life of the instance, including across
+    /// `refresh()`: it describes the state this instance recovered, and `Stats::durable_watermark`
+    /// is the live counterpart.
+    virtual std::optional<uint64_t> recovered_watermark() const = 0;
+
+    virtual Stats stats() const = 0;
+    virtual void mark_recovery_complete() = 0;
+
+    virtual ~ReadOnlyDB() = default;
+};
+
+class DB : public ReadOnlyDB {
+public:
+    /// Opens a store whose configuration cannot discard on open — every level
+    /// `Durable`. Returns `Status::Config` if any level is `Transient`: **a
+    /// check, not a documented precondition**, because a configuration change
+    /// must not silently turn existing call sites into stale-data readers.
+    static Result<std::unique_ptr<DB>> open(const Options&);
+
+    /// Opens any configuration, reporting discard state.
+    static Result<OpenResult> open_with_result(const Options&);
+
+    /// Opens without taking ownership: **no manifest write of any kind**, no background threads, no
+    /// reclamation, and no compare-and-set. Several may be open at once, alongside a writer.
+    ///
+    /// Refuses a store with no manifest rather than creating one — a reader that finds nothing has
+    /// opened the wrong place or arrived first, and either way it is not its business to decide.
+    /// Refuses a store whose `Transient` tier has lost files, because repairing that is a manifest
+    /// write and serving a version with holes would present stale values as current.
+    static Result<std::unique_ptr<ReadOnlyDB>> open_read_only(const Options&);
+
+    virtual Status put(Slice key, Slice value) = 0;
+    virtual Status remove(Slice key) = 0;
+    virtual Status write(WriteBatch&) = 0;
 
     /// Forces memtable -> L0 and waits for it.
     virtual Status flush() = 0;
@@ -203,12 +252,10 @@ public:
     /// `nullopt` means nothing can be certified and the embedder should replay from the
     /// beginning: either no watermark was ever set, or a lost transient store held data that
     /// predates the first one. Distinct from zero, which is a valid position.
-    virtual std::optional<uint64_t> recovered_watermark() const = 0;
-
-    virtual Stats stats() const = 0;
-    virtual void mark_recovery_complete() = 0;
-
-    virtual ~DB() = default;
+    ///
+    /// Declared on `ReadOnlyDB`; repeated here only because the surrounding documentation belongs
+    /// with `set_watermark`.
+    std::optional<uint64_t> recovered_watermark() const override = 0;
 };
 
 }  // namespace elysiumkv

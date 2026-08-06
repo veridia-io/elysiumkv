@@ -247,6 +247,11 @@ class AbiCoverageTest {
             // The two halves of a store-managed changelog offset. Behaviour is asserted in
             // WatermarkTest; what is asserted here is that the JNI signatures are right, which
             // nothing but a call can establish.
+            // The read-only pair. Behaviour is asserted in ReadOnlyStoreTest; what is asserted here
+            // is that the JNI signatures are right, which nothing but a call establishes.
+            exercise("refresh");
+            db.refresh();
+
             exercise("setWatermark");
             db.setWatermark(9_000L);
             exercise("watermark");
@@ -256,6 +261,13 @@ class AbiCoverageTest {
             exercise("statsSnapshot");
             ElysiumKVStats stats = db.stats();
             assertEquals(2, stats.levels().size());
+
+            // A second handle on the same store, read-only. Behaviour lives in ReadOnlyStoreTest;
+            // this is here so the signature is exercised.
+            exercise("openReadOnly");
+            try (ReadOnlyStore reader = ElysiumKV.openReadOnly(support.options())) {
+                assertNotNull(reader.stats());
+            }
 
             exercise("close");
             assertEquals(0, db.closeReportingOutstanding());

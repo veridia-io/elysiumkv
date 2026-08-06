@@ -181,8 +181,9 @@ void JNICALL options_configure(JNIEnv* env, jclass, jlong options, jlong catalog
                                jlong reader_cache_bytes, jint bloom_bits_per_key,
                                jlong max_compaction_bytes, jint manifest_edits_per_generation,
                                jint paranoid_checks, jint block_on_stall,
-                               jint reclaim_orphans_at_open, jlong flush_interval_ms,
-                               jlong maintenance_interval_ms) {
+                               jlong flush_interval_ms, jlong maintenance_interval_ms,
+                               jlong obsolete_retention_ms, jlong orphan_retention_ms,
+                               jlong orphan_sweep_interval_ms) {
     guard_void(env, [&] {
         check(env, elysiumkv_options_configure(
                        as_options(options), as_pointer(catalog), as_pointer(budget),
@@ -190,9 +191,12 @@ void JNICALL options_configure(JNIEnv* env, jclass, jlong options, jlong catalog
                        static_cast<size_t>(block_cache_bytes),
                        static_cast<size_t>(reader_cache_bytes), bloom_bits_per_key,
                        static_cast<size_t>(max_compaction_bytes), manifest_edits_per_generation,
-                       paranoid_checks, block_on_stall, reclaim_orphans_at_open,
+                       paranoid_checks, block_on_stall,
                        static_cast<uint64_t>(flush_interval_ms),
-                       static_cast<uint64_t>(maintenance_interval_ms)));
+                       static_cast<uint64_t>(maintenance_interval_ms),
+                       static_cast<uint64_t>(obsolete_retention_ms),
+                       static_cast<uint64_t>(orphan_retention_ms),
+                       static_cast<uint64_t>(orphan_sweep_interval_ms)));
     });
 }
 
@@ -417,6 +421,20 @@ jlong JNICALL open_db(JNIEnv* env, jclass, jlong options) {
                      return as_handle(db);
                  },
                  jlong{0});
+}
+
+jlong JNICALL open_read_only(JNIEnv* env, jclass, jlong options) {
+    return guard(env,
+                 [&]() -> jlong {
+                     elysiumkv_db* db = nullptr;
+                     if (!check(env, elysiumkv_open_read_only(as_options(options), &db))) return 0;
+                     return as_handle(db);
+                 },
+                 jlong{0});
+}
+
+void JNICALL refresh(JNIEnv* env, jclass, jlong db) {
+    guard_void(env, [&] { check(env, elysiumkv_refresh(as_db(db))); });
 }
 
 /* `n_stores` is in/out — capacity in, actual count out — and the call opens the
@@ -855,7 +873,7 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(options_add_tier)},
     {const_cast<char*>("optionsSetLevel"), const_cast<char*>("(JIIJIIIJ)V"),
      reinterpret_cast<void*>(options_set_level)},
-    {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJIIIIJJ)V"),
+    {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJIIIJJJJJ)V"),
      reinterpret_cast<void*>(options_configure)},
 
     {const_cast<char*>("localBlobStoreCreate"),
@@ -895,6 +913,9 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(dynamo_manifest_catalog_create)},
 
     {const_cast<char*>("open"), const_cast<char*>("(J)J"), reinterpret_cast<void*>(open_db)},
+    {const_cast<char*>("openReadOnly"), const_cast<char*>("(J)J"),
+     reinterpret_cast<void*>(open_read_only)},
+    {const_cast<char*>("refresh"), const_cast<char*>("(J)V"), reinterpret_cast<void*>(refresh)},
     {const_cast<char*>("openWithResult"), const_cast<char*>("(J[J[J[Z)[Ljava/lang/String;"),
      reinterpret_cast<void*>(open_with_result)},
     {const_cast<char*>("close"), const_cast<char*>("(J)J"), reinterpret_cast<void*>(close_db)},

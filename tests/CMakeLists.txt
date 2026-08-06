@@ -57,6 +57,7 @@ add_executable(elysiumkv_tests
     fault/migration_test.cpp
     fault/watermark_test.cpp
     fault/maintenance_test.cpp
+    fault/read_only_test.cpp
 )
 # ARCHITECTURE.md "Contract suites" — the claim that an implementation "earns its place by passing this unchanged"
 # is only true if the remote ones are actually run through it. They skip without

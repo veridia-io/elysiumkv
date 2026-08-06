@@ -64,7 +64,8 @@ enum class MaintenanceTask : uint32_t {
 
 class DbImpl final : public DB {
 public:
-    static Result<OpenResult> open(const Options& options, bool require_all_durable);
+    static Result<OpenResult> open(const Options& options, bool require_all_durable,
+                                   bool read_only = false);
 
     ~DbImpl() override;
 
@@ -82,6 +83,7 @@ public:
 
     Status flush() override;
     Status compact_level(int level) override;
+    Status refresh() override;
 
     Status set_watermark(uint64_t position) override;
     std::optional<uint64_t> recovered_watermark() const override { return recovered_watermark_; }
@@ -127,6 +129,10 @@ public:
     /// test simulate a file vanishing under a running instance.
     void evict_readers() { readers_.clear(); }
     const ResolvedLevels& levels() const { return config_; }
+    /// Runs one sweep on the calling thread, so a test can drive it without waiting for the
+    /// interval. The sweep is idempotent and its patience comes from the clock, not from how often
+    /// it is called.
+    Status sweep_orphans_for_test() { return sweep_orphans(); }
     /// One reconcile pass on the calling thread, so a test can drive the coordinator's decision
     /// without waiting for a tick. `force_full` bypasses the O(1) gate, which is what the
     /// periodic bypass does every minute in the running loop.
@@ -311,6 +317,32 @@ private:
     /// Objects no version references: the residue of a compaction or flush that
     /// died before its edit was durable.
     void collect_orphans(const std::map<std::string, std::vector<std::string>>& listings);
+
+    /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
+    /// been **continuously unreferenced for `orphan_retention`**.
+    ///
+    /// A single instantaneous observation cannot tell a dead writer's residue from a live writer's
+    /// just-committed file, which is why deleting on one was removed. A sustained observation can,
+    /// and the manifest re-read below is what makes it sustained rather than merely repeated: an
+    /// object whose edit has since committed is referenced now and drops out of the set.
+    ///
+    /// Skips what `pending_deletions` already holds — those have an exact unreferenced-since time
+    /// and `obsolete_retention` of their own, and letting the sweep at them would undercut the
+    /// reader window.
+    Status sweep_orphans();
+    /// Whether the writer has rolled past the generation this instance holds — the discriminator
+    /// between "my version is too old" and "this object is genuinely lost".
+    bool manifest_has_advanced() const;
+    /// Turns a read failure into `Status::Stale` when this read-only instance is behind the
+    /// writer's retention window rather than looking at damaged data.
+    Status classify_read_failure(Status status) const;
+    /// First time each object was seen unreferenced, per store. In memory, so a restart resets it:
+    /// a writer that restarts more often than `orphan_retention` never collects. That is a leak
+    /// rather than a hazard — it errs toward keeping bytes — and the alternative was growing
+    /// `BlobStore` with a modification time, which every binding-supplied implementation would
+    /// have to serve.
+    std::map<std::string, std::map<std::string, uint64_t>> orphan_first_seen_;
+    uint64_t next_sweep_ms_ = 0;
     Status fail_terminal(Status status, std::string detail);
     /// ARCHITECTURE.md "A process-wide memory budget" — sheds memory when the shared budget is exceeded, in that
     /// order: evict the block cache, then flush memtables, then let the caller stall.
@@ -437,6 +469,8 @@ private:
     /// Set when a file vanishes from under a live Version (ARCHITECTURE.md "A tier is not a level"): repair cannot
     /// run alongside live iterators, so the instance is finished.
     std::atomic<bool> unusable_{false};
+    /// **No manifest write of any kind**, no background threads, no reclamation, no CAS.
+    bool read_only_ = false;
 };
 
 }  // namespace elysiumkv

@@ -23,6 +23,9 @@ public final class ElysiumKVOptions implements AutoCloseable {
     private long memtableBytes;
     private long flushIntervalMs;
     private long maintenanceIntervalMs;
+    private long obsoleteRetentionMs;
+    private long orphanRetentionMs;
+    private long orphanSweepIntervalMs;
     private long blockBytes;
     private long blockCacheBytes;
     private long readerCacheBytes;
@@ -31,32 +34,12 @@ public final class ElysiumKVOptions implements AutoCloseable {
     private int manifestEditsPerGeneration;
     private int paranoidChecks = -1;   // tri-state: negative keeps the engine default
     private int blockOnStall = -1;
-    private int reclaimOrphansAtOpen = -1;
     private long catalogHandle;
     private long budgetHandle;
 
     public ElysiumKVOptions() {
         Native.ensureLoaded();
         handle = Native.optionsCreate();
-    }
-
-    /**
-     * Delete unreferenced objects at open, reclaiming the residue of a flush or compaction that
-     * died before its manifest edit was durable. <b>Off by default.</b>
-     *
-     * <p>Turning it on asserts something the engine cannot check: that no other process has
-     * this store open. Open takes no lock and performs no compare-and-set, so an unreferenced
-     * object is indistinguishable from a concurrent writer's in-flight file — or from one whose
-     * edit became durable between the moment the manifest was read and the moment the store was
-     * listed. Deleting it destroys committed data, silently.
-     *
-     * <p>The engine does not need it: a stale file number is stepped over at open rather than
-     * reclaimed. Leaving it off costs storage and nothing else, and on S3 a lifecycle expiry
-     * rule on the prefix is the other answer.
-     */
-    public ElysiumKVOptions reclaimOrphansAtOpen(boolean reclaim) {
-        this.reclaimOrphansAtOpen = reclaim ? 1 : 0;
-        return this;
     }
 
     /**
@@ -137,6 +120,46 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * How long an object this instance superseded is kept after nothing local references it.
+     *
+     * <p><b>Protects readers, and only readers.</b> A {@link ReadOnlyStore} in another process holds
+     * a version this one has already replaced, and the collector cannot see it — liveness is tracked
+     * per process. This delay is the only thing between a compaction here and a vanished file there.
+     * Set it comfortably above how often your readers call {@link ReadOnlyStore#refresh()}.
+     *
+     * <p>Zero — the default — deletes immediately, which is correct when nothing else has the store
+     * open.
+     */
+    public ElysiumKVOptions obsoleteRetentionMs(long millis) {
+        obsoleteRetentionMs = millis;
+        return this;
+    }
+
+    /**
+     * How long an object must be <em>continuously observed</em> unreferenced before the sweep
+     * deletes it.
+     *
+     * <p><b>Protects a concurrently-writing process</b>, and is needed whether or not readers exist:
+     * an object unreferenced at the instant we happen to look is indistinguishable from another
+     * writer's file whose edit committed a moment ago. Zero leaves the engine default of 24 hours.
+     * Must be at least {@link #obsoleteRetentionMs}, because a crash empties the pending queue and a
+     * superseded object comes back as an orphan protected by this window alone.
+     */
+    public ElysiumKVOptions orphanRetentionMs(long millis) {
+        orphanRetentionMs = millis;
+        return this;
+    }
+
+    /**
+     * How often to list the stores looking for orphans. Zero disables the sweep, which costs storage
+     * and nothing else — correctness never depends on reclamation happening.
+     */
+    public ElysiumKVOptions orphanSweepIntervalMs(long millis) {
+        orphanSweepIntervalMs = millis;
+        return this;
+    }
+
     public ElysiumKVOptions memtableBytes(long bytes) {
         memtableBytes = bytes;
         return this;
@@ -211,7 +234,8 @@ public final class ElysiumKVOptions implements AutoCloseable {
                                 blockCacheBytes,
                                 readerCacheBytes, bloomBitsPerKey, maxCompactionBytes,
                                 manifestEditsPerGeneration, paranoidChecks, blockOnStall,
-                                reclaimOrphansAtOpen, flushIntervalMs, maintenanceIntervalMs);
+                                flushIntervalMs, maintenanceIntervalMs, obsoleteRetentionMs,
+                                orphanRetentionMs, orphanSweepIntervalMs);
         return handle();
     }
 

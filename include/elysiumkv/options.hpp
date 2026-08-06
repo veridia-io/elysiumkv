@@ -146,6 +146,44 @@ struct Options {
     /// across dozens of instances in one process.
     Duration maintenance_interval{1000};
 
+    /// How long an object *this instance obsoleted* is kept after nothing local references it.
+    ///
+    /// **Protects readers, and only readers.** A read-only instance in another process holds a
+    /// version this one has already superseded, and the collector cannot see it — `live_versions_`
+    /// is a process-local list. Deferring the delete is what makes a reader in another process
+    /// safe, and it costs storage rather than coordination: no registration, no leases, no limit on
+    /// how many readers there are, and nothing to go wrong when one crashes.
+    ///
+    /// Unset — the default — deletes as soon as the object is locally unreferenced, which is
+    /// correct when there are no readers.
+    std::optional<Duration> obsolete_retention;
+
+    /// How long an object must be *continuously observed* unreferenced before the orphan sweep
+    /// deletes it.
+    ///
+    /// **Protects a concurrently-writing process**, and is needed whether or not readers exist. An
+    /// object unreferenced at the instant we happen to look is indistinguishable from another
+    /// writer's file whose edit became durable between our manifest read and our store listing —
+    /// which is why deleting on a single observation was removed. A *sustained* observation is a
+    /// claim the engine can actually make.
+    ///
+    /// Deliberately not optional: there is no configuration in which deleting an object seen
+    /// unreferenced once is correct. Turn the sweep off with `orphan_sweep_interval` instead, which
+    /// says what it means. Must be at least `obsolete_retention` — checked at open — because a
+    /// crash empties the pending queue and an obsoleted object comes back as an orphan, protected
+    /// by this window and nothing else.
+    Duration orphan_retention{std::chrono::hours(24)};
+
+    /// How often to list the stores looking for orphans. Unset disables the sweep, which costs
+    /// storage and nothing else: the engine's correctness never depends on reclamation happening.
+    /// Stepping the file-number counter over what the stores already hold is what makes *not*
+    /// deleting safe, and that is unconditional.
+    ///
+    /// The sweep is O(objects) with a paginated list per store, so this belongs in hours, not
+    /// seconds. An object can only be *first seen* on a sweep, so effective patience is
+    /// `orphan_retention` plus up to one interval.
+    std::optional<Duration> orphan_sweep_interval;
+
     size_t block_bytes = 4096;
     int restart_interval = 16;
     int bloom_bits_per_key = 10;
@@ -161,22 +199,6 @@ struct Options {
     /// filter), which against a remote store is three round trips, so a reader cache
     /// too small for the working set is a far worse deal than the memory it saves.
     size_t reader_cache_bytes = 64ull << 20;
-
-    /// ARCHITECTURE.md "Immutable named objects" — delete unreferenced objects at open, reclaiming the residue of a flush or
-    /// compaction that died before its manifest edit was durable.
-    ///
-    /// **Off by default, because it asserts something open cannot check: that no other
-    /// process has this store open.** Open takes no lock and performs no compare-and-set, so
-    /// an unreferenced object is indistinguishable from a concurrent writer's in-flight file —
-    /// or from one whose edit became durable between the moment the manifest was read and the
-    /// moment the store was listed. Deleting it destroys committed data, silently, surfacing
-    /// later as a vanished file.
-    ///
-    /// Turn it on when you know the store is yours alone: a maintenance window, a one-shot
-    /// tool, a deployment with a lock around it. The engine does not need it — a stale file
-    /// number is stepped over rather than reclaimed — so leaving it off costs storage and
-    /// nothing else. On S3 a lifecycle expiry rule on the prefix is the other answer.
-    bool reclaim_orphans_at_open = false;
     int manifest_edits_per_generation = 1000;
 
     BackgroundMode background = BackgroundMode::Threaded;
