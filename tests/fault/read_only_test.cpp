@@ -704,7 +704,9 @@ TEST_F(ReadOnlyTest, EveryStateAReaderObservesIsOneTheWriterPublished) {
             << "round " << round << ": the reader observed a state the writer never published";
 
         ASSERT_EQ(writer->flush(), Status::Ok);
-        if (round % 5 == 0) ASSERT_EQ(writer->compact_level(0), Status::Ok);
+        if (round % 5 == 0) {
+            ASSERT_EQ(writer->compact_level(0), Status::Ok);
+        }
         published.insert(snapshot_of(oracle));
 
         ASSERT_EQ(reader->refresh(), Status::Ok);

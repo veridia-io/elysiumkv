@@ -9,6 +9,38 @@ env:
   VCPKG_DISABLE_METRICS: '1'
 
 jobs:
+  # A minute of gcc before the matrix spends twenty. Development happens on macOS/clang and CI runs
+  # Linux/gcc, and the two disagree in ways that only surface after a push: libstdc++ does not
+  # provide the transitive includes libc++ does, gcc's -Wdangling-else fires where clang's does not,
+  # and -Wconversion differs in coverage. Each of those has broken this build at least once.
+  #
+  # Syntax-only, so it needs headers and no libraries, and it fails with the same message the matrix
+  # would have produced half an hour later.
+  toolchain-check:
+    name: gcc / warnings and includes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Headers only, and **the runner's default compiler** — deliberately not a pinned newer one.
+      # The build matrix uses whatever `/usr/bin/c++` is, so a check that pinned something else
+      # would be verifying a compiler nothing else uses, which is the failure this job exists to
+      # prevent rather than to repeat.
+      - name: Install headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgtest-dev libgmock-dev libzstd-dev liblz4-dev
+
+      # Every header alone: catches an include a header relies on getting transitively.
+      - name: Headers compile standalone
+        run: tools/check-headers.sh
+
+      # Every translation unit with the project's warning set: catches what -Werror would.
+      - name: Sources compile under the full warning set
+        run: tools/check-gcc.sh
+
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
     runs-on: ${{ matrix.os }}
