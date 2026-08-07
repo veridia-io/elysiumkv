@@ -26,8 +26,7 @@ bool ResolvedTiers::store_is_discardable(const std::string& store_id) const {
     return named;
 }
 
-int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t file_bytes,
-              uint64_t now_ms) {
+int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t now_ms) {
     const uint64_t age_ms = now_ms > min_write_time_ms ? now_ms - min_write_time_ms : 0;
 
     for (size_t i = 0; i < tiers.tiers.size(); ++i) {
@@ -35,7 +34,6 @@ int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t f
         if (tier.max_age.has_value() && age_ms > static_cast<uint64_t>(tier.max_age->count())) {
             continue;
         }
-        if (tier.max_file_bytes.has_value() && file_bytes > *tier.max_file_bytes) continue;
         return static_cast<int>(i);
     }
     // The last tier bounds nothing, so this is unreachable for a validated
@@ -79,18 +77,11 @@ Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers) {
                 // An unbounded tier followed by a bounded one is decreasing.
                 return std::unexpected(Status::Config);
             }
-            if (previous.max_file_bytes.has_value() && tier.max_file_bytes.has_value() &&
-                *tier.max_file_bytes < *previous.max_file_bytes) {
-                return std::unexpected(Status::Config);
-            }
-            if (!previous.max_file_bytes.has_value() && tier.max_file_bytes.has_value()) {
-                return std::unexpected(Status::Config);
-            }
         }
 
         if (i == last) {
             // The last tier catches everything.
-            if (tier.max_age.has_value() || tier.max_file_bytes.has_value()) {
+            if (tier.max_age.has_value()) {
                 return std::unexpected(Status::Config);
             }
             if (tier.durability != Durability::Durable) return std::unexpected(Status::Config);

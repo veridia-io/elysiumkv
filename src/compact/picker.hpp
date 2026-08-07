@@ -38,6 +38,12 @@ struct Compaction {
     /// min() over inputs — a compaction output inherits the oldest write it
     /// contains (ARCHITECTURE.md "The manifest is snapshots plus edits"), which is also what places it on a tier (ARCHITECTURE.md "A tier is not a level").
     uint64_t min_write_time_ms() const;
+    /// The output's watermark interval: `min` of the inputs' lows, `max` of their highs. **The
+    /// two halves come from different inputs and that is the point** — the output holds all of
+    /// their data, so it inherits the weakest lower bound and the strongest upper one. Taking
+    /// both from the same input, which is the natural implementation slip, would break the
+    /// recovery proof: the `min` is the half it rests on.
+    WatermarkInterval watermark() const;
     uint64_t input_bytes() const;
     /// Largest key covered; becomes the level's persisted compaction pointer.
     std::string largest_key() const;

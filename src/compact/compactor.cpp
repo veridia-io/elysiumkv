@@ -20,15 +20,65 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <set>
 #include <utility>
 
 namespace elysiumkv {
 
+#ifdef ELYSIUMKV_PARANOID
+namespace {
+
+/// ARCHITECTURE.md "Negative controls" — asserts the constraint that makes the current design safe:
+/// **at most one task performing deletions is in flight at a time.**
+///
+/// It is narrower than "one version-mutating task", and getting that wrong would produce an
+/// assertion that fires immediately: flush and a compaction *do* overlap — flush adds an L0 file
+/// while the compaction deletes at L1 — and that is legal precisely because flush deletes
+/// nothing, so its edit cannot contend with a delete-set chosen from an older version snapshot.
+/// Compaction, migration and capacity eviction all pick files from a snapshot and
+/// `VersionSet::apply` does not check they are still live, so two of *those* running at once is
+/// a double delete or a compaction reading a file a migration already unlinked.
+///
+/// Cannot fire today — those three share one executor. Fires on the first test run after
+/// someone adds a second deleting worker, which converts "found out in production" into a failed
+/// assertion. Compiled only where the continuous checks are.
+class DeletingTaskGuard {
+public:
+    explicit DeletingTaskGuard(std::atomic<bool>& flag) : flag_(flag) {
+        if (flag_.exchange(true)) {
+            // **Not `assert`.** `ELYSIUMKV_PARANOID` is on in the sanitizer presets too, and those
+            // build as RelWithDebInfo — which defines `NDEBUG`, so an `assert` here would be inert
+            // in two of the three builds that are supposed to be carrying this check. A check that
+            // silently does not run in most of the configurations it is enabled in is the failure
+            // mode this whole file argues against.
+            std::fprintf(stderr,
+                         "elysiumkv: two deleting tasks in flight. VersionSet::apply does not "
+                         "validate that a delete-set is still live, so a second deleting worker "
+                         "needs file-level exclusion or optimistic validation first.\n");
+            std::abort();
+        }
+    }
+    ~DeletingTaskGuard() { flag_.store(false); }
+
+private:
+    std::atomic<bool>& flag_;
+};
+
+}  // namespace
+#  define ELYSIUMKV_CLAIM_DELETING_TASK() DeletingTaskGuard elysiumkv_deleting_guard(deleting_task_in_flight_)
+#else
+#  define ELYSIUMKV_CLAIM_DELETING_TASK() do { } while (false)
+#endif
+
 
 // --- compaction (ARCHITECTURE.md "Compaction") -----------------------------------------------------------
 
-void DbImpl::schedule_compaction() {
+/// Hands the maintenance executor work to look for. Called by the coordinator when its gate
+/// opens, which is the pull path, and by the write path as an optimisation.
+void DbImpl::dispatch_maintenance() {
     if (inline_mode()) return;
     {
         std::lock_guard<std::mutex> lock(compaction_mutex_);
@@ -37,10 +87,30 @@ void DbImpl::schedule_compaction() {
     compaction_scheduled_.notify_one();
 }
 
+/// The write path's nudge, and what keeps the coordinator's gate honest.
+///
+/// **The two halves are not equally important.** The dispatch is an optimisation — it is what
+/// keeps a stalled writer from waiting a full tick — and a test may suppress it to prove the
+/// coordinator alone is sufficient. The **epoch bump is mandatory**: the gate skips evaluation
+/// when the epoch is unchanged, so a transition that never bumps it stays hidden until the
+/// periodic bypass. Every new maintenance predicate must either be cheap enough to evaluate ahead
+/// of the gate, or declare every transition that invalidates it.
+void DbImpl::schedule_compaction() {
+    invalidate_maintenance();
+    if (suppress_maintenance_wakes_.load()) return;
+    dispatch_maintenance();
+}
+
+void DbImpl::note_maintenance_state_changed() { invalidate_maintenance(); }
+
 void DbImpl::background_compaction_loop() {
     while (true) {
         {
             std::unique_lock<std::mutex> lock(compaction_mutex_);
+            // Untimed on purpose, and it is not the untimed wait the maintenance design forbids:
+            // this thread waits to be *dispatched*, and the coordinator's bounded tick is what
+            // guarantees a dispatch arrives. Putting a second timer here would be the second
+            // implementation of the same policy.
             while (!shutting_down_compaction_ && !compaction_pending_) {
                 compaction_scheduled_.wait(lock);
             }
@@ -49,15 +119,47 @@ void DbImpl::background_compaction_loop() {
         }
 
         Status status = Status::Ok;
+        const size_t pending_before = versions_->pending_deletions_hint();
         versions_->collect_obsolete();
+        bool did_work = versions_->pending_deletions_hint() < pending_before;
         // ARCHITECTURE.md "Migration between tiers" — migrations off a Transient tier preempt everything, including
         // compaction. Draining them first is that rule.
         while (run_one_migration(status)) {
+            did_work = true;
         }
         while (status == Status::Ok && run_one_compaction(status)) {
+            did_work = true;
             while (run_one_migration(status)) {
             }
         }
+
+        // The orphan sweep, when its interval has elapsed. On the maintenance executor rather than
+        // the coordinator because it is a paginated list per store — long-running work, which the
+        // coordinator does none of. It deletes objects but applies no version edit, so it is not a
+        // *deleting task* in the single-deleter sense and needs no guard.
+        if (options_.orphan_sweep_interval.has_value()) {
+            const uint64_t now = now_ms();
+            if (now >= next_sweep_ms_.load()) {
+                next_sweep_ms_.store(
+                    now + static_cast<uint64_t>(options_.orphan_sweep_interval->count()));
+                const Status swept = sweep_orphans();
+                if (swept != Status::Ok && !is_retryable(swept)) {
+                    std::lock_guard<std::mutex> lock(mem_mutex_);
+                    if (bg_error_ == Status::Ok || is_retryable(bg_error_)) bg_error_ = swept;
+                }
+            }
+        }
+
+        // **Only on work done.** The completion of a task can make the next one due, so the
+        // coordinator has to be told — but telling it unconditionally would be a busy loop:
+        // every pass would open the gate, which dispatches another pass, which finds nothing and
+        // opens it again. A pass that changed nothing has nothing to invalidate.
+        //
+        // A *failure* deliberately does not bump either. A retryable `Io` against a store that
+        // is down would otherwise be retried on every tick for the duration of the outage; the
+        // periodic gate bypass is what retries it, which is late rather than never and is the
+        // right cadence for something that is failing.
+        if (did_work) note_maintenance_state_changed();
         if (status != Status::Ok && !is_retryable(status)) {
             std::lock_guard<std::mutex> lock(mem_mutex_);
             // **The cause, not the consequence.** This thread reports `Unusable` for
@@ -76,6 +178,7 @@ void DbImpl::background_compaction_loop() {
 }
 
 Status DbImpl::compact_level(int level) {
+    if (read_only_) return Status::Config;
     if (unusable_.load()) return Status::Unusable;
     if (versions_->fenced()) return Status::Fenced;
     if (level < 0 || level > config_.last()) return Status::Config;
@@ -109,7 +212,7 @@ Status DbImpl::compact_level(int level) {
         // lets a second call be a no-op. Elsewhere the file leaves the level
         // regardless, and the level being empty is the completion condition.
         if (bottom && file.compression == target.compression && file.num_tombstones == 0 &&
-            tier_for(file.min_write_time_ms, file.file_bytes).store->id() == file.store_id) {
+            tier_for(file.min_write_time_ms).store->id() == file.store_id) {
             continue;
         }
 
@@ -163,6 +266,8 @@ Status DbImpl::compact_level(int level) {
 // --- migration (ARCHITECTURE.md "Migration between tiers") ----------------------------------------------------------
 
 bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
+    if (task_suppressed(MaintenanceTask::LevelZeroEscape)) return false;
+
     Compaction compaction;
     {
         auto version = versions_->current();
@@ -189,7 +294,7 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         for (const FileMetadata& file : version->files_at(0)) {
             const int tier = tiers_.tier_of_store(file.store_id);
             if (tier < 0) continue;
-            if (placement(tiers_, file.min_write_time_ms, file.file_bytes, now_ms()) <= tier) {
+            if (placement(tiers_, file.min_write_time_ms, now_ms()) <= tier) {
                 continue;
             }
             if (seed == nullptr || file.file_number < seed->file_number) seed = &file;
@@ -243,6 +348,16 @@ bool DbImpl::run_one_migration(Status& status) {
         auto version = versions_->current();
         migration = pick_migration(*version, tiers_, now_ms());
     }
+    // ARCHITECTURE.md "Negative controls" — a test may refuse one constituent of convergence, so
+    // that draining the other three can be shown not to be enough.
+    if (migration.has_value()) {
+        const MaintenanceTask task =
+            migration->capacity_eviction
+                ? MaintenanceTask::CapacityEviction
+                : (migration->leaves_transient ? MaintenanceTask::TransientRescue
+                                               : MaintenanceTask::DurableAgeMigration);
+        if (task_suppressed(task)) return false;
+    }
     if (!migration.has_value()) {
         // The migrator skips L0; an L0 file over its tier's age leaves by being
         // compacted down instead.
@@ -255,6 +370,7 @@ bool DbImpl::run_one_migration(Status& status) {
 }
 
 Status DbImpl::run_migration(const Migration& migration) {
+    ELYSIUMKV_CLAIM_DELETING_TASK();
     BlobStore* source = store_for(migration.file.store_id);
     if (source == nullptr) return Status::Corrupt;
     const Tier& target = tiers_.tiers[static_cast<size_t>(migration.to_tier)];
@@ -288,6 +404,11 @@ Status DbImpl::run_migration(const Migration& migration) {
     // Carried over unchanged, so placement stays monotone across the renumber
     // (ARCHITECTURE.md "A tier is not a level"): the file is exactly as old as it was.
     moved.min_write_time_ms = migration.file.min_write_time_ms;
+    // The watermark interval likewise: a migration is a byte copy, so the file holds exactly the
+    // writes it held before, and both bounds are still the bounds. `moved` is a copy of the
+    // source metadata, so this is already true — stated because it is the kind of thing a later
+    // change to this function would silently drop.
+    moved.watermark = migration.file.watermark;
 
     VersionEdit edit;
     edit.deleted.push_back({migration.file.level, migration.file.file_number});
@@ -354,6 +475,7 @@ Status DbImpl::compact_until_quiet() {
 }
 
 Status DbImpl::run_compaction(const Compaction& compaction) {
+    ELYSIUMKV_CLAIM_DELETING_TASK();
     VersionEdit edit;
     edit.compaction_pointers.emplace_back(compaction.level, compaction.largest_key());
 
@@ -420,6 +542,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // configured level.
     const bool drop_tombstones = compaction.output_is_bottommost;
     const uint64_t min_write_time = compaction.min_write_time_ms();
+    const WatermarkInterval watermark = compaction.watermark();
     const size_t grandparent_limit = max_grandparent_overlap_bytes(target);
 
     SstOptions sst_options;
@@ -441,7 +564,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
 
         // Output made from old data *is* old, so it lands directly on a cold
         // tier rather than being written hot and migrated straight back out.
-        const Tier& tier = tier_for(min_write_time, built->bytes.size());
+        const Tier& tier = tier_for(min_write_time);
 
         auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
         if (!file_number) return file_number.error();
@@ -460,6 +583,9 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         // A compaction output takes the min() over its inputs (ARCHITECTURE.md "The manifest is snapshots plus edits"): the file
         // still holds those writes, so its exposure is unchanged by the move.
         file.min_write_time_ms = min_write_time;
+        // `min` of the lows, `max` of the highs — computed once for the whole compaction, since
+        // every output holds a slice of the same input set.
+        file.watermark = watermark;
         outputs.push_back(std::move(file));
         return Status::Ok;
     };

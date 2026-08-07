@@ -49,11 +49,11 @@ int elysiumkv_c_smoke(const char* store_directory, const char* catalog_directory
 
     options = elysiumkv_options_create();
     CHECK(options != NULL, "options");
-    status = elysiumkv_options_configure(options, catalog, NULL, 64u * 1024u, 1024, 0, 0, 0, 0, 0, -1, -1, -1, 0);
+    status = elysiumkv_options_configure(options, catalog, NULL, 64u * 1024u, 1024, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0, 0);
     CHECK(status == ELYSIUMKV_OK, "configure");
 
     /* One durable tier, three levels: the simplest correct configuration. */
-    status = elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0, 0);
+    status = elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0);
     CHECK(status == ELYSIUMKV_OK, "add tier");
     status = elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 8, 12, 0);
     CHECK(status == ELYSIUMKV_OK, "level 0");

@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.Set;
 
 /**
@@ -37,7 +38,7 @@ import java.util.Set;
  * ElysiumKVOptions#paranoidChecks(boolean)} turns that from documentation into an
  * exception.
  */
-public final class ElysiumKV implements AutoCloseable {
+public final class ElysiumKV implements ReadOnlyStore {
     private final boolean checked;
     private final Set<ElysiumKVIterator> iterators =
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
@@ -89,6 +90,24 @@ public final class ElysiumKV implements AutoCloseable {
         return new ElysiumKV(Native.open(options.prepare()), options.checked());
     }
 
+    /**
+     * Opens without taking ownership: no manifest write of any kind, no background threads, no
+     * reclamation, no compare-and-set. Several may be open at once, alongside a writer, and there is
+     * no registration and so no limit on how many.
+     *
+     * <p>Returns the read-only <em>type</em>, so a caller cannot reach a write by accident. Refuses
+     * a store with no manifest rather than creating one, and refuses a store whose transient tier
+     * has lost files — repairing that is a manifest write, and serving a version with holes would
+     * present stale values as current.
+     *
+     * <p>The writer must set {@code obsoleteRetentionMs} for this to be safe; see
+     * {@link ReadOnlyStore}.
+     */
+    public static ReadOnlyStore openReadOnly(ElysiumKVOptions options) {
+        Native.ensureLoaded();
+        return new ElysiumKV(Native.openReadOnly(options.prepare()), options.checked());
+    }
+
     /** Opens any configuration and reports what was discarded (ARCHITECTURE.md "A tier is not a level"). */
     public static OpenResult openWithResult(ElysiumKVOptions options) {
         Native.ensureLoaded();
@@ -109,6 +128,7 @@ public final class ElysiumKV implements AutoCloseable {
      * Zero-copy lookup. Returns null if the key is absent — and only then.
      * <b>Close the result</b>; a leaked pin holds a block-cache entry forever.
      */
+    @Override
     public Pinned get(byte[] key) {
         long[] pin = new long[1];
         ByteBuffer value = Native.get(handle(), key, key.length, pin);
@@ -119,6 +139,7 @@ public final class ElysiumKV implements AutoCloseable {
      * As {@link #get(byte[])} for a key already off-heap — nothing is copied in
      * either direction. ARCHITECTURE.md "The ABI boundary" — hot-path callers should allocate keys natively.
      */
+    @Override
     public Pinned get(ByteBuffer key) {
         if (!key.isDirect()) {
             throw new IllegalArgumentException("key buffer must be direct; use get(byte[])");
@@ -129,6 +150,7 @@ public final class ElysiumKV implements AutoCloseable {
     }
 
     /** Copies rather than pinning. Returns null if the key is absent. */
+    @Override
     public byte[] getCopy(byte[] key) {
         byte[] out = new byte[512];
         int length = Native.getCopy(handle(), key, key.length, out);
@@ -143,6 +165,7 @@ public final class ElysiumKV implements AutoCloseable {
     }
 
     /** Pins currently held. Nonzero at close is a leak (ARCHITECTURE.md "The ABI boundary"). */
+    @Override
     public long pinsOutstanding() {
         return Native.pinsOutstanding(handle());
     }
@@ -187,6 +210,7 @@ public final class ElysiumKV implements AutoCloseable {
     // --- iteration -----------------------------------------------------------
 
     /** Half-open range scan; null bounds are unbounded. */
+    @Override
     public ElysiumKVIterator iterator(byte[] lo, byte[] hi) {
         long iter = Native.iterCreate(handle(), lo, lo == null ? 0 : lo.length, hi,
                                       hi == null ? 0 : hi.length);
@@ -194,6 +218,7 @@ public final class ElysiumKV implements AutoCloseable {
     }
 
     /** Prefix scan — ARCHITECTURE.md "Absence is an answer, not an error" makes this a first-class path, not sugar over a range. */
+    @Override
     public ElysiumKVIterator prefixIterator(byte[] prefix) {
         long iter = Native.iterPrefix(handle(), prefix, prefix.length);
         return track(new ElysiumKVIterator(this, iter, checked));
@@ -204,6 +229,7 @@ public final class ElysiumKV implements AutoCloseable {
      * each entry instead of borrowing it. See {@link BatchedIterator} for the
      * numbers. Prefer this for a long scan.
      */
+    @Override
     public BatchedIterator batchedPrefixIterator(byte[] prefix) {
         long iter = Native.iterPrefix(handle(), prefix, prefix.length);
         BatchedIterator batched = new BatchedIterator(this, iter, checked);
@@ -214,6 +240,7 @@ public final class ElysiumKV implements AutoCloseable {
     // --- statistics ----------------------------------------------------------
 
     /** One instant of the engine (ARCHITECTURE.md "Statistics are a buffer, not a struct"), from a single native call. */
+    @Override
     public ElysiumKVStats stats() {
         int needed = Native.statsSnapshot(handle(), statsBuffer);
         if (needed > statsBuffer.length) {
@@ -223,9 +250,61 @@ public final class ElysiumKV implements AutoCloseable {
         return ElysiumKVStats.decode(statsBuffer, needed);
     }
 
+    @Override
+    public void refresh() {
+        Native.refresh(handle());
+    }
+
     /** Clears {@code requiresRecovery} after a discard. The only way to (ARCHITECTURE.md "A tier is not a level"). */
     public void markRecoveryComplete() {
         Native.markRecoveryComplete(handle());
+    }
+
+    // --- watermark -----------------------------------------------------------
+
+    /**
+     * Records that every write completed so far is at a position at or before {@code position} in
+     * whatever log this store is replaying — a changelog offset, typically. The engine orders it,
+     * carries it with the data and hands it back at the next open; it never invents, interpolates
+     * or interprets one.
+     *
+     * <p>It is a <em>position</em>, not a time, and unrelated to a tier's {@code maxAge}.
+     * Positions must be non-decreasing; a decreasing one raises {@link ConfigException} rather
+     * than being clamped, because clamping would hide a replay that went backwards.
+     *
+     * <p>Cheap and non-blocking: it forces no flush and writes no manifest, so it can be called
+     * as often as the caller commits. The value becomes durable when the memtable holding it is
+     * flushed, which is why {@link #flush()} promotes it immediately and why
+     * {@code flushIntervalMs} is what bounds the lag on a quiet partition.
+     *
+     * <p>Together with {@link #flush()} this is the whole of a KIP-1035 store-managed offset:
+     * {@code commit(offsets)} is {@code setWatermark(offset)} then {@code flush()}, and
+     * {@code committedOffset()} is {@link #recoveredWatermark()}.
+     */
+    public void setWatermark(long position) {
+        Native.setWatermark(handle(), position);
+    }
+
+    /**
+     * The last position whose effect on this store is known to have survived, as established at
+     * <em>open</em>. Replaying only the positions <strong>after</strong> it yields the same
+     * logical key-value state as replaying the entire log — exclusive, so {@code 80} means resume
+     * at {@code 81}.
+     *
+     * <p>Fixed at open and never changes. The <em>live</em> frontier is
+     * {@link ElysiumKVStats#durableWatermark()}, under a different name so that this one's meaning
+     * cannot change after the first write.
+     *
+     * <p>Empty when nothing can be certified — no watermark was ever set, or a lost transient
+     * store held data predating the first one — and the caller should replay from the beginning.
+     * Distinct from a watermark of zero, which is a valid position.
+     *
+     * <p>A restore must use this value and not one that has been through a metrics pipeline.
+     */
+    @Override
+    public OptionalLong recoveredWatermark() {
+        long value = Native.watermark(handle());
+        return value < 0 ? OptionalLong.empty() : OptionalLong.of(value);
     }
 
     // --- lifecycle -----------------------------------------------------------
@@ -271,6 +350,7 @@ public final class ElysiumKV implements AutoCloseable {
         return outstanding;
     }
 
+    @Override
     public boolean isOpen() {
         return handle != 0;
     }

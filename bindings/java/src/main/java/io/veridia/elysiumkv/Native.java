@@ -50,7 +50,7 @@ final class Native {
     static native void optionsDestroy(long options);
 
     static native void optionsAddTier(long options, long store, int durability, long maxAgeMs,
-                                      long maxFileBytes, long maxBytes, long stallAgeMs);
+                                      long maxBytes, long stallAgeMs);
 
     static native void optionsSetLevel(long options, int level, int compression, long maxBytes,
                                        int maxFiles, int slowdownAt, int stopAt,
@@ -67,7 +67,9 @@ final class Native {
                                         long readerCacheBytes, int bloomBitsPerKey,
                                         long maxCompactionBytes, int manifestEditsPerGeneration,
                                         int paranoidChecks, int blockOnStall,
-                                        int reclaimOrphansAtOpen, long flushIntervalMs);
+                                        long flushIntervalMs, long maintenanceIntervalMs,
+                                        long obsoleteRetentionMs, long orphanRetentionMs,
+                                        long orphanSweepIntervalMs);
 
     // --- seams ---------------------------------------------------------------
 
@@ -126,6 +128,10 @@ final class Native {
     // --- open and close ------------------------------------------------------
 
     static native long open(long options);
+
+    static native long openReadOnly(long options);
+
+    static native void refresh(long db);
 
     /**
      * Opens any configuration — including one with a transient tier, which
@@ -227,4 +233,11 @@ final class Native {
     static native int statsSnapshot(long db, byte[] out);
 
     static native void markRecoveryComplete(long db);
+
+    // --- watermark -----------------------------------------------------------
+
+    static native void setWatermark(long db, long position);
+
+    /** The recovered watermark, or {@code -1} when there is none. Zero is a valid watermark. */
+    static native long watermark(long db);
 }

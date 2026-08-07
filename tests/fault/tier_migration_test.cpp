@@ -13,6 +13,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace elysiumkv::test {
@@ -309,13 +310,21 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     options.background = BackgroundMode::Threaded;
     options.block_on_stall = false;
     options.clock = [this] { return now_.load(std::memory_order_relaxed); };
+    // **The valve now engages on a coordinator tick, not on the writing thread.** One evaluator:
+    // the maintenance loop owns the `stall_age` predicate and publishes the answer, so the write
+    // path cannot compute a different one. The cost is that engaging lags by up to one interval,
+    // which is the `+ interval` term the exposure window already carries — so the test waits for
+    // it rather than assuming the very next `put` sees it.
+    options.maintenance_interval = Duration(20);
 
-    // Hold migration back the way a slow durable store would, rather than by
-    // arranging for nothing to run: the valve has to fire because migration
-    // cannot keep up, which is the situation it exists for.
-    auto slow_cold = std::make_shared<FaultInjectingBlobStore>(store_.store(1));
-    slow_cold->set_latency(std::chrono::milliseconds(50));
-    options.tiers[1].store = slow_cold;
+    // **Migration must be unable to keep up, not merely slow.** A slow cold store was the first
+    // shape here and it makes the stalled state a *window*: the rescue the age crossing makes due is
+    // exactly what clears the flag again, so the test was racing the thing it had slowed down, and it
+    // lost that race on a CI runner while passing locally. An unreachable cold store is the honest
+    // version of "migration cannot keep up" — the rescue keeps failing with `Io`, exposure genuinely
+    // grows, and the stalled state is stable rather than momentary.
+    auto cold = std::make_shared<FaultInjectingBlobStore>(store_.store(1));
+    options.tiers[1].store = cold;
 
     auto opened = DB::open_with_result(options);
     ASSERT_TRUE(opened.has_value());
@@ -326,20 +335,28 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     ASSERT_GT(tier(0).file_count, 0);
     EXPECT_FALSE(tier(0).stalling);
 
+    // From here the rescue can never succeed, so nothing will take the file off the hot tier.
+    cold->set_unreachable(true);
+
     now_.fetch_add(90'000, std::memory_order_relaxed);  // past max_age, short of stall_age
     EXPECT_GT(tier(0).files_pending_migration, 0) << "degraded";
     EXPECT_FALSE(tier(0).stalling) << "but not yet stalled";
 
     now_.fetch_add(60'000, std::memory_order_relaxed);  // past stall_age
-    EXPECT_TRUE(tier(0).stalling);
 
+    // The valve engages on a coordinator tick rather than on the writing thread — one evaluator, so
+    // the write path cannot compute a different answer — which costs up to one interval. That is the
+    // `+ interval` term the exposure window already carries. The wait converges rather than racing:
+    // the stalled state is now permanent until the cold store comes back.
     bool stalled = false;
-    for (int i = 0; i < 50 && !stalled; ++i) {
+    for (int i = 0; i < 400 && !stalled; ++i) {
         if (db_->put(Slice::from(key_at(1000 + i)), Slice::from("x")) == Status::Stalled) {
             stalled = true;
         }
+        if (!stalled) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     EXPECT_TRUE(stalled) << "writes must stop rather than let exposure grow without bound";
+    EXPECT_TRUE(tier(0).stalling);
     EXPECT_GT(db_->stats().stall_count, 0u);
 }
 
@@ -420,10 +437,11 @@ TEST_F(TierMigrationTest, AKillBeforeTheEditLeavesTheOriginalServing) {
 
 TEST_F(TierMigrationTest, AKillBetweenTheEditAndTheDeleteLeavesACollectableOrphan) {
     Options options = make_tiered_options(store_, Duration(20'000));
-    // Reclamation is opt-in (ARCHITECTURE.md "Immutable named objects"): open cannot tell a dead writer's residue from a live
-    // writer's committed file, so it deletes nothing unless asked. This case is about the
-    // residue being *collectable*, so it asks.
-    options.reclaim_orphans_at_open = true;
+    // Reclamation is on the sweep (ARCHITECTURE.md "Immutable named objects"): open cannot tell a dead
+    // writer's residue from a live writer's committed file, so it deletes nothing at all. This case
+    // is about the residue being *collectable*, so it configures the sweep.
+    options.orphan_sweep_interval = Duration(1);
+    options.orphan_retention = Duration(10'000);
     auto hot = std::make_shared<FaultInjectingBlobStore>(store_.store(0));
     options.tiers[0].store = hot;
     open(options);
@@ -449,15 +467,31 @@ TEST_F(TierMigrationTest, AKillBetweenTheEditAndTheDeleteLeavesACollectableOrpha
         EXPECT_TRUE(db_->get(Slice::from(key_at(i))).has_value()) << i;
     }
 
-    // Reopen collects it: nothing references it.
+    // **While this process lives the object is not an orphan**, it is a *pending deletion* whose
+    // delete failed — it has an exact unreferenced-since time and `obsolete_retention` of its own,
+    // and the sweep deliberately leaves it alone rather than double-counting it.
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+    now_.fetch_add(60'000, std::memory_order_relaxed);
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+    auto still_pending = store_.store(0)->list("").get();
+    ASSERT_TRUE(still_pending.has_value());
+    EXPECT_FALSE(still_pending->empty()) << "the pending queue owns it, so the sweep must not";
+
+    // A restart empties that queue, and the same object comes back as an orphan — governed by the
+    // orphan window and nothing else. That composition is why open validates
+    // `orphan_retention >= obsolete_retention`.
     db_.reset();
     auto reopened = DB::open_with_result(options_);
     ASSERT_TRUE(reopened.has_value()) << status_name(reopened.error());
     db_ = std::move(reopened->db);
 
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+    now_.fetch_add(60'000, std::memory_order_relaxed);
+    ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
+
     auto swept = store_.store(0)->list("").get();
     ASSERT_TRUE(swept.has_value());
-    EXPECT_TRUE(swept->empty()) << "an unreferenced object must not survive an open";
+    EXPECT_TRUE(swept->empty()) << "an unreferenced object must not survive its retention window";
     for (int i = 0; i < 50; ++i) {
         EXPECT_TRUE(db_->get(Slice::from(key_at(i))).has_value()) << i;
     }
@@ -587,26 +621,12 @@ TEST_F(TierMigrationTest, OneLevelSpansTwoTiersWhenPartOfTheKeyspaceGoesQuiet) {
     }
 }
 
-// ARCHITECTURE.md "A tier is not a level" — a file too large for a tier skips it, whatever its age.
-TEST_F(TierMigrationTest, SizePlacesAFileJustAsAgeDoes) {
-    Options options = make_options(store_, Compression::None, 1u << 20);
-    options.tiers = {
-        Tier{.store = store_.store(0),
-             .durability = Durability::Durable,
-             .max_age = Duration(1'000'000),
-             .max_file_bytes = 4096},
-        Tier{.store = store_.store(1), .durability = Durability::Durable},
-    };
-    open(options);
-
-    // Far more than 4 KiB, and brand new: too big for tier 0 despite its age.
-    write(2000, "a-reasonably-long-value-to-make-the-file-big");
-    ASSERT_EQ(db_->flush(), Status::Ok);
-
-    ASSERT_GT(tier(1).file_count, 0) << "size sends it past the hot tier on arrival";
-    EXPECT_EQ(tier(0).file_count, 0);
-    EXPECT_EQ(db_->stats().migrations, 0u) << "placed correctly at birth, never migrated";
-}
+// `SizePlacesAFileJustAsAgeDoes` lived here and is **deliberately deleted rather than inverted.**
+// It asserted that a large, brand-new file was placed on a cold tier at birth — which was the whole
+// problem with `Tier::max_file_bytes`: placement has to be monotone in age, and a file arriving cold
+// on the day it was written is the opposite of that. There is no replacement assertion, because
+// there is no longer a second input to placement to assert anything about. Keeping the test with its
+// expectations flipped would have implied the behaviour still had a size dimension.
 
 // ARCHITECTURE.md "Positional recency", ARCHITECTURE.md "Migration between tiers" — **an L0 file that leaves its tier must be the oldest one positionally.**
 //

@@ -3,6 +3,7 @@ package io.veridia.elysiumkv;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.OptionalLong;
 
 /**
  * One instant of the engine, decoded from a single native call.
@@ -29,9 +30,11 @@ public final class ElysiumKVStats {
         private final int filesStaleCodec;
         private final boolean ageTriggered;
         private final boolean stalling;
+        private final long entries;
+        private final long tombstones;
 
         Level(int level, int fileCount, long bytes, long oldestFileAgeMs, int filesStaleCodec,
-              boolean ageTriggered, boolean stalling) {
+              boolean ageTriggered, boolean stalling, long entries, long tombstones) {
             this.level = level;
             this.fileCount = fileCount;
             this.bytes = bytes;
@@ -39,6 +42,8 @@ public final class ElysiumKVStats {
             this.filesStaleCodec = filesStaleCodec;
             this.ageTriggered = ageTriggered;
             this.stalling = stalling;
+            this.entries = entries;
+            this.tombstones = tombstones;
         }
 
         public int level() { return level; }
@@ -54,6 +59,12 @@ public final class ElysiumKVStats {
          * finished.
          */
         public int filesStaleCodec() { return filesStaleCodec; }
+
+        /** Records at this level: superseded versions and tombstones included. See {@link ElysiumKVStats#entryCount()}. */
+        public long entries() { return entries; }
+
+        /** How many of {@link #entries()} are deletes. */
+        public long tombstones() { return tombstones; }
         public boolean ageTriggered() { return ageTriggered; }
         public boolean stalling() { return stalling; }
     }
@@ -112,6 +123,11 @@ public final class ElysiumKVStats {
     private final long memoryBudgetUsed;
     private final long memoryBudgetTotal;
     private final long budgetSheds;
+    private final long flushes;
+    private final long memtableEntries;
+    private final long memtableTombstones;
+    private final long durableWatermark;
+    private final boolean watermarkPresent;
     private final List<Level> levels;
     private final List<Tier> tiers;
 
@@ -144,6 +160,14 @@ public final class ElysiumKVStats {
         memoryBudgetUsed = readLong(buffer, 168);
         memoryBudgetTotal = readLong(buffer, 176);
         budgetSheds = readLong(buffer, 184);
+        // Appended after the twenty original scalars. Located by the offsets the format fixes,
+        // and read only when the header says they are there: a store built against an older
+        // native library reports a shorter header, and reading past it would be reading padding.
+        flushes = headerBytes > 192 ? readLong(buffer, 192) : 0L;
+        memtableEntries = headerBytes > 216 ? readLong(buffer, 216) : 0L;
+        memtableTombstones = headerBytes > 224 ? readLong(buffer, 224) : 0L;
+        durableWatermark = headerBytes > 200 ? readLong(buffer, 200) : 0L;
+        watermarkPresent = headerBytes > 208 && buffer[208] != 0;
 
         List<Level> levelList = new ArrayList<>(levelCount);
         int offset = headerBytes;
@@ -151,7 +175,9 @@ public final class ElysiumKVStats {
             levelList.add(new Level(readInt(buffer, offset), readInt(buffer, offset + 4),
                                     readLong(buffer, offset + 8), readLong(buffer, offset + 16),
                                     readInt(buffer, offset + 24), buffer[offset + 28] != 0,
-                                    buffer[offset + 29] != 0));
+                                    buffer[offset + 29] != 0,
+                                    levelRecordBytes >= 48 ? readLong(buffer, offset + 32) : 0L,
+                                    levelRecordBytes >= 48 ? readLong(buffer, offset + 40) : 0L));
             offset += levelRecordBytes;
         }
         List<Tier> tierList = new ArrayList<>(tierCount);
@@ -231,6 +257,63 @@ public final class ElysiumKVStats {
     public long memoryBudgetTotal() { return memoryBudgetTotal; }
 
     public long budgetSheds() { return budgetSheds; }
+
+    /**
+     * Memtable rotations that became an L0 file. The first place a {@code flushIntervalMs} set
+     * too short shows up — small L0 files mean more compaction — and the only way to confirm the
+     * interval fires at all on a quiet partition, since {@link #memtableAgeMs()} is a gauge read
+     * at scrape time and a flush between two scrapes leaves no trace in it.
+     */
+    public long flushes() { return flushes; }
+
+    /** Records in the live and frozen memtables; the memtable deduplicates, so an overwrite adds none. */
+    public long memtableEntries() { return memtableEntries; }
+
+    /** How many of {@link #memtableEntries()} are deletes. */
+    public long memtableTombstones() { return memtableTombstones; }
+
+    /**
+     * An <strong>upper bound</strong> on the number of distinct live keys — {@code records -
+     * tombstones}, across the levels and the memtable.
+     *
+     * <p>Provable rather than typical: a live key's newest record is always a put, never a tombstone,
+     * so {@code records >= live + tombstones}. The slack is superseded versions that compaction has
+     * not merged yet, so on an update-heavy workload over a small key space this can exceed the true
+     * count substantially and then fall sharply when compaction catches up. It is exact once
+     * everything has merged into the bottommost level.
+     *
+     * <p>It is deliberately <em>not</em> named {@code approximateNumEntries}: that name belongs to the
+     * Kafka Streams interface, and an adapter can implement it in terms of this without the engine
+     * adopting Streams' accuracy contract.
+     *
+     * <p>Costs a {@link ElysiumKV#stats()} call, which is O(files). Fine on a reporting interval,
+     * wrong in a per-record path.
+     */
+    public long entryCount() {
+        long total = memtableEntries - memtableTombstones;
+        for (Level level : levels) total += level.entries() - level.tombstones();
+        return total;
+    }
+
+    /**
+     * The <em>live</em> watermark frontier: the position up to which this store's state would
+     * survive losing every transient tier. Deliberately not the newest watermark over current
+     * files, which would advance on a flush to transient storage and so report progress an
+     * operator cannot rely on.
+     *
+     * <p><strong>This is the numerator of the only margin an operator can act on.</strong> When
+     * migration is failing it stops advancing while the changelog keeps expiring, and the distance
+     * between the log's earliest retained offset and this value is how much recovery capability is
+     * left.
+     *
+     * <p>Empty when no watermark has been set. Zero is a valid position, so an exporter must omit
+     * the series rather than publish zero. Observational: export it for the retention margin and
+     * for alerting, but a restore must use {@link ElysiumKV#recoveredWatermark()}, whose value has
+     * not been through a metrics pipeline that may carry it as a double.
+     */
+    public OptionalLong durableWatermark() {
+        return watermarkPresent ? OptionalLong.of(durableWatermark) : OptionalLong.empty();
+    }
 
     public long levelBytesTotal() {
         long total = 0;

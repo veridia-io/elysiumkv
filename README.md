@@ -3,7 +3,7 @@
 An embedded LSM key-value store in C++, with a C ABI and a Java binding.
 
 ElysiumKV is built around one idea that most embedded stores leave to the operator:
-**where a file lives is decided per file, by its age and size, and it is decided
+**where a file lives is decided per file, by its age, and it is decided
 continuously.** Hot data sits on fast storage, cold data migrates to cheap
 storage, and the store keeps working while it happens. Everything else — leveled
 compaction, bloom filters, a block cache, prefix scans — is there to make that
@@ -41,15 +41,24 @@ useful rather than to be novel.
 - **Leveled compaction** with a background thread, write stalls and tombstone
   reclamation.
 - **Storage tiers**: several object stores per database, with files migrating
-  between them by age and size (see below).
+  between them by age (see below).
+- **Concurrent readers**: any number of processes may open a store read-only while
+  one writes it, with no registration and no coordination — see
+  [Concurrency](#concurrency).
+- **A durable watermark**: tell the store where you have reached in the log you
+  are replaying, and it hands the position back at the next open — including
+  rolled back to what a lost transient tier could not have held. This is the
+  resume point for a changelog-backed store; see
+  [ARCHITECTURE.md](ARCHITECTURE.md#the-watermark-is-an-interval-and-only-its-lower-bound-is-load-bearing).
 - **Zero-copy reads**: a lookup can hand back a pointer into the block cache,
   pinned until you release it, with no copy at any layer — including through the
   Java binding.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (39 functions, C99) and a Java binding over JNI
-  needing only Java 11.
+- **Bindings**: a stable C ABI (52 functions, C99) and a Java binding over JNI
+  needing only Java 11, plus a Kafka Streams state store in
+  `bindings/kafka-streams-v3`.
 
 Keys are ordered as unsigned bytes. There are no column families, no snapshots and
 no sequence numbers — recency is positional, decided by which level and which file
@@ -62,8 +71,8 @@ A **level** is LSM structure: overlap, capacity, compression, what compacts into
 what. A **tier** is storage: which object store physically holds a file. They are
 independent axes, and a single level routinely spans several tiers.
 
-Placement is a pure function of a file's age and size, evaluated continuously, and
-it only ever moves a file colder:
+Placement is a pure function of a file's age, evaluated continuously, and it only
+ever moves a file colder:
 
 ```cpp
 options.tiers = {
@@ -272,17 +281,33 @@ meaning its view is stale and it must be reopened rather than retried.
 What that does **not** protect is the window before the fence fires. `open` takes no lock and
 performs no compare-and-swap; it reads the manifest and gets on with it. So two processes on one
 store can both believe they own it until the loser's next manifest write, which may be many
-operations later. Concurrent readers are fine — a reader takes no locks and installs nothing —
-but arrange for exactly one writer: a lease, a singleton, a lock around your deploy, or distinct
-prefixes per instance.
+operations later. So arrange for exactly one writer: a lease, a singleton, a lock around your
+deploy, or distinct prefixes per instance.
 
-Because of that window, **`reclaim_orphans_at_open` is off by default**. It deletes objects the
-manifest does not reference, which is the residue of a flush or compaction that died before its
-edit was durable — but an unreferenced object is indistinguishable from a concurrent writer's
-in-flight or just-committed file, so deleting it can destroy committed data. The engine does not
-need the reclamation: a stale file number is stepped over at open rather than reclaimed. Turn it
-on when you know the store is yours alone; on S3, a lifecycle expiry rule on the prefix is the
-other answer.
+**Readers are a supported configuration, not a tolerated one.** `DB::open_read_only` — or
+`ElysiumKV.openReadOnly`, returning the `ReadOnlyStore` type, which has no write methods — opens
+without writing the manifest at all, starts no background threads, and performs no compare-and-set.
+Any number may run alongside the writer. That works because objects are write-once, so a block a
+reader has cached can never become wrong, and because a reader is outside the ownership protocol
+entirely: it can neither fence the writer nor be fenced.
+
+One thing the writer must configure for it: **`obsolete_retention`**. The writer's collector deletes
+an object once nothing in *its own process* references it, and a reader elsewhere is invisible to
+that — so without a retention window, a compaction on the writer deletes files a reader is still
+reading. Set it comfortably above how often your readers call `refresh()`. A reader that falls
+behind is told `Status::Stale` and recovers by refreshing; it is never told the store is corrupt,
+because it is not.
+
+Freshness is explicit: a reader sees the version it opened until it calls `refresh()`. Two reads in
+one logical operation therefore see one version, and a long scan is unaffected by a refresh under it.
+
+**Reclamation of unreferenced objects happens on a sweep, not at open.** Deleting at open rested on
+a single instantaneous observation, which cannot tell a dead writer's residue from a live writer's
+just-committed file; the sweep requires an object to be *continuously* unreferenced for
+`orphan_retention`, and re-reads the manifest each pass so a file whose edit has since landed drops
+out on its own. It is off unless `orphan_sweep_interval` is set, and leaving it off costs storage and
+nothing else — the engine steps the file-number counter over whatever the stores already hold, which
+is what makes not deleting safe. On S3 a lifecycle expiry rule on the prefix is the other answer.
 
 ## Reading: which path to use
 
@@ -323,7 +348,7 @@ evicted. Both bindings track outstanding pins and report a non-zero count at clo
 | ------------- | ------------------------------------------------------ |
 | Maximum value | 1 MiB                                                  |
 | Maximum key   | 64 KiB                                                 |
-| Concurrency   | single-writer; iterators and pins belong to one thread |
+| Concurrency   | one writer, any number of readers; iterators and pins belong to one thread |
 
 Oversized entries are refused at `put`, rather than accepted and found unreadable
 later. Enabling `paranoid_checks` turns the threading rule from documentation into
@@ -426,6 +451,10 @@ and a 1M-key store must cost about the same, or file pruning is not working.
 
 - **Range deletes.** The entry encoding reserves room for them; the compaction
   interaction is not designed.
+- **A write-ahead log.** Deliberate: the changelog you are already replaying is
+  the log, so duplicating it would double every write. The watermark is what
+  makes that trade workable — it tells you where to resume, and an unflushed
+  memtable is still lost.
 - **Windows.**
 
 ## Contributing

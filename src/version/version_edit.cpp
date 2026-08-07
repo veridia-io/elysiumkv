@@ -6,8 +6,8 @@
 namespace elysiumkv {
 namespace {
 
-constexpr uint32_t kEditFormatVersion = 1;
-constexpr uint32_t kSnapshotFormatVersion = 1;
+constexpr uint32_t kEditFormatVersion = 2;
+constexpr uint32_t kSnapshotFormatVersion = 2;
 /// A manifest snapshot for a mature store is a few hundred KB; the bound only
 /// has to keep a corrupt length from becoming an allocation.
 constexpr size_t kMaxManifestBytes = 256u << 20;
@@ -26,6 +26,37 @@ bool get_string(const uint8_t*& p, const uint8_t* limit, std::string& out) {
     return true;
 }
 
+/// Presence is encoded ahead of the values rather than inferred from them, because **zero is a
+/// valid watermark**. One varint carrying two bits keeps the record all-varint; `high` present
+/// with `low` absent is the legitimate state of a file whose memtable predates the first
+/// `set_watermark` call, so the two bits are independent rather than a tri-state count.
+void put_watermark(std::string& out, const WatermarkInterval& watermark) {
+    const uint64_t flags = (watermark.low.has_value() ? 1u : 0u) |
+                           (watermark.high.has_value() ? 2u : 0u);
+    put_varint64(out, flags);
+    put_varint64(out, watermark.low.value_or(0));
+    put_varint64(out, watermark.high.value_or(0));
+}
+
+bool get_watermark(const uint8_t*& p, const uint8_t* limit, WatermarkInterval& watermark) {
+    uint64_t flags = 0;
+    if (!get_varint64(p, limit, flags)) return false;
+    if (flags > 3) return false;   // only the two defined bits
+    uint64_t low = 0;
+    uint64_t high = 0;
+    if (!get_varint64(p, limit, low)) return false;
+    if (!get_varint64(p, limit, high)) return false;
+
+    // A `low` without a `high` is not reachable — a `low` is only ever a previously established
+    // `high` — so it is corruption rather than a state to tolerate.
+    if ((flags & 1u) != 0 && (flags & 2u) == 0) return false;
+    watermark.low = (flags & 1u) != 0 ? std::optional<uint64_t>(low) : std::nullopt;
+    watermark.high = (flags & 2u) != 0 ? std::optional<uint64_t>(high) : std::nullopt;
+    // An inverted interval cannot arise from `min` over lows and `max` over highs.
+    if (watermark.low.has_value() && *watermark.low > *watermark.high) return false;
+    return true;
+}
+
 void put_file(std::string& out, const FileMetadata& file) {
     put_varint64(out, static_cast<uint64_t>(file.level));
     put_varint64(out, file.file_number);
@@ -37,6 +68,7 @@ void put_file(std::string& out, const FileMetadata& file) {
     put_varint64(out, file.num_tombstones);
     put_varint64(out, static_cast<uint64_t>(file.compression));
     put_varint64(out, file.min_write_time_ms);
+    put_watermark(out, file.watermark);
 }
 
 bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
@@ -54,7 +86,8 @@ bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
     if (!get_varint64(p, limit, codec)) return false;
     if (codec > static_cast<uint64_t>(Compression::Zstd)) return false;
     file.compression = static_cast<Compression>(codec);
-    return get_varint64(p, limit, file.min_write_time_ms);
+    if (!get_varint64(p, limit, file.min_write_time_ms)) return false;
+    return get_watermark(p, limit, file.watermark);
 }
 
 void put_pointers(std::string& out, const std::vector<std::pair<int, std::string>>& pointers) {
@@ -114,9 +147,12 @@ Result<VersionEdit> decode_version_edit(Slice bytes) {
     const uint8_t* const limit = p + content->size();
 
     uint32_t format = 0;
-    if (!get_varint32(p, limit, format) || format != kEditFormatVersion) {
-        return std::unexpected(Status::Corrupt);
-    }
+    if (!get_varint32(p, limit, format)) return std::unexpected(Status::Corrupt);
+    // `unframe_block` has already verified the checksum, so these bytes are the ones that were
+    // written: a version we don't recognise is a real version, not damage. There is deliberately
+    // no dual-read path — a format change is a clean break, and reporting `Unsupported` tells the
+    // operator to run a different binary rather than to reach for a restore.
+    if (format != kEditFormatVersion) return std::unexpected(Status::Unsupported);
 
     VersionEdit edit;
     if (!get_varint64(p, limit, edit.next_file_number)) return std::unexpected(Status::Corrupt);
@@ -166,9 +202,12 @@ Result<VersionSnapshot> decode_version_snapshot(Slice bytes) {
     const uint8_t* const limit = p + content->size();
 
     uint32_t format = 0;
-    if (!get_varint32(p, limit, format) || format != kSnapshotFormatVersion) {
-        return std::unexpected(Status::Corrupt);
-    }
+    if (!get_varint32(p, limit, format)) return std::unexpected(Status::Corrupt);
+    // `unframe_block` has already verified the checksum, so these bytes are the ones that were
+    // written: a version we don't recognise is a real version, not damage. There is deliberately
+    // no dual-read path — a format change is a clean break, and reporting `Unsupported` tells the
+    // operator to run a different binary rather than to reach for a restore.
+    if (format != kSnapshotFormatVersion) return std::unexpected(Status::Unsupported);
 
     VersionSnapshot snapshot;
     uint64_t files = 0;

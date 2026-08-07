@@ -59,7 +59,9 @@ typedef enum {
     ELYSIUMKV_FENCED,
     ELYSIUMKV_CONFIG,
     ELYSIUMKV_IO,
-    ELYSIUMKV_STALLED
+    ELYSIUMKV_STALLED,
+    ELYSIUMKV_UNSUPPORTED,
+    ELYSIUMKV_STALE
 } elysiumkv_status;
 
 typedef enum { ELYSIUMKV_COMPRESSION_NONE = 0, ELYSIUMKV_COMPRESSION_LZ4, ELYSIUMKV_COMPRESSION_ZSTD }
@@ -97,12 +99,17 @@ ELYSIUMKV_API void elysiumkv_options_destroy(elysiumkv_options*);
 /* Tiers (ARCHITECTURE.md "A tier is not a level"), appended hot to cold. `store` is a handle from one of the
  * blob-store constructors below. A negative or zero bound means "unset".
  *
- * The last tier must bound neither age nor file size, and must be durable;
- * violations are reported by elysiumkv_open as ELYSIUMKV_CONFIG. */
+ * The last tier must not bound age, and must be durable; violations are reported
+ * by elysiumkv_open as ELYSIUMKV_CONFIG.
+ *
+ * `max_bytes` is the *tier's* capacity, evicted oldest-first. There is no
+ * per-file size bound: this function used to take one, and it was removed because
+ * size gave a second, independent route to a colder tier and placement has to be
+ * monotone in age alone. To keep large files off a fast tier, lower that level's
+ * target_file_bytes so large files are not produced. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options*, void* store,
                                         elysiumkv_durability durability, int64_t max_age_ms,
-                                        int64_t max_file_bytes, int64_t max_bytes,
-                                        int64_t stall_age_ms);
+                                        int64_t max_bytes, int64_t stall_age_ms);
 
 /* Levels (ARCHITECTURE.md "Compaction"), LSM structure only — no storage decisions. `level` may skip
  * numbers; gaps inherit the nearest shallower entry. A negative bound is
@@ -124,16 +131,38 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, i
  * a write that would stall then returns ELYSIUMKV_STALLED instead of blocking.
  * The stall valve itself is not configurable off.
  *
- * `reclaim_orphans_at_open` defaults to *disabled*, and turning it on asserts something the
- * engine cannot check: that no other process has this store open. Open takes no lock and
- * performs no compare-and-set, so an unreferenced object is indistinguishable from a
- * concurrent writer's in-flight or just-committed file — deleting it destroys committed data.
- * The engine does not need the reclamation; leaving it off costs storage and nothing else.
+ * `obsolete_retention_ms` defers deleting an object this instance superseded, so a
+ * *read-only* instance in another process holding an older version can still read
+ * it. The collector cannot see that reader — liveness is tracked per process — so
+ * this delay is the only thing protecting it. Zero deletes immediately, which is
+ * correct when nothing else has the store open.
+ *
+ * `orphan_retention_ms` is how long an object must be *continuously observed*
+ * unreferenced before the sweep deletes it, and it protects a concurrently-writing
+ * process. Zero leaves the engine default of 24 hours; there is no configuration in
+ * which deleting an object seen unreferenced once is correct, which is why the way
+ * to switch the sweep off is orphan_sweep_interval_ms rather than this. Must be at
+ * least obsolete_retention_ms — elysiumkv_open reports ELYSIUMKV_CONFIG otherwise,
+ * because a crash empties the pending queue and a superseded object comes back as
+ * an orphan protected by this window alone.
+ *
+ * `orphan_sweep_interval_ms` is how often to list the stores looking for orphans.
+ * Zero disables the sweep, which costs storage and nothing else: correctness never
+ * depends on reclamation happening.
  *
  * `flush_interval_ms` is the second, independent flush trigger: the memtable is flushed once it
  * has been open this long even if it never reaches `memtable_bytes`. Zero leaves it unset, so
  * size alone decides. It bounds how long a write can sit in memory under a trickle of traffic,
- * which no tier age bound can do — those act on files, and an unflushed memtable is not one. */
+ * which no tier age bound can do — those act on files, and an unflushed memtable is not one.
+ *
+ * `maintenance_interval_ms` is how often the maintenance coordinator reconciles: it evaluates
+ * every background policy — flush, compaction, migration off a transient tier, capacity eviction,
+ * obsolete-object collection — against current state and the clock, and dispatches what is due.
+ * It exists because a policy driven by time needs a trigger that is not a write. Zero leaves the
+ * default of one second. Not a latency knob: the interval is the smallest term in the exposure
+ * window `max_age + interval + queueing behind an in-flight compaction + the migration itself`.
+ * An idle tick performs no version scan, which is what makes a short default affordable across
+ * many instances in one process. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, void* manifest_catalog,
                                                      void* memory_budget,
                                                      size_t memtable_bytes, size_t block_bytes,
@@ -143,8 +172,11 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
                                                      size_t max_compaction_bytes,
                                                      int manifest_edits_per_generation,
                                                      int paranoid_checks, int block_on_stall,
-                                                     int reclaim_orphans_at_open,
-                                                     uint64_t flush_interval_ms);
+                                                     uint64_t flush_interval_ms,
+                                                     uint64_t maintenance_interval_ms,
+                                                     uint64_t obsolete_retention_ms,
+                                                     uint64_t orphan_retention_ms,
+                                                     uint64_t orphan_sweep_interval_ms);
 
 /* --- seams -----------------------------------------------------------------
  *
@@ -431,7 +463,16 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *         block_cache_hits, block_cache_misses, block_cache_bytes,
  *         pins_outstanding,
  *         reader_cache_hits, reader_cache_misses, reader_cache_bytes, open_readers,
- *         memory_budget_used, memory_budget_total, budget_sheds
+ *         memory_budget_used, memory_budget_total, budget_sheds,
+ *         flushes                                     offset 192
+ *     u64 durable_watermark                            offset 200
+ *     u8  watermark_present                            offset 208, 0 when unset
+ *     u8  reserved[7]                                  offset 209
+ *                                                      header_bytes = 216
+ *
+ * `watermark_present` exists because **zero is a valid watermark** — a store at the
+ * start of its log — so the value alone cannot express absence. An exporter omits
+ * the series entirely when the flag is zero rather than publishing zero.
  *   level record, level_count of them
  *     i32 level, i32 file_count, u64 bytes, u64 oldest_file_age_ms,
  *     i32 files_stale_codec, u8 age_triggered, u8 stalling, u8 reserved[2]
@@ -452,6 +493,70 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db*, uin
 
 /* Clears requires_recovery after a discard (ARCHITECTURE.md "A tier is not a level"). The only way to clear it. */
 ELYSIUMKV_API void elysiumkv_mark_recovery_complete(elysiumkv_db*);
+
+/* --- watermark --------------------------------------------------------------
+ *
+ * Records that every write completed so far is at a position at or before
+ * `position` in whatever log the embedder replays — a changelog offset, typically.
+ * The engine orders it, carries it with the data and hands it back at the next
+ * open; it never invents, interpolates or interprets one.
+ *
+ * It is a *position*, not a time, and unrelated to a tier's max_age. Positions
+ * must be non-decreasing; a decreasing one returns ELYSIUMKV_CONFIG rather than
+ * being clamped, because clamping would hide a replay that went backwards.
+ *
+ * Cheap: one store under the lock the write path already takes. It forces no
+ * flush and writes no manifest, so it can be called as often as the embedder
+ * commits — the value becomes durable when the memtable holding it is flushed,
+ * which is why elysiumkv_flush promotes it immediately. */
+/* --- read-only -------------------------------------------------------------
+ *
+ * Opens without taking ownership: no manifest write of any kind, no background
+ * threads, no reclamation, no compare-and-set. Several may be open at once,
+ * alongside a writer, and there is no registration and so no limit on how many.
+ *
+ * Refuses a store with no manifest (ELYSIUMKV_NOT_FOUND) rather than creating one,
+ * and refuses a store whose Transient tier has lost files, because repairing that
+ * is a manifest write and serving a version with holes presents stale values as
+ * current.
+ *
+ * **The C ABI cannot express the C++ split**, where a read-only handle is a
+ * different type and passing it somewhere that writes is a compile error. Here
+ * there is one handle type and the write entry points — put, remove, write, flush,
+ * compact_level, set_watermark — return ELYSIUMKV_CONFIG on a read-only handle.
+ *
+ * The writer must set obsolete_retention_ms for any of this to be safe: its
+ * collector cannot see a reader in another process, so that delay is the only
+ * thing standing between a compaction there and a vanished file here. A reader
+ * that falls behind the window is told ELYSIUMKV_STALE, never ELYSIUMKV_CORRUPT. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_open_read_only(const elysiumkv_options*, elysiumkv_db** out);
+
+/* Re-reads the manifest and installs the newest version. Explicit, never
+ * automatic: two reads in one logical operation must be able to see one version.
+ * Open iterators are unaffected — an iterator holds the version it started on.
+ * A no-op returning ELYSIUMKV_OK on a writable handle. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_refresh(elysiumkv_db*);
+
+ELYSIUMKV_API elysiumkv_status elysiumkv_set_watermark(elysiumkv_db*, uint64_t position);
+
+/* The last position whose effect on the store is known to have survived, as
+ * established at *open*. Replaying only the positions **after** it yields the
+ * same logical key-value state as replaying the entire log — exclusive, so `80`
+ * means resume at `81`.
+ *
+ * A getter on the database rather than another out-parameter on
+ * elysiumkv_open_with_result, which already carries five: the recovered watermark
+ * is a property of the opened store, not of the open event.
+ *
+ * `*present` is set to 0 when nothing can be certified — no watermark was ever
+ * set, or a lost transient store held data predating the first one — and the
+ * embedder should replay from the beginning. Distinct from a watermark of zero.
+ * `*out` is untouched when `*present` is 0.
+ *
+ * A restore must use this value, never one that has been through a metrics
+ * pipeline: the stats buffer carries the *live* frontier for observation, and
+ * many metrics systems round a uint64 through a double. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_watermark(elysiumkv_db*, uint64_t* out, bool* present);
 
 #ifdef __cplusplus
 }  /* extern "C" */

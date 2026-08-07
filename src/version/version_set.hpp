@@ -5,10 +5,12 @@
 #include "version/version.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace elysiumkv {
@@ -33,7 +35,34 @@ public:
     using DeleteObjects =
         std::function<std::vector<FileMetadata>(const std::vector<FileMetadata>&)>;
 
-    VersionSet(ManifestCatalog& catalog, int edits_per_generation, DeleteObjects deleter);
+    /// `clock` and `obsolete_retention` govern how long a superseded object is kept after nothing
+    /// local references it. **The retention exists for readers in other processes**, which this
+    /// collector cannot see: `live_versions_` is a process-local list of weak pointers, so without
+    /// a delay a compaction here deletes objects a reader elsewhere is still reading. Zero
+    /// retention is today's behaviour and is correct when there are no readers.
+    VersionSet(ManifestCatalog& catalog, int edits_per_generation, DeleteObjects deleter,
+               std::function<uint64_t()> clock = nullptr, Duration obsolete_retention = Duration(0));
+
+    /// Every file number the current version references. The orphan sweep diffs a store listing
+    /// against this, and against `pending_deletions()`, to decide what is unreferenced.
+    std::set<uint64_t> referenced_file_numbers() const;
+    /// File numbers already queued for deletion, so the sweep does not double-count them as
+    /// orphans — they have an exact unreferenced-since time and a window of their own.
+    std::set<uint64_t> pending_file_numbers() const;
+
+    /// Whether the manifest has moved on since this instance read it — a rolled generation, or a
+    /// newer edit within the current one.
+    ///
+    /// **The pointer alone is not enough**, and that is easy to get wrong: the pointer moves only on
+    /// a generation roll, while a writer obsoletes and collects files on every edit. So this checks
+    /// the edit sequence too. Used by a read-only instance to tell "my version is older than the
+    /// writer's retention window" from "this object is genuinely lost", which are the same symptom
+    /// and opposite diagnoses.
+    ///
+    /// A read failure answers *no*. Failure to look is not evidence, and answering *yes* on a
+    /// failed read would relabel real corruption as staleness — the one direction that must never
+    /// happen.
+    bool manifest_advanced() const;
 
     /// Replays the live generation. `Status::NotFound` means the store has no
     /// pointer yet — an empty store, not a damaged one.
@@ -90,6 +119,19 @@ public:
     /// Files awaiting collection — a live iterator is the usual reason.
     size_t pending_deletions() const;
 
+    /// The same count, readable **without taking `mutex_`** — which matters because the
+    /// maintenance coordinator asks every tick and that mutex is held across manifest writes
+    /// to remote storage. A hint rather than a value: it may be a moment stale, which is
+    /// harmless for a predicate that only decides whether to look.
+    size_t pending_deletions_hint() const {
+        return pending_deletions_hint_.load(std::memory_order_relaxed);
+    }
+
+    /// How many versions have been installed. The maintenance coordinator folds this into its
+    /// epoch: a new version is the single largest source of predicate-relevant change, and
+    /// counting installs is cheaper than asking each predicate whether anything moved.
+    uint64_t installs() const { return installs_.load(std::memory_order_relaxed); }
+
 private:
     Status write_snapshot_and_install(uint64_t generation,
                                       const std::shared_ptr<const Version>& version);
@@ -115,10 +157,20 @@ private:
     std::optional<ManifestCatalog::Entry> entry_;
     uint64_t next_seq_ = 1;
     std::vector<std::weak_ptr<const Version>> live_versions_;
-    std::vector<FileMetadata> pending_deletions_;
+    /// A file waiting to be deleted, and when it stopped being referenced. The timestamp is what
+    /// `obsolete_retention` is measured from.
+    struct PendingDeletion {
+        FileMetadata file;
+        uint64_t unreferenced_since_ms = 0;
+    };
+    std::vector<PendingDeletion> pending_deletions_;
+    std::function<uint64_t()> clock_;
+    Duration obsolete_retention_{0};
 
     std::atomic<uint64_t> next_file_number_{1};
     std::atomic<bool> fenced_{false};
+    std::atomic<size_t> pending_deletions_hint_{0};
+    std::atomic<uint64_t> installs_{0};
 };
 
 }  // namespace elysiumkv

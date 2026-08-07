@@ -28,7 +28,7 @@ final class TestSupport implements AutoCloseable {
                 .memtableBytes(64 * 1024)
                 .blockBytes(1024)
                 .paranoidChecks(true)
-                .addTier(hot, Durability.DURABLE, 0, 0, 0, 0)
+                .addTier(hot, Durability.DURABLE, 0, 0, 0)
                 .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                 .level(1, Compression.ZSTD, 0, 0, 0, 0, 0));
     }
@@ -43,8 +43,8 @@ final class TestSupport implements AutoCloseable {
                 .manifestCatalog(catalog)
                 .memtableBytes(64 * 1024)
                 .paranoidChecks(true)
-                .addTier(hot, Durability.TRANSIENT, 60_000, 0, 0, 120_000)
-                .addTier(cold, Durability.DURABLE, 0, 0, 0, 0)
+                .addTier(hot, Durability.TRANSIENT, 60_000, 0, 120_000)
+                .addTier(cold, Durability.DURABLE, 0, 0, 0)
                 .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                 .level(1, Compression.NONE, 0, 0, 0, 0, 0));
     }

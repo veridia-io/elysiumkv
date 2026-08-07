@@ -187,7 +187,14 @@ Result<std::optional<SstReader::Found>> SstReader::get(Slice key) {
     if (!decode_handle(index.value(), handle)) return std::unexpected(Status::Corrupt);
 
     auto block = load_block(handle);
-    if (!block) return std::unexpected(block.error());
+    if (!block) {
+        // **A block the index says is here cannot be "absent".** The store reporting `NotFound` for
+        // it means the object went away underneath this reader, and returning that verbatim would
+        // hand the caller the same status a missing *key* produces — collapsing an I/O failure into
+        // absence, which is the one confusion `Absence is an answer, not an error` exists to
+        // prevent. A caller told "no such key" writes a replacement for data that still exists.
+        return std::unexpected(block.error() == Status::NotFound ? Status::Corrupt : block.error());
+    }
 
     BlockIterator entries(*block);
     entries.seek(key);

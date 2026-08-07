@@ -1,16 +1,20 @@
 #include "version/version_set.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <set>
 #include <utility>
+#include <vector>
 
 namespace elysiumkv {
 
-VersionSet::VersionSet(ManifestCatalog& catalog, int edits_per_generation,
-                       DeleteObjects deleter)
+VersionSet::VersionSet(ManifestCatalog& catalog, int edits_per_generation, DeleteObjects deleter,
+                       std::function<uint64_t()> clock, Duration obsolete_retention)
     : catalog_(catalog),
       edits_per_generation_(std::max(1, edits_per_generation)),
-      deleter_(std::move(deleter)) {
+      deleter_(std::move(deleter)),
+      clock_(std::move(clock)),
+      obsolete_retention_(obsolete_retention) {
     std::lock_guard<std::mutex> lock(current_mutex_);
     current_ = std::make_shared<const Version>();
 }
@@ -48,6 +52,7 @@ void VersionSet::observe_file_number(uint64_t number) {
 }
 
 void VersionSet::install(std::shared_ptr<const Version> version) {
+    installs_.fetch_add(1, std::memory_order_relaxed);
     live_versions_.push_back(version);
     std::lock_guard<std::mutex> lock(current_mutex_);
     current_ = std::move(version);
@@ -205,6 +210,17 @@ Status VersionSet::apply(VersionEdit edit) {
 
     auto base = current();
 
+    // **This does not validate that `edit.deleted` is still live**, and a second concurrent
+    // deleting task would be unsound because of it: two tasks picking inputs from the same
+    // version snapshot can both commit, producing a double delete or a compaction reading a
+    // file a migration has already moved and unlinked. Today it holds because compaction,
+    // migration and capacity eviction share one executor and run one at a time — asserted
+    // under `ELYSIUMKV_PARANOID` in `DbImpl`, so adding a second deleting worker fails on the
+    // first test run instead of in production. Flush is exempt: it only adds.
+    //
+    // A second deleting worker therefore needs either a set of files claimed by a running
+    // task, or optimistic validation here, **before** the worker — not after.
+
     // Capture the metadata of what is being removed *before* the swap: the
     // store_id says where the object physically lives, and after the swap it is
     // no longer in any version.
@@ -224,7 +240,10 @@ Status VersionSet::apply(VersionEdit edit) {
         if (re_added.count(ref.file_number) != 0) continue;
         for (const FileMetadata& file : base->files_at(ref.level)) {
             if (file.file_number == ref.file_number) {
-                pending_deletions_.push_back(file);
+                pending_deletions_.push_back(
+                    {file, clock_ ? clock_() : 0});
+                pending_deletions_hint_.store(pending_deletions_.size(),
+                                              std::memory_order_relaxed);
                 break;
             }
         }
@@ -277,11 +296,23 @@ void VersionSet::collect_obsolete_locked() {
     }
     live_versions_ = std::move(alive);
 
-    std::vector<FileMetadata> still_pending;
+    // **The retention window**, and it is checked before anything else about the object. A reader
+    // in another process is invisible here — that is the whole reason this delay exists — so the
+    // only thing standing between a compaction and a reader's vanished file is the clock.
+    const uint64_t now = clock_ ? clock_() : 0;
+    const auto retention_ms = static_cast<uint64_t>(obsolete_retention_.count());
+
+    std::vector<PendingDeletion> still_pending;
     std::vector<FileMetadata> collectable;
-    for (const FileMetadata& file : pending_deletions_) {
+    for (const PendingDeletion& pending : pending_deletions_) {
+        const FileMetadata& file = pending.file;
         if (referenced.count(file.file_number) != 0) {
-            still_pending.push_back(file);  // an iterator is still reading it
+            still_pending.push_back(pending);  // an iterator is still reading it
+            continue;
+        }
+        if (retention_ms > 0 && now >= pending.unreferenced_since_ms &&
+            now - pending.unreferenced_since_ms < retention_ms) {
+            still_pending.push_back(pending);  // not yet out of the reader window
             continue;
         }
         // The edit recording this removal is already durable — the ordering
@@ -293,11 +324,45 @@ void VersionSet::collect_obsolete_locked() {
     // obsoletes dozens of objects, and against a remote store the per-file shape
     // was one HTTP round trip each.
     if (!collectable.empty()) {
+        // A file the deleter could not remove goes back on the queue with its window already
+        // spent, so the next pass retries it rather than restarting its retention.
         for (FileMetadata& file : deleter_(collectable)) {
-            still_pending.push_back(std::move(file));
+            still_pending.push_back({std::move(file), 0});
         }
     }
     pending_deletions_ = std::move(still_pending);
+    pending_deletions_hint_.store(pending_deletions_.size(), std::memory_order_relaxed);
+}
+
+bool VersionSet::manifest_advanced() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!entry_.has_value()) return false;
+
+    auto pointer = catalog_.read();
+    if (!pointer || !pointer->has_value()) return false;
+    if ((*pointer)->generation != entry_->generation) return true;   // rolled
+
+    auto seqs = catalog_.list_edits(entry_->generation).get();
+    if (!seqs) return false;
+    for (uint64_t seq : *seqs) {
+        if (seq >= next_seq_) return true;   // an edit this instance has not replayed
+    }
+    return false;
+}
+
+std::set<uint64_t> VersionSet::referenced_file_numbers() const {
+    std::set<uint64_t> numbers;
+    for (const FileMetadata& file : current()->all_files()) numbers.insert(file.file_number);
+    return numbers;
+}
+
+std::set<uint64_t> VersionSet::pending_file_numbers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::set<uint64_t> numbers;
+    for (const PendingDeletion& pending : pending_deletions_) {
+        numbers.insert(pending.file.file_number);
+    }
+    return numbers;
 }
 
 }  // namespace elysiumkv

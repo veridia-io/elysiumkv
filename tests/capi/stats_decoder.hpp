@@ -23,6 +23,8 @@ struct DecodedLevel {
     int32_t files_stale_codec = 0;
     bool age_triggered = false;
     bool stalling = false;
+    uint64_t entries = 0;
+    uint64_t tombstones = 0;
 };
 
 struct DecodedTier {
@@ -57,6 +59,13 @@ struct DecodedStats {
     uint64_t memory_budget_used = 0;
     uint64_t memory_budget_total = 0;
     uint64_t budget_sheds = 0;
+    uint64_t flushes = 0;
+    /// Absent, not zero, when no watermark has been set — zero is a valid position, so an
+    /// exporter must omit the series rather than publish it.
+    uint64_t durable_watermark = 0;
+    bool watermark_present = false;
+    uint64_t memtable_entries = 0;
+    uint64_t memtable_tombstones = 0;
     std::vector<DecodedLevel> levels;
     std::vector<DecodedTier> tiers;
 
@@ -72,6 +81,14 @@ struct DecodedStats {
     uint64_t tier_bytes_total() const {
         uint64_t total = 0;
         for (const DecodedTier& tier : tiers) total += tier.bytes;
+        return total;
+    }
+
+    /// Records the store physically holds — **an upper bound on distinct live keys**, never an
+    /// estimate of them. See `LevelStats::entries`.
+    uint64_t entry_count() const {
+        uint64_t total = memtable_entries - memtable_tombstones;
+        for (const DecodedLevel& level : levels) total += level.entries - level.tombstones;
         return total;
     }
 };
@@ -128,6 +145,11 @@ inline DecodedStats decode_stats(const uint8_t* buf, size_t size) {
     out.memory_budget_used = read_u64(scalars + 136);
     out.memory_budget_total = read_u64(scalars + 144);
     out.budget_sheds = read_u64(scalars + 152);
+    out.flushes = read_u64(scalars + 160);              // buffer offset 192
+    out.durable_watermark = read_u64(scalars + 168);    // buffer offset 200
+    out.watermark_present = scalars[176] != 0;          // buffer offset 208
+    out.memtable_entries = read_u64(scalars + 184);     // buffer offset 216
+    out.memtable_tombstones = read_u64(scalars + 192);  // buffer offset 224
 
     size_t offset = header_bytes;
     for (size_t i = 0; i < level_count && offset + level_record_bytes <= size; ++i) {
@@ -140,6 +162,10 @@ inline DecodedStats decode_stats(const uint8_t* buf, size_t size) {
         level.files_stale_codec = read_i32(r + 24);
         level.age_triggered = r[28] != 0;
         level.stalling = r[29] != 0;
+        if (level_record_bytes >= 48) {
+            level.entries = read_u64(r + 32);
+            level.tombstones = read_u64(r + 40);
+        }
         out.levels.push_back(level);
         offset += level_record_bytes;
     }

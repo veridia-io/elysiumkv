@@ -23,7 +23,7 @@ class SmokeTest {
                      .memtableBytes(64 * 1024)
                      .blockBytes(1024)
                      .paranoidChecks(true)
-                     .addTier(store, Durability.DURABLE, 0, 0, 0, 0)
+                     .addTier(store, Durability.DURABLE, 0, 0, 0)
                      .level(0, Compression.NONE, 0, 4, 8, 12, 0)
                      .level(1, Compression.ZSTD, 0, 0, 0, 0, 0)) {
 

@@ -36,15 +36,12 @@ TEST_F(ConfigValidationTest, NoTiersAtAllIsRejected) {
     EXPECT_EQ(open_error(options), Status::Config);
 }
 
-// The last tier catches everything, so it can bound nothing.
-TEST_F(ConfigValidationTest, TheLastTierMayNotBoundAgeOrSize) {
+// The last tier catches everything, so it can bound nothing that would send a file past it. Age is
+// now the only such bound — the per-file size bound that used to be checked here is gone.
+TEST_F(ConfigValidationTest, TheLastTierMayNotBoundAge) {
     Options aged = base();
     aged.tiers.back().max_age = Duration(60'000);
     EXPECT_EQ(open_error(aged), Status::Config);
-
-    Options sized = base();
-    sized.tiers.back().max_file_bytes = 1u << 20;
-    EXPECT_EQ(open_error(sized), Status::Config);
 
     // A capacity there is fine — it just never evicts, since there is nowhere
     // below to evict to.
@@ -79,14 +76,6 @@ TEST_F(ConfigValidationTest, BoundsMustBeNonDecreasingAcrossTiers) {
         Tier{.store = store_.store(2)},
     };
     EXPECT_EQ(open_error(increasing), Status::Ok);
-
-    Options sizes = base();
-    sizes.tiers = {
-        Tier{.store = store_.store(0), .max_file_bytes = 1u << 20},
-        Tier{.store = store_.store(1), .max_file_bytes = 1u << 10},  // smaller, not larger
-        Tier{.store = store_.store(2)},
-    };
-    EXPECT_EQ(open_error(sizes), Status::Config);
 }
 
 // An unbounded tier followed by a bounded one is decreasing: nothing could ever

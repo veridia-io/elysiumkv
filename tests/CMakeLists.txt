@@ -32,6 +32,8 @@ add_executable(elysiumkv_tests
     unit/key_edges_test.cpp
     unit/version_test.cpp
     unit/version_set_test.cpp
+    unit/entry_count_test.cpp
+    unit/sweep_concurrency_test.cpp
     support/alloc_counter.cpp
     perf/allocation_test.cpp
     soak/growth_test.cpp
@@ -54,6 +56,9 @@ add_executable(elysiumkv_tests
     fault/durability_test.cpp
     fault/tier_migration_test.cpp
     fault/migration_test.cpp
+    fault/watermark_test.cpp
+    fault/maintenance_test.cpp
+    fault/read_only_test.cpp
 )
 # ARCHITECTURE.md "Contract suites" — the claim that an implementation "earns its place by passing this unchanged"
 # is only true if the remote ones are actually run through it. They skip without

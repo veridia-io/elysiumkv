@@ -123,7 +123,16 @@ void SkiplistMemtable::insert(Slice key, ValueType type, Slice value) {
     // tie-break. Swapping one pointer to an immutable record keeps concurrent
     // readers coherent.
     if (next != nullptr && next->key() == key) {
+        // The key is already here, so the *count* does not move — but its kind may. A put
+        // overwritten by a delete turns a live record into a tombstone and vice versa, and the
+        // tombstone count has to follow or the entry count stops being tight.
+        const ValueRecord* previous = next->value.load(std::memory_order_relaxed);
+        const bool was_delete = previous != nullptr && previous->type == ValueType::Delete;
+        const bool is_delete = type == ValueType::Delete;
         next->value.store(new_value(type, value), std::memory_order_release);
+        if (was_delete != is_delete) {
+            tombstones_.fetch_add(is_delete ? 1u : ~0ull, std::memory_order_relaxed);
+        }
         return;
     }
 
@@ -144,6 +153,7 @@ void SkiplistMemtable::insert(Slice key, ValueType type, Slice value) {
         prev[i]->next[i].store(node, std::memory_order_release);
     }
     entries_.fetch_add(1, std::memory_order_relaxed);
+    if (type == ValueType::Delete) tombstones_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SkiplistMemtable::put(Slice key, Slice value) { insert(key, ValueType::Put, value); }

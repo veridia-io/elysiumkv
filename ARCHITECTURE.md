@@ -36,7 +36,7 @@ The life of data, end to end. Everything in the next section is a justification 
        └──── read (then) ────│  L1 … Ln     │  non-overlapping within a level
                              └──────────────┘
                                     │
-                     placement(age, size) decides which tier holds each file
+                     placement(age) decides which tier holds each file
                                     │
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                     ▼
@@ -63,9 +63,12 @@ rate. It costs write amplification in exchange: a short interval on a quiet stor
 files, and small files mean more compaction to merge them away, so it should be chosen from how
 much recent data you are willing to lose rather than from a latency target.
 
-The age trigger is evaluated by the flush thread on its own timer, not by the write path — the
-situation it exists for is precisely one where no write is arriving. In inline mode there is no
-such thread, so age is evaluated on the next write; with no writes at all, nothing flushes.
+The age trigger is evaluated by the maintenance coordinator, not by the write path — the situation it
+exists for is precisely one where no write is arriving (*Maintenance asks; it is not told*). Both
+triggers are one predicate in the coordinator's table rather than a timer of their own, because
+`flush_interval` was the first thing in this engine to be driven by time and the last thing that
+should be on separate machinery. In inline mode there is no coordinator, so age is evaluated on the
+next write; with no writes at all, nothing flushes.
 
 ### Flush: memtable → L0 SST
 
@@ -154,6 +157,25 @@ respect a tier's capacity; then age. The last is a cost optimisation, so starvin
 rather than risking data. Level 0 never participates — a new file number would reorder recency — so
 an L0 file whose age has outgrown its tier leaves by being compacted instead.
 
+### Maintenance: who decides that any of this is due
+
+One coordinator thread reconciles on a fixed interval. It evaluates every background policy —
+flush, compaction, migration, capacity eviction, obsolete-object collection — against current state
+and the clock, and hands what is due to one of two executors: flush on its own thread, and one
+*deleting* task at a time on the other. It performs no long-running work itself, so its next
+evaluation is never blocked by work it dispatched.
+
+**Scheduling pulls; it does not wait to be pushed** — see *Maintenance asks; it is not told*. An idle
+tick is two comparisons and no version scan, which is what makes a one-second default affordable
+across many instances in one process.
+
+### The watermark
+
+The embedder may tell the store where it has reached in whatever log it is replaying —
+`set_watermark(position)`, typically a changelog offset. The engine orders it, carries it with the
+data, and hands it back at the next open; it never invents or interprets one. See *Absence is an
+answer, not an error* for what it promises and what it does not.
+
 ### Open and recovery
 
 Read the manifest pointer, load that generation's snapshot, replay its edits to rebuild the version,
@@ -186,10 +208,18 @@ A *level* is structure: how much data, how much overlap, when to compact. A *tie
 blob store holds the bytes. They are orthogonal, and placement is a pure function:
 
 ```
-placement(age, file_size) -> tier
+placement(age) -> tier
 ```
 
 It consults no keys and does not know whether anything in the file is still current.
+
+**Age is the only input, and narrowing it to that was a correction.** A per-file size bound used to
+be a second predicate, and it broke the property the rest of this section rests on: a file's age only
+ever increases, so placement only ever moves it colder, but a *size* bound could place a brand-new
+file on a cold tier the day it was written. One axis that only moves one way is what makes the design
+stable; two axes with different dynamics is what makes files thrash. Capping a tier's footprint is
+`Tier::max_bytes`, evicted oldest-first — which is what anyone reaching for a size bound actually
+wanted — and keeping large files off a fast tier is a matter of the level's `target_file_bytes`.
 
 **Why:** the tempting design is "level 3 lives on S3". That makes every compaction decision a
 storage decision and every storage change a rewrite of the LSM shape. Keeping the axes separate
@@ -205,7 +235,7 @@ means tuning read amplification and tuning storage cost are independent exercise
   buys storage cost, not immunity from compaction I/O. If a tier's age bound is short relative to
   how long compaction takes to reach that level, you pay for the round trip.
 
-The last tier must be durable and must bound neither age nor size, so a file always has somewhere to
+The last tier must be durable and must not bound age, so a file always has somewhere to
 land. Open rejects a configuration that breaks this instead of documenting it as a precondition.
 
 **Every tier knob is an expression of one underlying parameter: durability lag** — how long a write
@@ -214,6 +244,78 @@ directly, instead of leaving it to emerge from a combination of sizes and rates 
 compute. A transient tier's stall valve exists for the same reason: when migration cannot keep up,
 the lag would otherwise grow without bound, so writes are slowed rather than allowed to outrun
 their own durability.
+
+**`max_age` is not the exposure window, and it is not the largest term in it.** The window is four
+terms:
+
+```
+max_age                                    the bound you configure
+  + the maintenance interval               how late the crossing is noticed
+  + queueing behind an in-flight compaction
+  + the migration itself                   read, upload, commit the manifest edit
+```
+
+The third term is the one to size against, not the first: it is bounded by `max_compaction_bytes`
+over throughput, which at the 400 MiB default and 50 MB/s is roughly sixteen seconds. Note what that
+conversion assumes — **a byte bound turned into a time bound using an assumption about your
+storage** — so it is a typical-case figure and not a guarantee. Against a remote tier throughput is
+network-bound and variable, and a throttling episode with retries stretches it further.
+
+**And no tier setting bounds the worst case.** During a storage outage, migration is what is failing,
+so data already written stays exposed for the duration. The stall valve stops accepting *new* writes
+past `stall_age`, which bounds the **volume** of exposed data and not its **duration**. The backstop
+is that your log still holds the data — which is what the watermark is for. A tier configuration
+cannot make an object store's outage shorter.
+
+Read the stall flag accordingly: from the moment it engages, the log is expiring while the durable
+position stops advancing, so **recovery capability is what degrades, on a deadline**, and the action
+is to extend log retention.
+
+### Maintenance asks; it is not told
+
+Every background policy is a predicate over current state plus the clock, evaluated by one
+coordinator on a fixed tick — not a message a caller remembered to send.
+
+**Why:** it used to be push-based, and three age-bounded behaviours shipped with a write as their
+only trigger. Each failure was identical: the only thing that could have noticed was the thing that
+had stopped happening. A store that went quiet with a file on a transient tier left it there
+indefinitely, whatever the tiers said. The remaining `schedule_compaction()` calls on the write path
+are an optimisation now — they keep a stalled writer from waiting a tick — not the mechanism.
+
+**A fixed interval rather than a computed deadline.** The interval is the *smallest* term in the
+exposure window (*A tier is not a level*), so precision there buys nothing, and a deadline
+computation's failure mode is a silent indefinite sleep — the exact class of bug this exists to
+remove. The rejected alternative, recorded so it is not re-proposed: sleep until
+`oldest min_write_time_ms + max_age`.
+
+**But an idle tick must be nearly free**, or a one-second interval across dozens of instances is not
+affordable — and it is not free naively, because picking a migration walks every file in the version.
+So a gate: a *maintenance epoch* that changes on any predicate-relevant non-clock event, plus the
+earliest future time at which a time-driven predicate could change. Unchanged epoch and no transition
+passed means nothing can have become due, and the tick costs two comparisons.
+
+**The gate is itself a push dependency**, and honesty about that matters more than the mechanism. It
+is much narrower than what it replaced — every predicate must declare what invalidates it, checked in
+one place instead of at scattered call sites — but a predicate whose invalidation is mis-wired can be
+hidden by it. Two things keep that bounded: O(1) predicates such as memtable size are evaluated
+*ahead* of the gate, and every sixtieth tick bypasses it entirely. So a mis-wired predicate runs
+late rather than never. A task nobody wrote a predicate for is not covered by anything.
+
+**One coordinator, two executors.** The coordinator dispatches and never performs long-running work,
+so its next evaluation is not blocked by what it dispatched. Flush has its own thread because one
+immutable memtable is allowed in flight, so sharing a worker with compaction would stall writes for
+the length of a compaction. Everything that *deletes* — compaction, migration, capacity eviction —
+shares the other, and that is load-bearing rather than incidental: `VersionSet::apply` does not
+validate that the files an edit removes are still live, so two deleting tasks picking from the same
+version snapshot could both commit. Flush is exempt because it only adds. A second deleting worker
+needs file-level exclusion or optimistic validation *first*; an assertion under
+`ELYSIUMKV_PARANOID` fails on the first test run if one is added without it.
+
+**The stall predicate has exactly one evaluator.** The coordinator decides whether a transient tier is
+past `stall_age` and publishes a flag; the write path reads it and does not compute it. The same
+predicate in two places is how a valve ends up engaged by one and not the other. The cost is that
+engaging lags by up to one tick — the same `+ interval` the exposure window already carries — and
+open reconciles synchronously so the flag is never stale on the first write.
 
 ### Immutable named objects
 
@@ -253,6 +355,38 @@ one prefix will not corrupt each other's committed history, but they can still i
 CAS cannot see — which is why open performs no destructive action (below), and why storage
 reclamation is opt-in.
 
+### Readers are outside the ownership protocol
+
+Any number of processes may open a store read-only while one writes it. That is close to free, and
+the reason is that three earlier decisions already paid for it: **a clean open writes nothing** (the
+manifest is read, replayed, and left alone), **objects are write-once** so a cached block can never
+become wrong, and **ownership is one compare-and-set** that a reader never performs — so it can
+neither fence the writer nor be fenced.
+
+`ReadOnlyDB` is a base of `DB` rather than a flag, so a read-only handle cannot be passed where a
+write happens and the compiler says so. The C ABI cannot express that and refuses at runtime instead;
+Java uses an interface, which can.
+
+**One thing did not already work, and it is the whole of the design.** The collector deletes an
+object once no live version *in its own process* references it — `live_versions_` is a process-local
+list of weak pointers. A reader elsewhere is invisible to it, so a compaction here deletes files a
+reader there is still reading. That is the same defect class as deleting orphans at open: *local
+knowledge justifying a destructive action whose blast radius is not local*.
+
+The fix is a retention window, `obsolete_retention`, and what recommends it is what it does **not**
+require. Reader registration or leases would give readers a write path — losing the property that
+makes this cheap — and would need expiry, so a merely-slow reader gets its files deleted anyway: the
+failure mode returns with a timer attached. The window needs no coordination at all, no registration,
+no new catalog operation, no limit on how many readers there are, and nothing goes wrong when one
+crashes. It costs storage, which is the right resource to spend, because every alternative spends
+correctness under partial failure.
+
+The reader's side of that contract is `refresh()`, and it is **explicit**. Automatic refresh would let
+two reads in one logical operation see different versions with nothing marking where — freshness is
+the embedder's requirement, not the engine's. A reader that falls behind the window gets
+`Status::Stale`, never `Corrupt`: telling them apart needs no coordination either, because re-reading
+the manifest says which happened. If the writer has moved on, it collected the object legitimately.
+
 ### Open never destroys anything
 
 Recovery reads the pointer, replays edits, and reconciles against what the stores hold. Crash
@@ -265,9 +399,17 @@ edit became durable between the moment the manifest was read and the moment the 
 rolling deploy with two pods briefly overlapping on one bucket would silently destroy committed
 data.
 
-So reclamation is a flag, off by default, and turning it on asserts something the engine cannot
-check: that nothing else has the store open. Leaving it off costs disk and nothing else; on S3 a
-lifecycle rule on the prefix is the other answer.
+So reclamation is **not** something open does, and there is no flag to make it one. That was the
+original shape and the defect was never the default — it was that a *single instantaneous*
+observation cannot support the conclusion. An object unreferenced at the moment we happen to look is
+indistinguishable from a concurrent writer's file whose edit committed a moment ago.
+
+A *sustained* observation can support it, and that is what the sweep does: an object is deletable
+once it has been continuously unreferenced for `orphan_retention`, checked against a **freshly
+re-read manifest** each pass — so a file whose edit has since landed leaves the candidate set on its
+own rather than being argued about, and the pointer re-read doubles as a fence detector. It is off
+unless `orphan_sweep_interval` is set, and off costs disk and nothing else. On S3 a lifecycle rule on
+the prefix is the other answer.
 
 ### Caches chain
 
@@ -312,6 +454,53 @@ turns an outage into apparent data loss, and a caller that cannot tell them apar
 a replacement for data that still exists. This is the same rule as *Immutable named objects*, seen
 from the top of the stack instead of the bottom.
 
+The same distinction governs the watermark. `recovered_watermark()` returns a position or *nothing*,
+and nothing is not zero — zero is a valid position, a store at the start of its log. A single
+integer could not express "nothing can be certified", which is the answer after a transient store
+loses data written before the first watermark existed.
+
+### The watermark is an interval, and only its lower bound is load-bearing
+
+`set_watermark(M)` asserts that every write completed so far is at a position at or before M in the
+embedder's log. What it buys: **if `recovered_watermark()` returns M after an open, replaying only
+the positions after M yields the same logical state as replaying everything.** Exclusive — `80` means
+resume at `81`. Stated as *state* equivalence rather than record retention, because compaction drops
+superseded values and dead tombstones, so no physical-retention claim would be true, and state
+equivalence is what a changelog consumer actually needs.
+
+**This is a resume point, not a durability improvement.** There is no write-ahead log, so an
+unflushed memtable is still lost; the watermark tells you where to resume, it does not reduce what
+you lost. `flush_interval` is what bounds the lag on a quiet store, and `flush()` promotes it
+immediately.
+
+Each file carries **two** values, not one:
+
+- `low` — the last watermark established when the source memtable was *created*. Because every write
+  accepted after `set_watermark(M)` is at a position above M, this is a strict *lower* bound: the
+  file contains no write at or below its own `low`.
+- `high` — the last established before that memtable was sealed. An upper bound.
+
+Compaction takes `min` of the lows and `max` of the highs; migration carries both. Recovery reports
+`max(high)` when nothing was lost, and `min(low)` over the *discarded* files when a transient store
+did lose data.
+
+**Why a single scalar cannot do this**, and it is worth being concrete because two earlier designs
+were wrong here. Reporting a lost file's upper bound over-reports: a memtable that begins at 80 and
+takes writes up to 100 before `set_watermark(100)` has `low = 80, high = 100`, and losing it costs
+the write at 81. And inferring a temporal fact from *placement* or from *file numbers* does not work
+either — the position ordering and the file-number ordering are independent, so a durable survivor
+can certify a high position while the only copy of an earlier write sits on the tier that was lost.
+
+The lower-bound rule needs no such inference: a write at or below `min(low)` over the discarded set
+cannot have lived only in a discarded file, so it survives. The argument mentions no tier, age,
+placement or file number, and holds for an arbitrary discard set — which is exactly why it is the
+one that is correct.
+
+`Stats::durable_watermark` is a **different quantity** with a different name on purpose: the live
+transient-loss-survivable frontier, which advances as data settles onto durable storage, while
+`recovered_watermark()` describes the state recovered at open and never moves. Sharing one name would
+silently change the getter's meaning after the first write.
+
 ### Statistics are a buffer, not a struct
 
 Statistics cross the ABI as an encoded buffer with self-describing record sizes, not as a struct. A
@@ -322,6 +511,25 @@ They are also reported per level and per tier rather than as derived globals. Th
 independent axes (*A tier is not a level*), and a single global number would silently average over a
 distinction the engine spends real effort maintaining. One call returns the whole snapshot, because a
 snapshot assembled from per-field accessors is torn.
+
+`entries` and `tombstones` are per level for a reason worth stating, because the obvious move is one
+global: **the accuracy of an entry count depends on where the records are.** A million records in the
+bottommost level is close to a million keys; a million spread across L0 after an update storm is not.
+`records - tombstones` is an *upper bound* on distinct live keys — provable, since a live key's newest
+record is always a put and never a tombstone — and it becomes exact once compaction has merged
+everything down. Not an estimate: the per-file counts are exact, and all the slack is cross-file.
+
+Two of them are worth calling out as the ones an operator acts on. `flushes` is the first place a
+`flush_interval` set too short shows up, and the only way to see the interval fire at all on a quiet
+partition — `memtable_age` is a gauge read at scrape time, and a counter cannot be derived from a
+gauge. `durable_watermark` is the numerator of the only margin there is: the distance between your
+log's earliest retained offset and that position is how much recovery capability is left, and when
+migration is failing it stops advancing while the log keeps expiring.
+
+Every counter here is **per instance and in memory**, so they return to zero on reopen — which for a
+partition store means on every rebalance. Either accumulate across instances before exporting, or
+scope each series per instance and alert on rates only; an absolute threshold silently re-arms
+otherwise.
 
 ### Versions are immutable snapshots
 
@@ -445,10 +653,21 @@ Listed so their absence isn't mistaken for an oversight. Each would change the c
 extend it, and the reasoning above depends on their absence.
 
 - **Multiple writers.** Ownership is one compare-and-set; concurrent writers would need a different
-  ownership model entirely, not a bigger lock.
+  ownership model entirely, not a bigger lock. Multiple *readers* are supported and cheap — see
+  *Readers are outside the ownership protocol* — and this is the asymmetry that makes that true.
 - **Snapshots as of a point in time.** There are no sequence numbers to name a point with.
 - **Transactions** beyond an atomic write batch.
 - **Secondary indexes.** A key–value store that also maintains derived state is two systems.
+- **Reader registration or leases.** See *Readers are outside the ownership protocol*: the retention
+  window buys the same safety with no coordination and no failure mode when a reader dies.
+- **A write-ahead log.** The changelog the embedder is already replaying is the log; duplicating it
+  would double every write for a durability guarantee the embedder can make more cheaply itself. The
+  watermark exists because of this decision, not despite it: it says where to resume, and it does not
+  reduce what an unflushed memtable loses.
+- **Any interpretation of the watermark.** It is a position in someone else's log. The engine orders
+  it and hands it back; it does not derive a time from it, relate it to `min_write_time_ms`, or claim
+  anything across two stores. Two partitions' watermarks are unrelated and there is no global
+  consistency point.
 
 ## Consequences worth planning for
 
@@ -462,5 +681,13 @@ defects:
 | Set a short `flush_interval` | Many small L0 files, so more compaction | Every flush produces a file regardless of how full it was |
 | Run one instance per partition on defaults | Memory scales with partition count | Sizing is per instance unless a shared budget is given |
 | Make stalls non-blocking | Writes are silently refused under pressure | The valve cannot be disabled, only redirected |
-| Enable orphan reclamation | Another process's in-flight files may be deleted | Open cannot detect a concurrent writer |
+| Open a reader without setting `obsolete_retention` | The reader eventually reports `Stale` | The writer's collector cannot see a reader in another process |
+| Set `orphan_retention` below `obsolete_retention` | Refused at open | A crash turns superseded objects into orphans, protected by the orphan window alone |
+| Restart the writer more often than `orphan_retention` | Orphans are never collected | First-observation times are in memory, so a restart resets them |
+| Read `entryCount()` on an update-heavy store | It far exceeds the live key count, then drops sharply | It counts records; compaction is what merges them |
 | Run two writers on one prefix | The loser is fenced at its next manifest write, not immediately | Fencing happens at the CAS, which is not on every write |
+| Set a watermark and crash before a flush | The previous watermark is what comes back | A watermark becomes durable with the memtable holding it |
+| Lose a transient store | The recovered position rolls back to before anything that store held | Only the discarded files' lower bounds can be trusted |
+| Upgrade across a manifest format change | The store will not open, and says `unsupported` rather than `corrupt` | A `0.x` format change is a clean break; rebuild from the log |
+| Shorten `maintenance_interval` to tighten exposure | Almost nothing changes | The interval is the smallest of four terms in the window |
+| Alert on a counter with an absolute threshold | The alarm silently re-arms on every rebalance | Counters are per instance and in memory |

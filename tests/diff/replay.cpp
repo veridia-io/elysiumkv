@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace elysiumkv::test {
@@ -141,6 +143,7 @@ public:
         // Final check, then once more after a reopen: the manifest must describe
         // the same store the running instance did.
         if (auto message = check_point_reads()) return DiffFailure{ops.size(), *message};
+        if (auto message = check_entry_count()) return DiffFailure{ops.size(), *message};
         if (auto message = check_scan(Slice(), Slice(), false, oracle_entries(oracle_))) {
             return DiffFailure{ops.size(), *message};
         }
@@ -304,6 +307,29 @@ private:
     std::optional<std::string> check_point_reads() {
         for (const auto& [key, value] : oracle_.entries()) {
             if (auto message = check_get(key)) return message;
+        }
+        return std::nullopt;
+    }
+
+    /// **The entry count is an upper bound on distinct live keys, never an estimate of them.**
+    ///
+    /// Every distinct live key occupies at least one record, so `records >= live keys` holds for
+    /// every workload — and the oracle knows exactly how many live keys there are. Checked here
+    /// rather than only in hand-written cases because the property is about *all* workloads, and the
+    /// generator produces update and delete mixes no hand-written case would think of.
+    ///
+    /// Deliberately not asserted in the other direction. The count legitimately exceeds the oracle,
+    /// often by a lot, until compaction has merged the superseded versions and dropped the
+    /// tombstones. That slack is the feature, not a defect.
+    std::optional<std::string> check_entry_count() {
+        const Stats stats = db_->stats();
+        uint64_t count = stats.memtable_entries - stats.memtable_tombstones;
+        for (const LevelStats& level : stats.levels) count += level.entries - level.tombstones;
+        if (count < oracle_.size()) {
+            return "entry count " + std::to_string(count) + " is below the oracle's " +
+                   std::to_string(oracle_.size()) +
+                   " live keys — it is meant to be an upper bound, so either a live key occupies "
+                   "no record or a tombstone was subtracted that never counted itself";
         }
         return std::nullopt;
     }

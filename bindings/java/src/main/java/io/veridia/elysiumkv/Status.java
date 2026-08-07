@@ -9,7 +9,17 @@ public enum Status {
     FENCED,
     CONFIG,
     IO,
-    STALLED;
+    STALLED,
+    /**
+     * The data is intact but this build cannot read it — a manifest written by a newer format
+     * version. Distinct from {@link #CORRUPT}: the remedy is a different binary, not a restore.
+     */
+    UNSUPPORTED,
+    /**
+     * A read-only handle is behind the writer's retention window. Recoverable with
+     * {@link ReadOnlyStore#refresh()}; never a sign of damaged data.
+     */
+    STALE;
 
     private static final Status[] VALUES = values();
 

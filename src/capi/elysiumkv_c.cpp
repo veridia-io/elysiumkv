@@ -25,11 +25,13 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -55,6 +57,8 @@ elysiumkv_status to_c(Status status) {
         case Status::Config: return ELYSIUMKV_CONFIG;
         case Status::Io: return ELYSIUMKV_IO;
         case Status::Stalled: return ELYSIUMKV_STALLED;
+        case Status::Unsupported: return ELYSIUMKV_UNSUPPORTED;
+        case Status::Stale: return ELYSIUMKV_STALE;
     }
     return ELYSIUMKV_UNUSABLE;
 }
@@ -182,6 +186,8 @@ private:
             case ELYSIUMKV_CONFIG: return Status::Config;
             case ELYSIUMKV_IO: return Status::Io;
             case ELYSIUMKV_STALLED: return Status::Stalled;
+            case ELYSIUMKV_UNSUPPORTED: return Status::Unsupported;
+            case ELYSIUMKV_STALE: return Status::Stale;
         }
         // An unknown code is emphatically not absence: treat it as "could not
         // determine", which is the non-destructive reading (ARCHITECTURE.md - Immutable named objects).
@@ -209,7 +215,16 @@ struct elysiumkv_batch {
 };
 
 struct elysiumkv_db {
+    /// Exactly one of these is set. **The C ABI cannot express the C++ type split**, where passing
+    /// a read-only handle somewhere that writes is a compile error, so the distinction lives here
+    /// and the write entry points refuse on a handle that has no `db`.
     std::unique_ptr<DB> db;
+    std::unique_ptr<ReadOnlyDB> reader;
+
+    /// The read surface, whichever kind of handle this is.
+    ReadOnlyDB* reads() const { return db != nullptr ? db.get() : reader.get(); }
+    /// The write surface, or null on a read-only handle.
+    DB* writes() const { return db.get(); }
     std::shared_ptr<BlockCache> block_cache;
     std::vector<std::string> discarded_stores;
     uint64_t discarded_files = 0;
@@ -269,8 +284,7 @@ void elysiumkv_options_destroy(elysiumkv_options* options) { delete options; }
 
 elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* store,
                                         elysiumkv_durability durability, int64_t max_age_ms,
-                                        int64_t max_file_bytes, int64_t max_bytes,
-                                        int64_t stall_age_ms) {
+                                        int64_t max_bytes, int64_t stall_age_ms) {
     return guard([&]() -> elysiumkv_status {
         if (options == nullptr || store == nullptr) {
             return fail(Status::Config, "elysiumkv_options_add_tier: null options or store");
@@ -280,7 +294,6 @@ elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* st
         tier.durability =
             durability == ELYSIUMKV_TRANSIENT ? Durability::Transient : Durability::Durable;
         if (max_age_ms > 0) tier.max_age = Duration(max_age_ms);
-        if (max_file_bytes > 0) tier.max_file_bytes = static_cast<size_t>(max_file_bytes);
         if (max_bytes > 0) tier.max_bytes = static_cast<size_t>(max_bytes);
         if (stall_age_ms > 0) tier.stall_age = Duration(stall_age_ms);
         options->options.tiers.push_back(std::move(tier));
@@ -315,8 +328,11 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
                                          int bloom_bits_per_key,
                                          size_t max_compaction_bytes,
                                          int manifest_edits_per_generation, int paranoid_checks,
-                                         int block_on_stall, int reclaim_orphans_at_open,
-                                         uint64_t flush_interval_ms) {
+                                         int block_on_stall, uint64_t flush_interval_ms,
+                                         uint64_t maintenance_interval_ms,
+                                         uint64_t obsolete_retention_ms,
+                                         uint64_t orphan_retention_ms,
+                                         uint64_t orphan_sweep_interval_ms) {
     return guard([&]() -> elysiumkv_status {
         if (options == nullptr) {
             return fail(Status::Config, "elysiumkv_options_configure: null options");
@@ -343,8 +359,19 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
         if (flush_interval_ms > 0) {
             options->options.flush_interval = std::chrono::milliseconds(flush_interval_ms);
         }
-        if (reclaim_orphans_at_open >= 0) {
-            options->options.reclaim_orphans_at_open = reclaim_orphans_at_open > 0;
+        if (maintenance_interval_ms > 0) {
+            options->options.maintenance_interval =
+                std::chrono::milliseconds(maintenance_interval_ms);
+        }
+        if (obsolete_retention_ms > 0) {
+            options->options.obsolete_retention = std::chrono::milliseconds(obsolete_retention_ms);
+        }
+        if (orphan_retention_ms > 0) {
+            options->options.orphan_retention = std::chrono::milliseconds(orphan_retention_ms);
+        }
+        if (orphan_sweep_interval_ms > 0) {
+            options->options.orphan_sweep_interval =
+                std::chrono::milliseconds(orphan_sweep_interval_ms);
         }
         return ELYSIUMKV_OK;
     });
@@ -719,6 +746,38 @@ elysiumkv_status open_common(const elysiumkv_options* options, elysiumkv_db** ou
 
 }  // namespace
 
+elysiumkv_status elysiumkv_open_read_only(const elysiumkv_options* options, elysiumkv_db** out) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr || out == nullptr) {
+            return fail(Status::Config, "elysiumkv_open_read_only: null options or out");
+        }
+        Options read_options = options->options;
+        // The sweep deletes objects, and a reader has authority to delete nothing. Forced here
+        // rather than trusted to the caller, because the setting is about what a *writer* may do.
+        read_options.orphan_sweep_interval.reset();
+
+        auto handle = std::make_unique<elysiumkv_db>();
+        handle->block_cache = std::make_shared<ShardedLruBlockCache>(options->block_cache_bytes);
+        read_options.block_cache = handle->block_cache;
+
+        auto opened = DB::open_read_only(read_options);
+        if (!opened) {
+            return fail(opened.error(), std::string("read-only open failed: ") +
+                                            std::string(status_name(opened.error())));
+        }
+        handle->reader = std::move(*opened);
+        *out = handle.release();
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_refresh(elysiumkv_db* db) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr) return fail(Status::Config, "elysiumkv_refresh: null db");
+        return to_c(db->reads()->refresh());
+    });
+}
+
 elysiumkv_status elysiumkv_open(const elysiumkv_options* options, elysiumkv_db** out) {
     return guard([&] {
         return open_common(options, out, /*guarded=*/true, nullptr, nullptr, nullptr, nullptr);
@@ -778,7 +837,7 @@ elysiumkv_status elysiumkv_get(elysiumkv_db* db, const uint8_t* key, size_t key_
         if (db == nullptr || value == nullptr || value_len == nullptr || pin == nullptr) {
             return fail(Status::Config, "elysiumkv_get: null argument");
         }
-        auto found = db->db->get(as_slice(key, key_len));
+        auto found = db->reads()->get(as_slice(key, key_len));
         if (!found) {
             return fail(found.error(), std::string("get: ") + std::string(status_name(found.error())));
         }
@@ -813,7 +872,7 @@ elysiumkv_status elysiumkv_get_copy(elysiumkv_db* db, const uint8_t* key, size_t
         if (db == nullptr || value_len == nullptr) {
             return fail(Status::Config, "elysiumkv_get_copy: null argument");
         }
-        auto found = db->db->get(as_slice(key, key_len));
+        auto found = db->reads()->get(as_slice(key, key_len));
         if (!found) {
             return fail(found.error(),
                         std::string("get_copy: ") + std::string(status_name(found.error())));
@@ -841,7 +900,10 @@ elysiumkv_status elysiumkv_put(elysiumkv_db* db, const uint8_t* key, size_t key_
                            const uint8_t* value, size_t value_len) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_put: null db");
-        const Status status = db->db->put(as_slice(key, key_len), as_slice(value, value_len));
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_put: handle is read-only");
+        }
+        const Status status = db->writes()->put(as_slice(key, key_len), as_slice(value, value_len));
         if (status != Status::Ok) {
             return fail(status, std::string("put: ") + std::string(status_name(status)));
         }
@@ -852,7 +914,10 @@ elysiumkv_status elysiumkv_put(elysiumkv_db* db, const uint8_t* key, size_t key_
 elysiumkv_status elysiumkv_delete(elysiumkv_db* db, const uint8_t* key, size_t key_len) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_delete: null db");
-        const Status status = db->db->remove(as_slice(key, key_len));
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_remove: handle is read-only");
+        }
+        const Status status = db->writes()->remove(as_slice(key, key_len));
         if (status != Status::Ok) {
             return fail(status, std::string("delete: ") + std::string(status_name(status)));
         }
@@ -892,7 +957,10 @@ elysiumkv_status elysiumkv_write(elysiumkv_db* db, elysiumkv_batch* batch) {
         if (db == nullptr || batch == nullptr) {
             return fail(Status::Config, "elysiumkv_write: null db or batch");
         }
-        const Status status = db->db->write(batch->batch);
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_write: handle is read-only");
+        }
+        const Status status = db->writes()->write(batch->batch);
         if (status != Status::Ok) {
             return fail(status, std::string("write: ") + std::string(status_name(status)));
         }
@@ -903,7 +971,10 @@ elysiumkv_status elysiumkv_write(elysiumkv_db* db, elysiumkv_batch* batch) {
 elysiumkv_status elysiumkv_flush(elysiumkv_db* db) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_flush: null db");
-        const Status status = db->db->flush();
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_flush: handle is read-only");
+        }
+        const Status status = db->writes()->flush();
         if (status != Status::Ok) {
             return fail(status, std::string("flush: ") + std::string(status_name(status)));
         }
@@ -914,7 +985,10 @@ elysiumkv_status elysiumkv_flush(elysiumkv_db* db) {
 elysiumkv_status elysiumkv_compact_level(elysiumkv_db* db, int level) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_compact_level: null db");
-        const Status status = db->db->compact_level(level);
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_compact_level: handle is read-only");
+        }
+        const Status status = db->writes()->compact_level(level);
         if (status != Status::Ok) {
             return fail(status,
                         std::string("compact_level: ") + std::string(status_name(status)));
@@ -938,10 +1012,10 @@ elysiumkv_status elysiumkv_iter_create(elysiumkv_db* db, const uint8_t* lo, size
         // the empty range: the scan returned nothing and looked like a store with
         // no data rather than a mistake.
         if (hi == nullptr) {
-            handle->iterator = lo == nullptr ? db->db->iterator()
-                                             : db->db->iterator(as_slice(lo, lo_len));
+            handle->iterator = lo == nullptr ? db->reads()->iterator()
+                                             : db->reads()->iterator(as_slice(lo, lo_len));
         } else {
-            handle->iterator = db->db->iterator(as_slice(lo, lo_len), as_slice(hi, hi_len));
+            handle->iterator = db->reads()->iterator(as_slice(lo, lo_len), as_slice(hi, hi_len));
         }
         {
             std::lock_guard<std::mutex> lock(db->iters_mutex);
@@ -960,7 +1034,7 @@ elysiumkv_status elysiumkv_iter_prefix(elysiumkv_db* db, const uint8_t* prefix, 
         }
         auto handle = std::make_unique<elysiumkv_iter>();
         handle->owner = db;
-        handle->iterator = db->db->prefix_iterator(as_slice(prefix, prefix_len));
+        handle->iterator = db->reads()->prefix_iterator(as_slice(prefix, prefix_len));
         {
             std::lock_guard<std::mutex> lock(db->iters_mutex);
             db->iters.insert(handle.get());
@@ -1070,8 +1144,12 @@ void elysiumkv_iter_destroy(elysiumkv_iter* iter) {
 namespace {
 
 constexpr uint32_t kStatsFormatVersion = 1;
-constexpr uint32_t kStatsHeaderBytes = 192;  // 32 fixed + 20 u64 scalars
-constexpr uint32_t kStatsLevelRecordBytes = 32;
+// 32 fixed + 22 u64 scalars + the watermark presence byte and its padding. **No version bump:**
+// the header declares its own length, so a decoder that starts records at `header_bytes` skips
+// what it does not recognise — which is the property that made the previous seven appended
+// scalars a non-event too.
+constexpr uint32_t kStatsHeaderBytes = 232;
+constexpr uint32_t kStatsLevelRecordBytes = 48;
 constexpr uint32_t kStatsTierRecordBytes = 32;
 
 /// Appends little-endian into a buffer it never overruns: once `full` is set the
@@ -1138,6 +1216,13 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.u64(stats.memory_budget_used);
     out.u64(stats.memory_budget_total);
     out.u64(stats.budget_sheds);
+    out.u64(stats.flushes);
+    // The live frontier, and its presence byte beside it because zero is a valid position.
+    out.u64(stats.durable_watermark.value_or(0));
+    out.u8(stats.durable_watermark.has_value() ? 1u : 0u);
+    out.pad(7);
+    out.u64(stats.memtable_entries);
+    out.u64(stats.memtable_tombstones);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);
@@ -1148,6 +1233,10 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
         out.u8(level.age_triggered ? 1u : 0u);
         out.u8(level.stalling ? 1u : 0u);
         out.pad(2);
+        // Appended, which is why the record declares its own length: a decoder that steps by
+        // `level_record_bytes` skips these rather than mis-reading the record after them.
+        out.u64(level.entries);
+        out.u64(level.tombstones);
     }
     for (const TierStats& tier : stats.tiers) {
         out.i32(tier.tier);
@@ -1168,7 +1257,7 @@ elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db* db, uint8_t* buf, 
         if (db == nullptr || out_bytes == nullptr) {
             return fail(Status::Config, "elysiumkv_stats_snapshot: null db or out_bytes");
         }
-        const Stats stats = db->db->stats();
+        const Stats stats = db->reads()->stats();
 
         StatsWriter measure(nullptr, 0);
         encode_stats(stats, measure);
@@ -1182,7 +1271,38 @@ elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db* db, uint8_t* buf, 
 }
 
 void elysiumkv_mark_recovery_complete(elysiumkv_db* db) {
-    if (db != nullptr) db->db->mark_recovery_complete();
+    if (db != nullptr) db->reads()->mark_recovery_complete();
+}
+
+// --- watermark ----------------------------------------------------------------
+
+elysiumkv_status elysiumkv_set_watermark(elysiumkv_db* db, uint64_t position) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr) return fail(Status::Config, "elysiumkv_set_watermark: null db");
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_set_watermark: handle is read-only");
+        }
+        const Status status = db->writes()->set_watermark(position);
+        if (status == Status::Config) {
+            return fail(status, "elysiumkv_set_watermark: watermarks must be non-decreasing");
+        }
+        return to_c(status);
+    });
+}
+
+elysiumkv_status elysiumkv_watermark(elysiumkv_db* db, uint64_t* out, bool* present) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr || out == nullptr || present == nullptr) {
+            return fail(Status::Config, "elysiumkv_watermark: null db, out or present");
+        }
+        const std::optional<uint64_t> watermark = db->reads()->recovered_watermark();
+        *present = watermark.has_value();
+        // Left untouched when absent: a caller that ignores `present` must not read a plausible
+        // zero out of `out`, because zero is a valid position and the two are not the same
+        // answer.
+        if (watermark.has_value()) *out = *watermark;
+        return ELYSIUMKV_OK;
+    });
 }
 
 }  // extern "C"

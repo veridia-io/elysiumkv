@@ -12,6 +12,8 @@ std::string_view status_name(Status s) noexcept {
         case Status::Config:   return "config";
         case Status::Io:       return "io";
         case Status::Stalled:  return "stalled";
+        case Status::Unsupported: return "unsupported";
+        case Status::Stale:       return "stale";
     }
     return "unknown";
 }

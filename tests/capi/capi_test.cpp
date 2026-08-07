@@ -52,21 +52,24 @@ protected:
         elysiumkv_options* options = elysiumkv_options_create();
         EXPECT_EQ(elysiumkv_options_configure(options, catalog_, budget_,
                                             /*memtable_bytes=*/64u << 10,
-                                            /*block_bytes=*/1024, 0, 0, 0, 0, 0, -1, -1, -1,
-                                            /*flush_interval_ms=*/0),
+                                            /*block_bytes=*/1024, 0, 0, 0, 0, 0, -1, -1,
+                                            /*flush_interval_ms=*/0,
+                                            /*maintenance_interval_ms=*/0,
+                                            /*obsolete_retention_ms=*/0,
+                                            /*orphan_retention_ms=*/0,
+                                            /*orphan_sweep_interval_ms=*/0),
                   ELYSIUMKV_OK);
 
         if (transient_tier) {
             const std::string cold = (dir_.path() / "cold").string();
             std::filesystem::create_directories(cold);
             second_store_ = elysiumkv_local_blob_store_create(cold.c_str(), "store-1");
-            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 0,
-                                               120'000),
+            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 120'000),
                       ELYSIUMKV_OK);
-            EXPECT_EQ(elysiumkv_options_add_tier(options, second_store_, ELYSIUMKV_DURABLE, 0, 0, 0, 0),
+            EXPECT_EQ(elysiumkv_options_add_tier(options, second_store_, ELYSIUMKV_DURABLE, 0, 0, 0),
                       ELYSIUMKV_OK);
         } else {
-            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_DURABLE, 0, 0, 0, 0),
+            EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_DURABLE, 0, 0, 0),
                       ELYSIUMKV_OK);
         }
         EXPECT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 8, 12, 0),
@@ -267,9 +270,9 @@ TEST_F(CApiTest, GetCopyReportsTheFullLengthEvenWhenTruncated) {
 // binding to read a failure as absence.
 TEST_F(CApiTest, StatusCodesAreDistinctAndCarryDetail) {
     elysiumkv_options* options = elysiumkv_options_create();
-    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0, 0), ELYSIUMKV_OK);
     // A transient last tier: rejected at open (ARCHITECTURE.md "A tier is not a level").
-    ASSERT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 0, 120'000),
+    ASSERT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 120'000),
               ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),
               ELYSIUMKV_OK);
@@ -367,6 +370,115 @@ TEST_F(CApiTest, TheSnapshotIsOneInstantWhileCompactionRuns) {
 /// Pins the stats buffer layout FORMAT.md declares, against a real snapshot. The self-describing
 /// header is only useful if a decoder can trust where the records begin, so the sizes the header
 /// reports are asserted against the buffer's actual length rather than against the constants.
+// The flush counter, which is what makes `flush_interval` diagnosable: too short an interval
+// produces many small L0 files and therefore more compaction, and flush rate is the first place
+// that shows up. It is also the only way to confirm the interval fires at all on a quiet
+// partition — `memtable_age` is a gauge read at scrape time, so a flush between two scrapes leaves
+// no trace in it, and a counter cannot be derived from a gauge.
+TEST_F(CApiTest, TheFlushCounterAdvancesAcrossAFlush) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    EXPECT_EQ(snapshot(db).flushes, 0u) << "nothing has been flushed yet";
+
+    for (int i = 0; i < 200; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), std::string(64, 'v')), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    const uint64_t after_one = snapshot(db).flushes;
+    EXPECT_GE(after_one, 1u);
+
+    for (int i = 200; i < 400; ++i) {
+        ASSERT_EQ(put(db, "key:" + std::to_string(i), std::string(64, 'v')), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    EXPECT_GT(snapshot(db).flushes, after_one) << "a counter, not a gauge";
+
+    // An empty memtable is not flushed, so the counter must not move for a no-op.
+    const uint64_t settled = snapshot(db).flushes;
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    EXPECT_EQ(snapshot(db).flushes, settled)
+        << "counting a rotation that produced no file would make the rate unreadable";
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// The watermark travels through the same buffer, and absence has to survive the trip: zero is a
+// valid position, so an exporter needs the presence byte to know whether to publish the series.
+TEST_F(CApiTest, TheStatsBufferCarriesTheLiveWatermarkAndItsPresence) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    EXPECT_FALSE(snapshot(db).watermark_present) << "no watermark has been set";
+
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_set_watermark(db, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    DecodedStats stats = snapshot(db);
+    EXPECT_TRUE(stats.watermark_present) << "zero is a position, not the absence of one";
+    EXPECT_EQ(stats.durable_watermark, 0u);
+
+    ASSERT_EQ(put(db, "k2", "v"), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_set_watermark(db, 4242), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    stats = snapshot(db);
+    EXPECT_TRUE(stats.watermark_present);
+    EXPECT_EQ(stats.durable_watermark, 4242u);
+
+    // Non-decreasing, and refused rather than clamped.
+    EXPECT_EQ(elysiumkv_set_watermark(db, 4241), ELYSIUMKV_CONFIG);
+
+    // The getter is a different quantity: it describes the state recovered at open and must not
+    // have moved.
+    uint64_t recovered = 12345;
+    bool present = true;
+    ASSERT_EQ(elysiumkv_watermark(db, &recovered, &present), ELYSIUMKV_OK);
+    EXPECT_FALSE(present) << "this store was opened before any watermark existed";
+    EXPECT_EQ(recovered, 12345u) << "out is untouched when absent, so a plausible zero cannot leak";
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+/* The C ABI cannot express the C++ type split, so the refusal is a status — and it has to be
+ * checked, because a binding that got a read-only handle where it expected a writable one would
+ * otherwise silently drop writes.
+ */
+TEST_F(CApiTest, AReadOnlyHandleRefusesEveryWriteAndStillReads) {
+    // Populate, then close, so the reader opens a store that exists.
+    {
+        elysiumkv_db* writer = open();
+        ASSERT_NE(writer, nullptr);
+        for (int i = 0; i < 100; ++i) {
+            ASSERT_EQ(put(writer, "key:" + std::to_string(i), "v"), ELYSIUMKV_OK);
+        }
+        ASSERT_EQ(elysiumkv_flush(writer), ELYSIUMKV_OK);
+        ASSERT_EQ(elysiumkv_close(writer), 0u);
+    }
+
+    elysiumkv_options* options = make_options();
+    elysiumkv_db* reader = nullptr;
+    ASSERT_EQ(elysiumkv_open_read_only(options, &reader), ELYSIUMKV_OK) << elysiumkv_last_error();
+    elysiumkv_options_destroy(options);
+    ASSERT_NE(reader, nullptr);
+
+    // Reads work.
+    uint8_t buffer[64];
+    size_t len = 0;
+    const std::string key = "key:7";
+    ASSERT_EQ(elysiumkv_get_copy(reader, reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+                               buffer, sizeof(buffer), &len),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(len, 1u);
+
+    // Every write refuses, and says why rather than silently doing nothing.
+    EXPECT_EQ(put(reader, "k", "v"), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_delete(reader, reinterpret_cast<const uint8_t*>(key.data()), key.size()),
+              ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_flush(reader), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_compact_level(reader, 0), ELYSIUMKV_CONFIG);
+    EXPECT_EQ(elysiumkv_set_watermark(reader, 1), ELYSIUMKV_CONFIG);
+
+    // And refresh is available on both kinds of handle.
+    EXPECT_EQ(elysiumkv_refresh(reader), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_close(reader), 0u);
+}
+
 TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     elysiumkv_db* db = open();
     ASSERT_NE(db, nullptr);
@@ -393,11 +505,17 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     const uint32_t level_count = u32(16);
     const uint32_t tier_count = u32(20);
 
-    EXPECT_EQ(header_bytes, 192u);
-    EXPECT_EQ(level_record_bytes, 32u);
+    EXPECT_EQ(header_bytes, 232u);
+    EXPECT_EQ(level_record_bytes, 48u);
     EXPECT_EQ(tier_record_bytes, 32u);
     EXPECT_LE(buffer[24], 1u) << "requires_recovery is a 0/1 byte";
     for (size_t i = 25; i < 32; ++i) EXPECT_EQ(buffer[i], 0u) << "header padding at " << i;
+
+    // The two appended fields, at the offsets metrics-spec.md fixed once so that whichever
+    // feature landed second would not move the first.
+    EXPECT_LE(buffer[208], 1u) << "watermark_present is a 0/1 byte";
+    EXPECT_EQ(buffer[208], 0u) << "no watermark has been set on this store";
+    for (size_t i = 209; i < 216; ++i) EXPECT_EQ(buffer[i], 0u) << "watermark padding at " << i;
 
     // **The whole point of the self-describing header**: records are located by the declared
     // sizes, so those sizes must account for the buffer exactly.
@@ -740,9 +858,9 @@ TEST_F(CApiTest, ABindingCanSupplyItsOwnBlobStore) {
     ASSERT_NE(store, nullptr);
 
     elysiumkv_options* options = elysiumkv_options_create();
-    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 32u << 10, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0),
+    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 32u << 10, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0, 0),
               ELYSIUMKV_OK);
-    ASSERT_EQ(elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0), ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),
               ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 1, ELYSIUMKV_COMPRESSION_NONE, 0, 0, 0, 0, 0),

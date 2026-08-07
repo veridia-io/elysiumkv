@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -47,9 +48,24 @@ enum class Invariant : uint8_t {
 /// For test messages and nothing else.
 const char* invariant_name(Invariant invariant);
 
+/// ARCHITECTURE.md "Negative controls" — the constituents of "placement converges when idle", so a
+/// test can drain three of them and assert the invariant still fails on the fourth.
+///
+/// One control that removed the whole maintenance timer would be satisfied by any *partial*
+/// implementation, and a partial fix is the most likely way this regresses — the four are separate
+/// code paths that happen to share a trigger. So there is one enumerator per constituent, for the
+/// same reason `Invariant` names which check failed rather than reporting one bundled status.
+enum class MaintenanceTask : uint32_t {
+    TransientRescue = 1u << 0,      ///< move a file off a `Transient` tier — durability
+    CapacityEviction = 1u << 1,     ///< a tier is over `max_bytes` — cost
+    DurableAgeMigration = 1u << 2,  ///< colder placement between durable tiers — cost, starvable
+    LevelZeroEscape = 1u << 3,      ///< an L0 file compacted off a tier its age has outgrown
+};
+
 class DbImpl final : public DB {
 public:
-    static Result<OpenResult> open(const Options& options, bool require_all_durable);
+    static Result<OpenResult> open(const Options& options, bool require_all_durable,
+                                   bool read_only = false);
 
     ~DbImpl() override;
 
@@ -67,6 +83,10 @@ public:
 
     Status flush() override;
     Status compact_level(int level) override;
+    Status refresh() override;
+
+    Status set_watermark(uint64_t position) override;
+    std::optional<uint64_t> recovered_watermark() const override { return recovered_watermark_; }
 
     /// ARCHITECTURE.md "Invariants and sanitizers" — the continuous invariant checks, exposed so a test can demand
     /// them at any point. Run automatically after every flush when
@@ -76,6 +96,12 @@ public:
     Status check_invariants(Invariant* which = nullptr) const;
 
 #ifdef ELYSIUMKV_PARANOID
+    /// ARCHITECTURE.md "Negative controls" — claims the deleting-task slot without releasing it, which
+    /// is what a second deleting worker looks like to the guard. The next compaction, migration or
+    /// eviction must then abort. Without this the assertion is one nobody has ever seen fire, and
+    /// CONTRIBUTING.md is explicit that such a check has not been tested.
+    void claim_deleting_task_for_test() { deleting_task_in_flight_.store(true); }
+
     /// ARCHITECTURE.md "Negative controls" — constructs a state that violates exactly one invariant, so the
     /// check that looks for it can be shown to fire. These states are
     /// unreachable while the engine is correct, which is precisely why there is
@@ -103,12 +129,80 @@ public:
     /// test simulate a file vanishing under a running instance.
     void evict_readers() { readers_.clear(); }
     const ResolvedLevels& levels() const { return config_; }
+    /// Runs one sweep on the calling thread, so a test can drive it without waiting for the
+    /// interval. The sweep is idempotent and its patience comes from the clock, not from how often
+    /// it is called.
+    Status sweep_orphans_for_test() { return sweep_orphans(); }
+    /// One reconcile pass on the calling thread, so a test can drive the coordinator's decision
+    /// without waiting for a tick. `force_full` bypasses the O(1) gate, which is what the
+    /// periodic bypass does every minute in the running loop.
+    void reconcile_for_test(bool force_full) { reconcile(force_full); }
+    /// ARCHITECTURE.md "Negative controls" — drops wake notifications while **keeping** epoch
+    /// invalidation, so a test asserts the property that actually holds: a wake is an
+    /// optimisation, an invalidation is not. Suppressing both would assert a guarantee this
+    /// design does not make, and would leave the test ambiguous about which one it claimed.
+    void suppress_maintenance_wakes_for_test(bool on) { suppress_maintenance_wakes_.store(on); }
+    /// ARCHITECTURE.md "Negative controls" — freezes the epoch, which is what a predicate whose
+    /// invalidating transitions were never wired up looks like from the gate's side. The periodic
+    /// bypass is then the only thing that can find the work, which is the bound this exists to
+    /// demonstrate.
+    /// Freezes at **the epoch as it is now**, not at zero. Freezing at zero would itself be a
+    /// change the gate notices, so it would open once more before settling — and that one extra
+    /// opening is enough to drain the work a negative control says cannot be drained, or to let a
+    /// positive control pass without the mechanism it is supposed to be testing.
+    void pin_maintenance_epoch_for_test(bool on) {
+        pinned_maintenance_epoch_.store(on ? static_cast<int64_t>(live_maintenance_epoch()) : -1);
+    }
+    /// Whether the coordinator has caught up with the current epoch, i.e. its gate is now closed on
+    /// state. **A test waits on this rather than sleeping**: "long enough for a few ticks" is a
+    /// guess about a machine, and it was wrong on a loaded CI runner.
+    bool maintenance_gate_closed_for_test() const {
+        return last_reconciled_epoch_.load() == maintenance_epoch();
+    }
+    /// ARCHITECTURE.md "Negative controls" — pins the published stall flag, so what the write path
+    /// reads and what the clock says can be made to disagree. That disagreement is the only way to
+    /// tell a write path that *reads* the flag from one that *computes* the predicate, and it works
+    /// in both directions:
+    ///
+    /// - pinned **true** with nothing actually past `stall_age`: a reader stalls, a computer does
+    ///   not;
+    /// - pinned **false** with the tier far past `stall_age`: a reader proceeds, a computer stalls.
+    ///
+    /// Neither involves timing, which matters — arranging for the flag to become true *naturally*
+    /// races the rescue that clears it again, and that race is what made an earlier version of this
+    /// test fail on CI while passing locally.
+    void pin_transient_stall_for_test(std::optional<bool> state) {
+        pinned_transient_stall_.store(state.has_value() ? (*state ? 1 : 0) : -1);
+        if (state.has_value()) transient_stalled_.store(*state);
+    }
+    /// ARCHITECTURE.md "Negative controls" — **the engine as it was**: the coordinator's clock plays
+    /// no part, so neither a time transition nor the periodic bypass opens the gate and only an
+    /// epoch change — which means a write — can cause work. That is precisely the defect this
+    /// design removes, and a control that merely lengthened the interval is not equivalent, because
+    /// any notification wakes the coordinator early and it then reconciles for real.
+    void suppress_timed_maintenance_for_test(bool on) { suppress_timed_maintenance_.store(on); }
+    /// ARCHITECTURE.md "Negative controls" — refuses the named tasks, so the convergence invariant
+    /// can be shown to fail on each constituent separately. A bitwise-or of `MaintenanceTask`.
+    void suppress_maintenance_tasks_for_test(uint32_t mask) { suppressed_tasks_.store(mask); }
+    bool task_suppressed(MaintenanceTask task) const {
+        return (suppressed_tasks_.load() & static_cast<uint32_t>(task)) != 0;
+    }
+    /// The coordinator's gate epoch. A test watches it to tell "the store has gone quiet" from
+    /// "the store is still settling", which is not the same as "no writes are arriving": an
+    /// executor that did work invalidates the epoch too.
+    uint64_t maintenance_epoch_for_test() const { return maintenance_epoch(); }
+    /// The published transient-tier stall state. One evaluator: the coordinator computes it, the
+    /// write path reads it. See `publish_transient_stall`.
+    bool transient_stalled() const { return transient_stalled_.load(); }
     void mark_recovery_complete() override { requires_recovery_.store(false); }
 
 private:
     DbImpl(const Options& options, ResolvedLevels config, ResolvedTiers tiers);
 
     Status recover();
+    /// Derives `recovered_watermark_` from what survived recovery and seeds the live memtable's
+    /// lower bound with it.
+    void adopt_recovered_watermark();
     void start_background();
 
     // --- write path
@@ -119,9 +213,49 @@ private:
     /// alternatives, not a conjunction. **Call with `mem_mutex_` held** — it reads `mem_`.
     bool memtable_flush_due(bool force) const;
 
-    /// Wake-up period for the flush thread's age check. Zero-cost when no interval is set:
-    /// the thread waits without a timeout in that case.
-    std::chrono::milliseconds flush_poll_interval() const;
+    // --- maintenance scheduling
+    //
+    // **Scheduling pulls; it does not wait to be pushed.** Every background policy is a
+    // predicate over current state plus the clock, evaluated by one coordinator on a fixed
+    // tick — not a message a caller remembered to send. Three age-bounded behaviours in this
+    // engine shipped with a write as their only trigger (the flush interval, age-driven
+    // migration, the L0 tier escape), and the failure was identical each time: the only thing
+    // that could have noticed was the thing that had stopped happening.
+    //
+    // What the restructure does *not* remove is the need to declare invalidation. The O(1)
+    // gate below skips evaluation when nothing relevant has changed, so a predicate whose
+    // invalidating transitions are not wired into `maintenance_epoch()` can be hidden by it.
+    // Wake notifications are optional — a missed nudge costs latency. Epoch invalidation is
+    // mandatory. The periodic gate bypass bounds the damage from getting that wrong to *late*
+    // rather than *never*, which is why it exists.
+
+    /// The coordinator: ticks on `Options::maintenance_interval`, evaluates the predicate table
+    /// and dispatches. Performs no long-running work itself, so predicate evaluation is never
+    /// blocked by work it dispatched.
+    void maintenance_loop();
+    /// One reconcile pass. `force_full` skips the gate.
+    void reconcile(bool force_full);
+    /// The epoch ignoring any test pin. Split out so pinning can capture the live value.
+    uint64_t live_maintenance_epoch() const;
+    /// The gate's epoch: every predicate-relevant change that is *not* the passage of time.
+    /// Version installs dominate it; `maintenance_bumps_` carries the rest — memtable rotation,
+    /// an executor that did work, a change in storage or recovery state.
+    uint64_t maintenance_epoch() const;
+    /// Bumps the epoch and nudges the coordinator. The bump is the part that matters.
+    void invalidate_maintenance();
+    /// The earliest wall-clock time at which a *time-driven* predicate could change, or
+    /// `UINT64_MAX` when none can. Only transitions strictly in the future count: one already
+    /// past has been folded into the reconcile that observed it, and returning it would hold the
+    /// gate open and re-scan every tick.
+    ///
+    /// The memtable's flush deadline is deliberately absent — the whole flush predicate is
+    /// O(1) and is evaluated *ahead* of the gate on every tick, which covers both its size and
+    /// its age trigger.
+    uint64_t next_time_transition(const Version& version, uint64_t now) const;
+    /// Evaluates "is a transient tier past `stall_age`?" and publishes the answer. **One
+    /// evaluator:** if the write path computed this too, the same predicate would exist in two
+    /// places and could diverge — which is how a valve ends up engaged by one and not the other.
+    void publish_transient_stall(const Version& version, uint64_t now);
     /// ARCHITECTURE.md "The differential oracle" — **exactly one unit of flush work**, returning whether it did any.
     /// The flush thread is a loop calling this; synchronous mode calls the same
     /// function inline. The modes differ only in who calls the work, never in
@@ -144,7 +278,15 @@ private:
     /// One thread drives both migration and compaction (ARCHITECTURE.md "Migration between tiers"): migration off a
     /// transient tier first, then compaction.
     void background_compaction_loop();
+    /// Nudges the maintenance executor to look now. Demoted by the coordinator from *the*
+    /// trigger to an optimisation — it is what keeps a stalled writer from waiting a full tick —
+    /// and it invalidates the epoch, which is the half that is not optional.
     void schedule_compaction();
+    /// The dispatch alone, with no epoch bump and not suppressible. The coordinator's pull path.
+    void dispatch_maintenance();
+    /// Declares that predicate-relevant state changed. See its definition for why the epoch bump
+    /// is the mandatory half and the wake is not.
+    void note_maintenance_state_changed();
     /// ARCHITECTURE.md "The differential oracle" — the compaction counterpart of `run_one_flush`, with the same
     /// contract: performs exactly one compaction, reports whether it did work.
     bool run_one_compaction(Status& status);
@@ -159,9 +301,10 @@ private:
     bool compact_l0_file_off_its_tier(Status& status);
     Status write_compaction_outputs(const Compaction& compaction,
                                     std::vector<FileMetadata>& outputs);
-    /// ARCHITECTURE.md "A tier is not a level" — where a finished file belongs. Evaluated *after* the bytes exist,
-    /// because `max_file_bytes` is one of its inputs.
-    const Tier& tier_for(uint64_t min_write_time_ms, uint64_t file_bytes) const;
+    /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. It no longer
+    /// depends on the file's size, so it no longer has to be evaluated after the bytes exist; the
+    /// call sites simply have not been moved earlier, and nothing requires them to be.
+    const Tier& tier_for(uint64_t min_write_time_ms) const;
     /// The store named in a file's metadata, or nullptr if the configuration no
     /// longer has it.
     BlobStore* store_for(const std::string& store_id) const;
@@ -174,6 +317,37 @@ private:
     /// Objects no version references: the residue of a compaction or flush that
     /// died before its edit was durable.
     void collect_orphans(const std::map<std::string, std::vector<std::string>>& listings);
+
+    /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
+    /// been **continuously unreferenced for `orphan_retention`**.
+    ///
+    /// A single instantaneous observation cannot tell a dead writer's residue from a live writer's
+    /// just-committed file, which is why deleting on one was removed. A sustained observation can,
+    /// and the manifest re-read below is what makes it sustained rather than merely repeated: an
+    /// object whose edit has since committed is referenced now and drops out of the set.
+    ///
+    /// Skips what `pending_deletions` already holds — those have an exact unreferenced-since time
+    /// and `obsolete_retention` of their own, and letting the sweep at them would undercut the
+    /// reader window.
+    Status sweep_orphans();
+    /// Whether the writer has rolled past the generation this instance holds — the discriminator
+    /// between "my version is too old" and "this object is genuinely lost".
+    bool manifest_has_advanced() const;
+    /// Turns a read failure into `Status::Stale` when this read-only instance is behind the
+    /// writer's retention window rather than looking at damaged data.
+    Status classify_read_failure(Status status) const;
+    /// First time each object was seen unreferenced, per store. In memory, so a restart resets it:
+    /// a writer that restarts more often than `orphan_retention` never collects. That is a leak
+    /// rather than a hazard — it errs toward keeping bytes — and the alternative was growing
+    /// `BlobStore` with a modification time, which every binding-supplied implementation would
+    /// have to serve.
+    std::map<std::string, std::map<std::string, uint64_t>> orphan_first_seen_;
+    /// Written by the maintenance executor when it sweeps, read by the coordinator when it
+    /// computes the next time-driven deadline. **Two threads, so atomic** — it is a deadline, not a
+    /// lock, and a stale read costs at most one extra tick.
+    std::atomic<uint64_t> next_sweep_ms_{0};
+    /// Serialises `sweep_orphans`, which the maintenance executor and a test may both call.
+    std::mutex sweep_mutex_;
     Status fail_terminal(Status status, std::string detail);
     /// ARCHITECTURE.md "A process-wide memory budget" — sheds memory when the shared budget is exceeded, in that
     /// order: evict the block cache, then flush memtables, then let the caller stall.
@@ -232,6 +406,51 @@ private:
     /// `SstReaderCache` for why unbounded was expensive and why eviction is safe.
     SstReaderCache readers_;
 
+    /// The maintenance coordinator's own thread and tick. Separate from `mem_mutex_` and
+    /// `compaction_mutex_` so a tick is never delayed by either executor.
+    std::mutex maintenance_mutex_;
+    std::condition_variable maintenance_tick_;
+    bool shutting_down_maintenance_ = false;
+    std::thread maintenance_thread_;
+    /// Non-clock predicate invalidations that are not version installs.
+    std::atomic<uint64_t> maintenance_bumps_{0};
+    /// Written only by `reconcile`, which is single-threaded apart from the synchronous pass `open`
+    /// performs before any caller can reach the instance. Atomic because a test reads it to tell
+    /// "the coordinator has caught up" from "it has not looked yet", and reading a plain member
+    /// across threads is a race whatever the intended ordering.
+    std::atomic<uint64_t> last_reconciled_epoch_{0};
+    uint64_t next_time_transition_ms_ = 0;
+    uint64_t reconcile_ticks_ = 0;
+    std::atomic<bool> transient_stalled_{false};
+    std::atomic<bool> suppress_maintenance_wakes_{false};
+    /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
+    std::atomic<int64_t> pinned_maintenance_epoch_{-1};
+    std::atomic<bool> suppress_timed_maintenance_{false};
+    /// Tri-state: -1 not pinned, 0 pinned clear, 1 pinned set. **Atomic, and an `optional<bool>`
+    /// here was a data race** — the coordinator thread reads this while a test thread writes it, and
+    /// "the test writes it before the writes it cares about" is an argument about *intent*, not
+    /// about synchronisation. TSAN reported it intermittently, which is what an unsynchronised
+    /// access looks like when the interleaving usually happens to be benign.
+    std::atomic<int8_t> pinned_transient_stall_{-1};
+    std::atomic<uint32_t> suppressed_tasks_{0};
+#ifdef ELYSIUMKV_PARANOID
+    /// ARCHITECTURE.md "Negative controls" — at most one *deleting* task may be in flight, because
+    /// `VersionSet::apply` does not validate that the files an edit removes are still live. The
+    /// constraint is narrower than "one version-mutating task": flush overlaps compaction
+    /// legally and must keep doing so, since flush only adds. Cannot fire today — those three
+    /// tasks share an executor — and fires on the first test run after someone adds a second
+    /// deleting worker, which is the difference it exists for.
+    std::atomic<bool> deleting_task_in_flight_{false};
+#endif
+
+    /// The last watermark the embedder established, guarded by `mem_mutex_`. One source of
+    /// truth: a new memtable inherits it as its lower bound, and `set_watermark` compares
+    /// against it to refuse a decrease.
+    std::optional<uint64_t> established_watermark_;
+    /// Fixed by recovery and never written again, so `recovered_watermark()` cannot change
+    /// meaning after the first write. The live frontier is `Stats::durable_watermark`.
+    std::optional<uint64_t> recovered_watermark_;
+
     std::atomic<bool> requires_recovery_{false};
     std::atomic<uint64_t> flushes_{0};
     std::atomic<uint64_t> stalls_{0};
@@ -247,10 +466,16 @@ private:
     mutable std::atomic<uint64_t> pins_outstanding_{0};
     std::vector<std::string> discarded_stores_;
     uint64_t discarded_files_ = 0;
+    /// The inputs to the resume-position rule, accumulated while the files are still in a version.
+    /// A single value rather than a bound plus a "was anything absent" flag, because the decision
+    /// turns on whether *anything was discarded* and that must not be inferable from the bounds.
+    RecoveryWatermark recovery_watermark_;
     std::string last_error_;
     /// Set when a file vanishes from under a live Version (ARCHITECTURE.md "A tier is not a level"): repair cannot
     /// run alongside live iterators, so the instance is finished.
     std::atomic<bool> unusable_{false};
+    /// **No manifest write of any kind**, no background threads, no reclamation, no CAS.
+    bool read_only_ = false;
 };
 
 }  // namespace elysiumkv
