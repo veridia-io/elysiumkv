@@ -342,7 +342,10 @@ private:
     /// `BlobStore` with a modification time, which every binding-supplied implementation would
     /// have to serve.
     std::map<std::string, std::map<std::string, uint64_t>> orphan_first_seen_;
-    uint64_t next_sweep_ms_ = 0;
+    /// Written by the maintenance executor when it sweeps, read by the coordinator when it
+    /// computes the next time-driven deadline. **Two threads, so atomic** — it is a deadline, not a
+    /// lock, and a stale read costs at most one extra tick.
+    std::atomic<uint64_t> next_sweep_ms_{0};
     /// Serialises `sweep_orphans`, which the maintenance executor and a test may both call.
     std::mutex sweep_mutex_;
     Status fail_terminal(Status status, std::string detail);

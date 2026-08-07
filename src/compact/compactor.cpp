@@ -139,9 +139,9 @@ void DbImpl::background_compaction_loop() {
         // *deleting task* in the single-deleter sense and needs no guard.
         if (options_.orphan_sweep_interval.has_value()) {
             const uint64_t now = now_ms();
-            if (now >= next_sweep_ms_) {
-                next_sweep_ms_ =
-                    now + static_cast<uint64_t>(options_.orphan_sweep_interval->count());
+            if (now >= next_sweep_ms_.load()) {
+                next_sweep_ms_.store(
+                    now + static_cast<uint64_t>(options_.orphan_sweep_interval->count()));
                 const Status swept = sweep_orphans();
                 if (swept != Status::Ok && !is_retryable(swept)) {
                     std::lock_guard<std::mutex> lock(mem_mutex_);

@@ -646,7 +646,7 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
     // The orphan sweep is time-driven and has nothing to do with any file, so it would be
     // invisible to a gate that only watches placement deadlines — and a quiet store would never
     // sweep. Exactly the defect this whole loop exists to have fixed, one policy later.
-    if (options_.orphan_sweep_interval.has_value()) consider(next_sweep_ms_);
+    if (options_.orphan_sweep_interval.has_value()) consider(next_sweep_ms_.load());
 
     for (const FileMetadata& file : version.all_files()) {
         const int index = tiers_.tier_of_store(file.store_id);
