@@ -128,6 +128,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      * Zero-copy lookup. Returns null if the key is absent — and only then.
      * <b>Close the result</b>; a leaked pin holds a block-cache entry forever.
      */
+    @Override
     public Pinned get(byte[] key) {
         long[] pin = new long[1];
         ByteBuffer value = Native.get(handle(), key, key.length, pin);
@@ -138,6 +139,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      * As {@link #get(byte[])} for a key already off-heap — nothing is copied in
      * either direction. ARCHITECTURE.md "The ABI boundary" — hot-path callers should allocate keys natively.
      */
+    @Override
     public Pinned get(ByteBuffer key) {
         if (!key.isDirect()) {
             throw new IllegalArgumentException("key buffer must be direct; use get(byte[])");
@@ -148,6 +150,7 @@ public final class ElysiumKV implements ReadOnlyStore {
     }
 
     /** Copies rather than pinning. Returns null if the key is absent. */
+    @Override
     public byte[] getCopy(byte[] key) {
         byte[] out = new byte[512];
         int length = Native.getCopy(handle(), key, key.length, out);
@@ -162,6 +165,7 @@ public final class ElysiumKV implements ReadOnlyStore {
     }
 
     /** Pins currently held. Nonzero at close is a leak (ARCHITECTURE.md "The ABI boundary"). */
+    @Override
     public long pinsOutstanding() {
         return Native.pinsOutstanding(handle());
     }
@@ -206,6 +210,7 @@ public final class ElysiumKV implements ReadOnlyStore {
     // --- iteration -----------------------------------------------------------
 
     /** Half-open range scan; null bounds are unbounded. */
+    @Override
     public ElysiumKVIterator iterator(byte[] lo, byte[] hi) {
         long iter = Native.iterCreate(handle(), lo, lo == null ? 0 : lo.length, hi,
                                       hi == null ? 0 : hi.length);
@@ -213,6 +218,7 @@ public final class ElysiumKV implements ReadOnlyStore {
     }
 
     /** Prefix scan — ARCHITECTURE.md "Absence is an answer, not an error" makes this a first-class path, not sugar over a range. */
+    @Override
     public ElysiumKVIterator prefixIterator(byte[] prefix) {
         long iter = Native.iterPrefix(handle(), prefix, prefix.length);
         return track(new ElysiumKVIterator(this, iter, checked));
@@ -223,6 +229,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      * each entry instead of borrowing it. See {@link BatchedIterator} for the
      * numbers. Prefer this for a long scan.
      */
+    @Override
     public BatchedIterator batchedPrefixIterator(byte[] prefix) {
         long iter = Native.iterPrefix(handle(), prefix, prefix.length);
         BatchedIterator batched = new BatchedIterator(this, iter, checked);
@@ -233,6 +240,7 @@ public final class ElysiumKV implements ReadOnlyStore {
     // --- statistics ----------------------------------------------------------
 
     /** One instant of the engine (ARCHITECTURE.md "Statistics are a buffer, not a struct"), from a single native call. */
+    @Override
     public ElysiumKVStats stats() {
         int needed = Native.statsSnapshot(handle(), statsBuffer);
         if (needed > statsBuffer.length) {
@@ -342,6 +350,7 @@ public final class ElysiumKV implements ReadOnlyStore {
         return outstanding;
     }
 
+    @Override
     public boolean isOpen() {
         return handle != 0;
     }

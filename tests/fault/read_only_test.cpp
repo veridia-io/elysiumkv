@@ -15,6 +15,7 @@
 
 #include "db/db_impl.hpp"
 
+#include "diff/oracle.hpp"
 #include "support/test_db.hpp"
 #include "elysiumkv/db.hpp"
 
@@ -28,6 +29,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -52,6 +54,24 @@ protected:
     /// A reader shares the store and catalog objects but is a separate engine instance — which is
     /// what a second process is, minus the process boundary.
     Options reader_options() { return writer_options(); }
+
+    /// A transient hot tier over a durable one, so a wipe of store 0 is a recoverable loss for a
+    /// writer and an unserveable one for a reader.
+    Options transient_writer_options() {
+        Options options = make_transient_options(store_, Duration(60'000), Duration(120'000));
+        options.background = BackgroundMode::Inline;
+        options.clock = [this] { return now_.load(); };
+        return options;
+    }
+
+    /// Wipes a store the way a replaced volume does: the directory is still there and empty.
+    void wipe(const std::shared_ptr<LocalFileBlobStore>& store) {
+        auto names = store->list("").get();
+        ASSERT_TRUE(names.has_value());
+        for (const std::string& name : *names) {
+            ASSERT_EQ(store->remove(name).get(), Status::Ok);
+        }
+    }
 
     std::unique_ptr<DB> open_writer(const Options& options) {
         auto opened = DB::open(options);
@@ -440,6 +460,266 @@ TEST_F(ReadOnlyTest, AMissingObjectTheManifestStillReferencesIsNotStale) {
     EXPECT_NE(observed, Status::Stale)
         << "the manifest still references it, so this is loss and must be reported as such";
     EXPECT_TRUE(is_terminal(observed)) << "and it is terminal: " << status_name(observed);
+}
+
+// --- the reader is outside the ownership protocol ------------------------------
+
+// **The claim the whole design rests on.** A reader performs no compare-and-set, so it cannot take
+// ownership from a writer however many of them come and go.
+TEST_F(ReadOnlyTest, ReadersNeverFenceTheWriter) {
+    Options options = writer_options();
+    auto writer = open_writer(options);
+    ASSERT_NE(writer, nullptr);
+    write(*writer, 0, 20);
+    ASSERT_EQ(writer->flush(), Status::Ok);
+
+    for (int round = 0; round < 10; ++round) {
+        auto reader = DB::open_read_only(options);
+        ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+        EXPECT_TRUE((*reader)->get_copy(Slice::from(key_at(0))).has_value());
+        EXPECT_EQ((*reader)->refresh(), Status::Ok);
+
+        // The writer keeps working while a reader is open, and again after it closes.
+        write(*writer, 100 * (round + 1), 20, "round" + std::to_string(round));
+        ASSERT_EQ(writer->flush(), Status::Ok)
+            << "a reader took ownership from the writer at round " << round;
+        reader->reset();
+        ASSERT_EQ(writer->compact_level(0), Status::Ok);
+    }
+    EXPECT_FALSE(static_cast<DbImpl&>(*writer).current_version()->all_files().empty());
+}
+
+// No registration means no roll to grow and nothing to cap, so this asserts the *absence* of a
+// limit rather than a particular number.
+TEST_F(ReadOnlyTest, ManyReadersAndAWriterAllMakeProgress) {
+    Options options = writer_options();
+    options.obsolete_retention = Duration(600'000);
+    options.orphan_retention = Duration(600'000);
+
+    auto writer = open_writer(options);
+    ASSERT_NE(writer, nullptr);
+    write(*writer, 0, 100);
+    ASSERT_EQ(writer->flush(), Status::Ok);
+
+    std::vector<std::unique_ptr<ReadOnlyDB>> readers;
+    for (int i = 0; i < 16; ++i) {
+        auto reader = DB::open_read_only(options);
+        ASSERT_TRUE(reader.has_value()) << "reader " << i << ": " << status_name(reader.error());
+        readers.push_back(std::move(*reader));
+    }
+
+    write(*writer, 1000, 100, "later");
+    ASSERT_EQ(writer->flush(), Status::Ok);
+    ASSERT_EQ(writer->compact_level(0), Status::Ok);
+
+    for (size_t i = 0; i < readers.size(); ++i) {
+        EXPECT_TRUE(readers[i]->get_copy(Slice::from(key_at(0))).has_value()) << "reader " << i;
+        ASSERT_EQ(readers[i]->refresh(), Status::Ok) << "reader " << i;
+        EXPECT_TRUE(readers[i]->get_copy(Slice::from(key_at(1000))).has_value()) << "reader " << i;
+    }
+}
+
+// A reader cannot repair a damaged store — the discard is a manifest write — and serving the version
+// unrepaired would be worse than refusing: dropping newer files uncovers older values, so reads
+// would return *stale* data presented as current.
+TEST_F(ReadOnlyTest, AReaderRefusesAStoreWhoseTransientTierLostFiles) {
+    Options options = transient_writer_options();
+    {
+        // `DB::open` refuses a transient configuration outright — a check, not a precondition — so
+        // a writer that intends the exposure asks for it explicitly.
+        auto opened = DB::open_with_result(options);
+        ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+        auto writer = std::move(opened->db);
+        write(*writer, 0, 60);
+        ASSERT_EQ(writer->flush(), Status::Ok);
+    }
+
+    wipe(store_.store(0));
+    const std::map<std::string, std::string> manifest_before = manifest_snapshot();
+
+    auto reader = DB::open_read_only(options);
+    ASSERT_FALSE(reader.has_value()) << "a reader must not serve a version with holes";
+    EXPECT_TRUE(is_terminal(reader.error())) << status_name(reader.error());
+    EXPECT_EQ(manifest_snapshot(), manifest_before) << "and it must not have repaired anything";
+
+    // The control: a *writer* opening the same store performs the discard, which is what the reader
+    // was declining to do on its behalf.
+    auto repaired = DB::open_with_result(options);
+    ASSERT_TRUE(repaired.has_value()) << status_name(repaired.error());
+    EXPECT_FALSE(repaired->discarded_stores.empty());
+}
+
+// --- the two windows do not undercut each other -------------------------------
+
+/* **The interaction the two-knob split introduced.** An obsolete object is, to the sweep,
+ * indistinguishable from an orphan: the edit that removed it is committed, so the current manifest
+ * does not reference it, which is the sweep's own test. What keeps the sweep off it is the
+ * pending-deletion queue — those objects have an exact unreferenced-since time and a window of their
+ * own — and without that exclusion the sweep would delete files the reader window is still
+ * protecting.
+ */
+TEST_F(ReadOnlyTest, TheSweepDoesNotCollectWhatTheReaderWindowIsStillProtecting) {
+    Options options = writer_options();
+    options.obsolete_retention = Duration(600'000);
+    options.orphan_retention = Duration(600'000);
+    options.orphan_sweep_interval = Duration(1);
+
+    auto writer = open_writer(options);
+    ASSERT_NE(writer, nullptr);
+    auto& engine = static_cast<DbImpl&>(*writer);
+
+    write(*writer, 0, 200);
+    ASSERT_EQ(writer->flush(), Status::Ok);
+    const std::vector<std::string> before = store_listing();
+
+    // Compaction obsoletes the inputs; the reader window keeps them on disk.
+    ASSERT_EQ(writer->compact_level(0), Status::Ok);
+    ASSERT_GT(engine.pending_deletions(), 0u) << "the retention window is what holds them";
+
+    // Well past the *orphan* window, which is the trap: to the sweep these look unreferenced, and
+    // only the queue exclusion stops it acting on that.
+    now_.fetch_add(1'200'000);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+
+    const std::vector<std::string> after = store_listing();
+    for (const std::string& name : before) {
+        EXPECT_NE(std::find(after.begin(), after.end(), name), after.end())
+            << "the sweep took " << name << ", which the reader window was still protecting";
+    }
+}
+
+// The sweep re-reads the manifest, so a pointer that moved under it means another writer owns the
+// store. That re-read is the same thing that keeps a committed file from being swept, so it is worth
+// asserting it detects the case it is also named for.
+TEST_F(ReadOnlyTest, TheSweepReportsFencedWhenAnotherWriterHasMovedThePointer) {
+    Options options = writer_options();
+    options.orphan_sweep_interval = Duration(1);
+    // Roll on almost every edit, so the second writer moves the pointer quickly.
+    options.manifest_edits_per_generation = 1;
+
+    auto first = open_writer(options);
+    ASSERT_NE(first, nullptr);
+    write(*first, 0, 20);
+    ASSERT_EQ(first->flush(), Status::Ok);
+    ASSERT_EQ(static_cast<DbImpl&>(*first).sweep_orphans_for_test(), Status::Ok)
+        << "nothing has moved yet";
+
+    // A second writer opens the same store — open takes no lock, which is the window the fence
+    // exists to close later — and rolls the generation out from under the first.
+    auto second = open_writer(options);
+    ASSERT_NE(second, nullptr);
+    write(*second, 1000, 20, "second");
+    ASSERT_EQ(second->flush(), Status::Ok);
+
+    EXPECT_EQ(static_cast<DbImpl&>(*first).sweep_orphans_for_test(), Status::Fenced)
+        << "the manifest moved under this writer and the sweep is where it noticed";
+}
+
+// --- the strongest property available --------------------------------------
+
+/* **Every state a reader observes is one the writer actually published.**
+ *
+ * Note what this is *not*: "the reader matches the oracle". It legitimately lags — that is the whole
+ * point of `refresh()` being explicit — so equality with the current oracle would be the wrong
+ * assertion and would fail for a correct implementation. What must hold is that the reader never
+ * observes a state the writer never had: no mixture of two versions, no half-installed edit, no
+ * file from one version paired with a file from another.
+ *
+ * That is what a torn version install would look like, and it is the one failure the case-by-case
+ * tests above could not catch — each of them fixes the writer's state before looking.
+ */
+TEST_F(ReadOnlyTest, EveryStateAReaderObservesIsOneTheWriterPublished) {
+    Options options = writer_options();
+    options.obsolete_retention = Duration(600'000);
+    options.orphan_retention = Duration(600'000);
+
+    auto writer = open_writer(options);
+    ASSERT_NE(writer, nullptr);
+
+    Oracle oracle;
+    const auto snapshot_of = [](const Oracle& o) {
+        std::string image;
+        for (const auto& [key, value] : o.entries()) {
+            image += key;
+            image.push_back('\0');
+            image += value;
+            image.push_back('\1');
+        }
+        return image;
+    };
+
+    // Seed and publish, so the reader has something to open against.
+    for (int i = 0; i < 40; ++i) {
+        const std::string key = key_at(i);
+        ASSERT_EQ(writer->put(Slice::from(key), Slice::from(std::string("seed"))), Status::Ok);
+        oracle.put(key, "seed");
+    }
+    ASSERT_EQ(writer->flush(), Status::Ok);
+
+    std::set<std::string> published{snapshot_of(oracle)};
+
+    auto opened = DB::open_read_only(options);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    std::unique_ptr<ReadOnlyDB> reader = std::move(*opened);
+
+    const auto reader_state = [&reader] {
+        std::string image;
+        auto it = reader->iterator();
+        while (it->next()) {
+            image += it->key().to_string();
+            image.push_back('\0');
+            image += it->value().to_string();
+            image.push_back('\1');
+        }
+        EXPECT_EQ(it->status(), Status::Ok);
+        return image;
+    };
+
+    // A deterministic pseudo-random stream, so a failure reproduces from the seed alone.
+    uint64_t rng = 0x9E3779B97F4A7C15ull;
+    const auto next = [&rng] {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        return rng;
+    };
+
+    for (int round = 0; round < 60; ++round) {
+        const int ops = static_cast<int>(next() % 20) + 1;
+        for (int i = 0; i < ops; ++i) {
+            const std::string key = key_at(static_cast<int>(next() % 120));
+            if (next() % 4 == 0) {
+                ASSERT_EQ(writer->remove(Slice::from(key)), Status::Ok);
+                oracle.remove(key);
+            } else {
+                const std::string value = "r" + std::to_string(round) + "-" + std::to_string(i);
+                ASSERT_EQ(writer->put(Slice::from(key), Slice::from(value)), Status::Ok);
+                oracle.put(key, value);
+            }
+        }
+
+        // The reader must not see writes that are only in the memtable, so it is checked *before*
+        // the publish as well as after.
+        EXPECT_TRUE(published.count(reader_state()) != 0)
+            << "round " << round << ": the reader observed a state the writer never published";
+
+        ASSERT_EQ(writer->flush(), Status::Ok);
+        if (round % 5 == 0) ASSERT_EQ(writer->compact_level(0), Status::Ok);
+        published.insert(snapshot_of(oracle));
+
+        ASSERT_EQ(reader->refresh(), Status::Ok);
+        const std::string observed = reader_state();
+        EXPECT_TRUE(published.count(observed) != 0)
+            << "round " << round << ": after refresh the reader observed a state the writer never "
+               "published — a version install was torn, or two versions were mixed";
+        EXPECT_EQ(observed, snapshot_of(oracle))
+            << "round " << round << ": a refresh should install the newest published version";
+    }
+
+    // And the control for the whole construction: a reader that never refreshed would be stuck on
+    // the seed state, so the assertions above would be vacuous if `published` grew to hold
+    // everything trivially. It does not — every entry came from an actual publish.
+    EXPECT_GT(published.size(), 30u) << "the writer published many distinct states";
 }
 
 }  // namespace
