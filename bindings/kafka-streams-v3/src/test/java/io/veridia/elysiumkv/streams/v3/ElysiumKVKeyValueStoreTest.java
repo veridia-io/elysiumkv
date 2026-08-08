@@ -44,8 +44,11 @@ class ElysiumKVKeyValueStoreTest {
     }
 
     private KeyValueStore<Bytes, byte[]> open(Path dir) {
+        // The plain variant: these tests init the store as its own root, which is not a timestamped
+        // chain, and the timestamped variant refuses that arrangement rather than run in it.
         KeyValueStore<Bytes, byte[]> store =
-                new ElysiumKVKeyValueBytesStoreSupplier("state", ElysiumKVStoreConfig.local()).get();
+                ElysiumKVKeyValueBytesStoreSupplier.plain("state", ElysiumKVStoreConfig.local())
+                        .get();
         MockProcessorContext<Object, Object> context = new MockProcessorContext<>(
                 new java.util.Properties() {{
                     setProperty("application.id", "test");
