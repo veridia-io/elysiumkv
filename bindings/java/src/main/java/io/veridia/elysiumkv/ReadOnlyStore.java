@@ -40,7 +40,23 @@ public interface ReadOnlyStore extends AutoCloseable {
 
     ElysiumKVIterator prefixIterator(byte[] prefix);
 
+    /**
+     * The same two scans, descending: {@code next()} advances towards smaller keys, so the first
+     * entry is the largest in range. Bounds keep their forward meaning — {@code lo} inclusive,
+     * {@code hi} exclusive — so a direction change reorders the answer without changing it.
+     */
+    ElysiumKVIterator reverseIterator(byte[] lo, byte[] hi);
+
+    ElysiumKVIterator reversePrefixIterator(byte[] prefix);
+
     BatchedIterator batchedPrefixIterator(byte[] prefix);
+
+    /**
+     * The batched scan, descending. Present so that choosing a direction never costs the batching:
+     * a long descending scan is exactly the case the batched path exists for, and without this one
+     * the only reverse option is the per-entry iterator at roughly 7x the cost per entry.
+     */
+    BatchedIterator batchedReversePrefixIterator(byte[] prefix);
 
     /** One instant of the engine, from a single native call. */
     ElysiumKVStats stats();

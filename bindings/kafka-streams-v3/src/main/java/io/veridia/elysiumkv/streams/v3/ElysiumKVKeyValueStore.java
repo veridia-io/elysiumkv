@@ -192,6 +192,23 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
                                                to == null ? null : upperBoundExclusive(to)));
     }
 
+    /**
+     * The same two scans descending. Both are {@code KeyValueStore} methods whose defaults throw,
+     * so without them a caller asking for descending order gets an exception rather than an answer.
+     */
+    @Override
+    public KeyValueIterator<Bytes, byte[]> reverseRange(Bytes from, Bytes to) {
+        assertOpen();
+        return new IteratorAdapter(db.reverseIterator(from == null ? null : from.get(),
+                                                      to == null ? null : upperBoundExclusive(to)));
+    }
+
+    @Override
+    public KeyValueIterator<Bytes, byte[]> reverseAll() {
+        assertOpen();
+        return new IteratorAdapter(db.reverseIterator(null, null));
+    }
+
     @Override
     public KeyValueIterator<Bytes, byte[]> all() {
         assertOpen();
@@ -243,22 +260,19 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
                 result = (QueryResult<R>) QueryResult.forResult(get(keyQuery.getKey()));
             } else if (query instanceof RangeQuery) {
                 RangeQuery<Bytes, byte[]> rangeQuery = (RangeQuery<Bytes, byte[]>) query;
-                if (rangeQuery.resultOrder() == ResultOrder.DESCENDING) {
-                    // Declined outright rather than served by buffering the range and reversing it:
-                    // this store exists to hold state larger than memory, so the one query that
-                    // would have to materialize its whole result is the one least safe to fake.
-                    return QueryResult.forFailure(
-                            FailureReason.STORE_EXCEPTION,
-                            "ElysiumKV iterates forward only, so a descending RangeQuery cannot be "
-                                    + "served by store '" + name + "'. Query ascending and reverse "
-                                    + "the result if it is small enough to hold.");
-                }
+                // Descending is served by the engine iterating backwards, not by buffering the
+                // range and reversing it — the result is streamed either way, so a range larger
+                // than memory is answerable in both directions.
+                final boolean descending = rangeQuery.resultOrder() == ResultOrder.DESCENDING;
                 Optional<Bytes> lower = rangeQuery.getLowerBound();
                 Optional<Bytes> upper = rangeQuery.getUpperBound();
-                KeyValueIterator<Bytes, byte[]> iterator =
-                        lower.isPresent() || upper.isPresent()
-                                ? range(lower.orElse(null), upper.orElse(null))
-                                : all();
+                KeyValueIterator<Bytes, byte[]> iterator;
+                if (lower.isPresent() || upper.isPresent()) {
+                    iterator = descending ? reverseRange(lower.orElse(null), upper.orElse(null))
+                                          : range(lower.orElse(null), upper.orElse(null));
+                } else {
+                    iterator = descending ? reverseAll() : all();
+                }
                 result = (QueryResult<R>) QueryResult.forResult(iterator);
             } else {
                 return QueryResult.forUnknownQueryType(query, this);

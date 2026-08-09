@@ -146,6 +146,24 @@ public:
     virtual std::unique_ptr<Iterator> iterator(Slice lower_inclusive) = 0;
     virtual std::unique_ptr<Iterator> prefix_iterator(Slice prefix) = 0;
 
+    /// The same four scans, descending. `next()` still means "advance", it just advances downwards:
+    /// the first call yields the largest key in range and each later one yields the next smaller.
+    ///
+    /// **Bounds keep their meaning, not their roles.** `lower_inclusive` and `upper_exclusive`
+    /// describe the same set of keys as they do forward — only the order of delivery changes. So a
+    /// reverse scan of `[a, d)` starts at the largest key below `d` and ends at `a`. Defining it any
+    /// other way would make a range mean one thing forward and another backward.
+    ///
+    /// **A direction is chosen once.** There is no `prev()`: an iterator runs one way to
+    /// exhaustion. Turning around mid-scan would cost a re-seek of every underlying source on each
+    /// turn, and no caller has needed it — a descending scan is what a "last N" query wants.
+    virtual std::unique_ptr<Iterator> reverse_iterator() = 0;
+    virtual std::unique_ptr<Iterator> reverse_iterator(Slice lower_inclusive,
+                                                       Slice upper_exclusive) = 0;
+    /// Descends from the end of the keyspace down to `lower_inclusive`.
+    virtual std::unique_ptr<Iterator> reverse_iterator(Slice lower_inclusive) = 0;
+    virtual std::unique_ptr<Iterator> reverse_prefix_iterator(Slice prefix) = 0;
+
     /// Re-reads the manifest and installs the newest version.
     ///
     /// **Explicit, never automatic.** A background refresh would mean two `get`s in one logical

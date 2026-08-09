@@ -702,6 +702,40 @@ jlong JNICALL iter_prefix(JNIEnv* env, jclass, jlong db, jbyteArray prefix, jint
                  jlong{0});
 }
 
+jlong JNICALL iter_create_reverse(JNIEnv* env, jclass, jlong db, jbyteArray lo, jint lo_length,
+                                  jbyteArray hi, jint hi_length) {
+    return guard(env,
+                 [&]() -> jlong {
+                     ByteArrayCopy lo_bytes(env, lo, lo_length);
+                     ByteArrayCopy hi_bytes(env, hi, hi_length);
+                     if (env->ExceptionCheck()) return 0;
+                     elysiumkv_iter* iter = nullptr;
+                     if (!check(env, elysiumkv_iter_create_reverse(as_db(db), lo_bytes.data(),
+                                                                 lo_bytes.size(), hi_bytes.data(),
+                                                                 hi_bytes.size(), &iter))) {
+                         return 0;
+                     }
+                     return as_handle(iter);
+                 },
+                 jlong{0});
+}
+
+jlong JNICALL iter_prefix_reverse(JNIEnv* env, jclass, jlong db, jbyteArray prefix,
+                                  jint prefix_length) {
+    return guard(env,
+                 [&]() -> jlong {
+                     ByteArrayCopy prefix_bytes(env, prefix, prefix_length);
+                     if (env->ExceptionCheck()) return 0;
+                     elysiumkv_iter* iter = nullptr;
+                     if (!check(env, elysiumkv_iter_prefix_reverse(as_db(db), prefix_bytes.data(),
+                                                                 prefix_bytes.size(), &iter))) {
+                         return 0;
+                     }
+                     return as_handle(iter);
+                 },
+                 jlong{0});
+}
+
 jboolean JNICALL iter_next(JNIEnv*, jclass, jlong iter) {
     return elysiumkv_iter_next(as_iter(iter)) ? JNI_TRUE : JNI_FALSE;
 }
@@ -952,6 +986,10 @@ const JNINativeMethod kMethods[] = {
 
     {const_cast<char*>("iterCreate"), const_cast<char*>("(J[BI[BI)J"),
      reinterpret_cast<void*>(iter_create)},
+    {const_cast<char*>("iterCreateReverse"), const_cast<char*>("(J[BI[BI)J"),
+     reinterpret_cast<void*>(iter_create_reverse)},
+    {const_cast<char*>("iterPrefixReverse"), const_cast<char*>("(J[BI)J"),
+     reinterpret_cast<void*>(iter_prefix_reverse)},
     {const_cast<char*>("iterPrefix"), const_cast<char*>("(J[BI)J"),
      reinterpret_cast<void*>(iter_prefix)},
     {const_cast<char*>("iterNext"), const_cast<char*>("(J)Z"),

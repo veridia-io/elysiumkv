@@ -67,6 +67,10 @@ protected:
         void seek(Slice) override { index_ = 0; }
         bool valid() const override { return index_ < entries_.size(); }
         void next() override { ++index_; }
+        // build_sst only scans forward; these exist because the interface requires them.
+        void seek_to_last() override { index_ = entries_.empty() ? 0 : entries_.size() - 1; }
+        void seek_for_prev(Slice) override { seek_to_last(); }
+        void prev() override { index_ = index_ == 0 ? entries_.size() : index_ - 1; }
         Slice key() const override { return Slice::from(entries_[index_].first); }
         Slice value() const override { return Slice::from(entries_[index_].second); }
         ValueType type() const override { return ValueType::Put; }

@@ -80,6 +80,7 @@ bool BlockIterator::parse_entry(size_t offset) {
     value_ = Slice(p, value_len);
     p += value_len;
 
+    current_offset_ = offset;
     next_offset_ = static_cast<size_t>(p - data_);
     valid_ = true;
     return true;
@@ -99,6 +100,66 @@ void BlockIterator::next() {
 void BlockIterator::seek_to_restart(uint32_t index) {
     key_.clear();  // a restart entry stores its key in full
     if (!parse_entry(restart_offset(index))) invalidate();
+}
+
+/// Largest restart index whose entry begins strictly before `offset`.
+///
+/// Restart offsets ascend, so this is a binary search. A linear walk would be correct too, but a
+/// 64 KiB block holds thousands of restarts and prev() would then cost more than the scan it saves.
+uint32_t BlockIterator::restart_before(size_t offset) const {
+    uint32_t low = 0;
+    uint32_t high = num_restarts_ - 1;
+    while (low < high) {
+        const uint32_t mid = low + (high - low + 1) / 2;
+        if (restart_offset(mid) < offset) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    return low;
+}
+
+void BlockIterator::seek_to_last() {
+    if (status_ != Status::Ok || data_ == nullptr) return;
+    seek_to_restart(num_restarts_ - 1);
+    while (valid_ && next_offset_ < entries_end_) next();
+}
+
+void BlockIterator::prev() {
+    if (!valid_) return;
+    const size_t target = current_offset_;
+    if (target == 0) {
+        // Already at the first entry, so there is no previous one. Not an error: the caller above
+        // reads this as "this block is spent" and moves to the preceding block.
+        invalidate();
+        return;
+    }
+
+    // restart_offset(0) is 0, which is < target, so a restart at or before us always exists.
+    seek_to_restart(restart_before(target));
+    while (valid_ && next_offset_ < target) next();
+    if (!valid_ || next_offset_ != target) {
+        // Landing anywhere but exactly on the boundary means the offsets disagree with the entry
+        // stream — a corrupt block, not an exhausted one.
+        if (status_ == Status::Ok) status_ = Status::Corrupt;
+        invalidate();
+    }
+}
+
+void BlockIterator::seek_for_prev(Slice target) {
+    if (status_ != Status::Ok || data_ == nullptr) return;
+
+    seek(target);
+    if (!valid_) {
+        // Every key is below target, so the last entry is the answer. Distinguish that from a
+        // decode failure, which seek() reports through status_.
+        if (status_ != Status::Ok) return;
+        seek_to_last();
+        return;
+    }
+    if (key_.slice() == target) return;  // an exact hit satisfies <=
+    prev();                              // seek() landed just past target
 }
 
 void BlockIterator::seek(Slice target) {

@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
@@ -89,6 +90,40 @@ class ElysiumKVKeyValueStoreTest {
         } finally {
             store.close();
         }
+    }
+
+    /**
+     * {@code reverseRange} and {@code reverseAll} have defaults that throw, so a caller asking for
+     * descending order gets an exception rather than an answer unless the store implements them.
+     * Asserted against the ascending scan reversed — a decreasing sequence is not enough, since a
+     * scan that dropped an entry would still be decreasing.
+     */
+    @Test
+    void reverseScansAreTheForwardScansReversed(@TempDir Path dir) {
+        KeyValueStore<Bytes, byte[]> store = open(dir);
+        for (int i = 0; i < 200; ++i) {
+            store.put(key(String.format("k%03d", i)), value("v" + i));
+        }
+
+        List<String> ascending = new ArrayList<>();
+        try (KeyValueIterator<Bytes, byte[]> it = store.all()) {
+            while (it.hasNext()) ascending.add(string(it.next().key.get()));
+        }
+        List<String> descending = new ArrayList<>();
+        try (KeyValueIterator<Bytes, byte[]> it = store.reverseAll()) {
+            while (it.hasNext()) descending.add(string(it.next().key.get()));
+        }
+        Collections.reverse(descending);
+        assertEquals(ascending, descending);
+        assertEquals(200, ascending.size());
+
+        // And the same for a bounded scan, where Streams' range is inclusive at both ends.
+        List<String> range = new ArrayList<>();
+        try (KeyValueIterator<Bytes, byte[]> it = store.reverseRange(key("k010"), key("k012"))) {
+            while (it.hasNext()) range.add(string(it.next().key.get()));
+        }
+        assertEquals(List.of("k012", "k011", "k010"), range);
+        store.close();
     }
 
     @Test

@@ -15,6 +15,12 @@ namespace elysiumkv {
 ///
 /// Emits one entry per distinct key, tombstones included; dropping them is
 /// compaction's decision (ARCHITECTURE.md "Compaction") and hiding them is the public iterator's.
+///
+/// **One direction per scan.** Forward (seek_to_first/seek/next) and reverse
+/// (seek_to_last/seek_for_prev/prev) are each self-consistent, but turning around mid-scan is not
+/// supported: after a forward step the children that shared the emitted key sit *past* it, and a
+/// reverse pick would then choose one of them. Turning would mean re-seeking every child to the
+/// emitted key, which nothing has asked for.
 std::unique_ptr<InternalIterator> make_merging_iterator(
     std::vector<std::unique_ptr<InternalIterator>> children);
 

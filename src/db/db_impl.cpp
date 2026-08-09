@@ -32,37 +32,34 @@ public:
                std::shared_ptr<const Version> version,
                std::vector<std::shared_ptr<SkiplistMemtable>> memtables,
                std::vector<std::shared_ptr<SstReader>> readers, std::string lower,
-               std::string upper, bool has_upper)
+               std::string upper, bool has_upper, bool reverse)
         : merged_(std::move(merged)),
           version_(std::move(version)),
           memtables_(std::move(memtables)),
           readers_(std::move(readers)),
           lower_(std::move(lower)),
           upper_(std::move(upper)),
-          has_upper_(has_upper) {}
+          has_upper_(has_upper),
+          reverse_(reverse) {}
 
     bool next() override {
         if (!started_) {
             started_ = true;
-            if (lower_.empty()) {
-                merged_->seek_to_first();
-            } else {
-                merged_->seek(Slice::from(lower_));
-            }
+            start();
         } else if (merged_->valid()) {
-            merged_->next();
+            step();
         }
 
         // The merge yields one entry per key, newest first; a tombstone here
         // means the key is deleted, so the public iterator skips it entirely.
         while (merged_->valid()) {
-            if (has_upper_ && !(merged_->key() < Slice::from(upper_))) {
+            if (out_of_range()) {
                 // Leaving the range ends the scan — a prefix iterator must never
                 // degrade into a full keyspace scan (ARCHITECTURE.md "Absence is an answer, not an error").
                 return false;
             }
             if (merged_->type() == ValueType::Put) return true;
-            merged_->next();
+            step();
         }
         return false;
     }
@@ -72,6 +69,43 @@ public:
     Status status() const override { return merged_->status(); }
 
 private:
+    void start() {
+        if (!reverse_) {
+            if (lower_.empty()) {
+                merged_->seek_to_first();
+            } else {
+                merged_->seek(Slice::from(lower_));
+            }
+            return;
+        }
+        if (!has_upper_) {
+            merged_->seek_to_last();
+            return;
+        }
+        // The upper bound is exclusive, and seek_for_prev is inclusive, so a key landing exactly on
+        // it is one step too far. Stepping back is correct rather than seeking to a synthesised
+        // predecessor of `upper_`, which is unrepresentable for arbitrary byte strings.
+        merged_->seek_for_prev(Slice::from(upper_));
+        if (merged_->valid() && !(merged_->key() < Slice::from(upper_))) merged_->prev();
+    }
+
+    void step() {
+        if (reverse_) {
+            merged_->prev();
+        } else {
+            merged_->next();
+        }
+    }
+
+    /// Whether the current entry has left the requested range, which ends the scan.
+    ///
+    /// Descending, the bound that stops the scan is the lower one — and an empty `lower_` needs no
+    /// special case, since no key sorts below the empty string.
+    bool out_of_range() const {
+        if (reverse_) return merged_->key() < Slice::from(lower_);
+        return has_upper_ && !(merged_->key() < Slice::from(upper_));
+    }
+
     std::unique_ptr<InternalIterator> merged_;
     /// Pinned for the iterator's lifetime; releasing it is what finally allows a
     /// compacted-away file to be unlinked (ARCHITECTURE.md "Versions are immutable snapshots").
@@ -81,6 +115,7 @@ private:
     std::string lower_;
     std::string upper_;
     bool has_upper_ = false;
+    bool reverse_ = false;
     bool started_ = false;
 };
 
@@ -94,6 +129,9 @@ public:
     void seek_to_first() override {}
     void seek(Slice) override {}
     void next() override {}
+    void seek_to_last() override {}
+    void seek_for_prev(Slice) override {}
+    void prev() override {}
     Slice key() const override { return {}; }
     Slice value() const override { return {}; }
     ValueType type() const override { return ValueType::Put; }
@@ -1100,7 +1138,8 @@ Result<std::vector<uint8_t>> DbImpl::get_copy(Slice key) {
     return std::vector<uint8_t>(value.data(), value.data() + value.size());
 }
 
-std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool has_upper) {
+std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool has_upper,
+                                                bool reverse) {
     std::shared_ptr<SkiplistMemtable> mem;
     std::shared_ptr<SkiplistMemtable> imm;
     {
@@ -1117,7 +1156,7 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
     for (const auto& memtable : {mem, imm}) {
         if (memtable == nullptr) continue;
         memtables.push_back(memtable);
-        children.push_back(memtable->ascending());
+        children.push_back(reverse ? memtable->descending() : memtable->ascending());
     }
 
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
@@ -1137,17 +1176,31 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
     return std::make_unique<DbIterator>(make_merging_iterator(std::move(children)),
                                         std::move(version), std::move(memtables),
                                         std::move(readers), lower.to_string(), upper.to_string(),
-                                        has_upper);
+                                        has_upper, reverse);
 }
 
-std::unique_ptr<Iterator> DbImpl::iterator() { return make_iterator(Slice(), Slice(), false); }
+std::unique_ptr<Iterator> DbImpl::iterator() {
+    return make_iterator(Slice(), Slice(), false, /*reverse=*/false);
+}
 
 std::unique_ptr<Iterator> DbImpl::iterator(Slice lower_inclusive) {
-    return make_iterator(lower_inclusive, Slice(), /*has_upper=*/false);
+    return make_iterator(lower_inclusive, Slice(), /*has_upper=*/false, /*reverse=*/false);
 }
 
 std::unique_ptr<Iterator> DbImpl::iterator(Slice lower_inclusive, Slice upper_exclusive) {
-    return make_iterator(lower_inclusive, upper_exclusive, true);
+    return make_iterator(lower_inclusive, upper_exclusive, true, /*reverse=*/false);
+}
+
+std::unique_ptr<Iterator> DbImpl::reverse_iterator() {
+    return make_iterator(Slice(), Slice(), false, /*reverse=*/true);
+}
+
+std::unique_ptr<Iterator> DbImpl::reverse_iterator(Slice lower_inclusive) {
+    return make_iterator(lower_inclusive, Slice(), /*has_upper=*/false, /*reverse=*/true);
+}
+
+std::unique_ptr<Iterator> DbImpl::reverse_iterator(Slice lower_inclusive, Slice upper_exclusive) {
+    return make_iterator(lower_inclusive, upper_exclusive, true, /*reverse=*/true);
 }
 
 std::unique_ptr<Iterator> DbImpl::prefix_iterator(Slice prefix) {
@@ -1155,7 +1208,15 @@ std::unique_ptr<Iterator> DbImpl::prefix_iterator(Slice prefix) {
     // An all-0xFF (or empty) prefix has no upper bound; the scan simply runs to
     // the end of the keyspace.
     const bool bounded = prefix_upper_bound(prefix, upper);
-    return make_iterator(prefix, bounded ? Slice::from(upper) : Slice(), bounded);
+    return make_iterator(prefix, bounded ? Slice::from(upper) : Slice(), bounded,
+                         /*reverse=*/false);
+}
+
+std::unique_ptr<Iterator> DbImpl::reverse_prefix_iterator(Slice prefix) {
+    std::string upper;
+    const bool bounded = prefix_upper_bound(prefix, upper);
+    return make_iterator(prefix, bounded ? Slice::from(upper) : Slice(), bounded,
+                         /*reverse=*/true);
 }
 
 Stats DbImpl::stats() const {

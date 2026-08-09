@@ -235,6 +235,29 @@ class AbiCoverageTest {
                 assertEquals(10, bounded);
             }
 
+            exercise("iterPrefixReverse");
+            try (BatchedIterator scan =
+                         db.batchedReversePrefixIterator(TestSupport.bytes("key:"))) {
+                int batched = 0;
+                while (scan.next()) ++batched;
+                scan.status();
+                assertEquals(299, batched, "the batched reverse path reaches the same entries");
+            }
+            int descending = 0;
+            try (ElysiumKVIterator it = db.reversePrefixIterator(TestSupport.bytes("key:"))) {
+                while (it.next()) ++descending;
+                it.status();
+            }
+            assertEquals(299, descending, "the same entries the ascending scan saw");
+
+            exercise("iterCreateReverse");
+            try (ElysiumKVIterator it =
+                         db.reverseIterator(TestSupport.key(100), TestSupport.key(110))) {
+                int bounded = 0;
+                while (it.next()) ++bounded;
+                assertEquals(10, bounded);
+            }
+
             // ARCHITECTURE.md "Dependencies and artifacts" step 10 calls these out as the ones that only look deferrable:
             // compactLevel is the only way to finish a codec migration, and
             // markRecoveryComplete the only way to clear requiresRecovery.
