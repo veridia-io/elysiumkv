@@ -11,8 +11,10 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
+import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.processor.BatchingStateRestoreCallback;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateStoreContext;
@@ -105,14 +107,32 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
 
         // Streams registers the store so restore can replay the changelog into it. Phase 1 does not
         // manage offsets, so this is the ordinary path and the checkpoint file remains authoritative.
+        //
+        // Registered as a *batching* callback: restore is the tail of every rebalance, and the
+        // per-record form pays a write path traversal for each changelog record. One batch per
+        // delivered chunk is the same work the DSL's own stores do.
+        //
+        // BatchingStateRestoreCallback rather than the RecordBatchingStateRestoreCallback that
+        // RocksDB uses: the latter lives in Streams' internals, and this adapter depends only on
+        // published API. Streams adapts between the two itself, and — this is the part that
+        // matters — applies the timestamped-format conversion before either sees a record, so the
+        // marker interface on the timestamped variant keeps working unchanged.
         if (ctx != null) {
-            ctx.register(root, (key, value) -> {
-                if (value == null) {
-                    db.delete(key);
-                } else {
-                    db.put(key, value);
+            BatchingStateRestoreCallback restore = records -> {
+                try (WriteBatch batch = new WriteBatch()) {
+                    for (KeyValue<byte[], byte[]> record : records) {
+                        // Applied in the order delivered, so a put followed by a delete of the same
+                        // key inside one batch ends deleted, exactly as replaying them would.
+                        if (record.value == null) {
+                            batch.delete(record.key);
+                        } else {
+                            batch.put(record.key, record.value);
+                        }
+                    }
+                    db.write(batch);
                 }
-            });
+            };
+            ctx.register(root, restore);
         }
     }
 
@@ -207,6 +227,23 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
     public KeyValueIterator<Bytes, byte[]> reverseAll() {
         assertOpen();
         return new IteratorAdapter(db.reverseIterator(null, null));
+    }
+
+    /**
+     * A prefix scan, which the interface leaves as a default that throws — so without this, a
+     * Processor calling it against this store gets an exception rather than an answer.
+     *
+     * <p>Served by the engine's own prefix path rather than by synthesising {@code [prefix,
+     * prefix++)}. That matters at the edge: a prefix of all-{@code 0xFF} bytes has no successor, so
+     * the range spelling would compute an empty upper bound and silently return nothing.
+     */
+    @Override
+    public <PS extends Serializer<P>, P> KeyValueIterator<Bytes, byte[]> prefixScan(
+            P prefix, PS prefixKeySerializer) {
+        Objects.requireNonNull(prefix, "prefix cannot be null");
+        Objects.requireNonNull(prefixKeySerializer, "prefixKeySerializer cannot be null");
+        assertOpen();
+        return new IteratorAdapter(db.prefixIterator(prefixKeySerializer.serialize(null, prefix)));
     }
 
     @Override
