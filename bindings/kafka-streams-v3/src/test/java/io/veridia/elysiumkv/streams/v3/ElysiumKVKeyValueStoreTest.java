@@ -12,11 +12,23 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Map;
+import java.util.Optional;
 import java.util.List;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.StreamsMetrics;
+import org.apache.kafka.streams.processor.BatchingStateRestoreCallback;
+import org.apache.kafka.streams.processor.CommitCallback;
+import org.apache.kafka.streams.processor.StateRestoreCallback;
 import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.api.RecordMetadata;
 import org.apache.kafka.streams.processor.api.MockProcessorContext;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.KeyValueStore;
@@ -124,6 +136,155 @@ class ElysiumKVKeyValueStoreTest {
         }
         assertEquals(List.of("k012", "k011", "k010"), range);
         store.close();
+    }
+
+    /**
+     * {@code prefixScan} is a default on the interface that throws, so a Processor calling it
+     * against a store that has not implemented it gets an exception rather than an answer.
+     */
+    @Test
+    void prefixScanReturnsOnlyTheMatchingKeys(@TempDir Path dir) {
+        KeyValueStore<Bytes, byte[]> store = open(dir);
+        store.put(key("user:1"), value("a"));
+        store.put(key("user:2"), value("b"));
+        store.put(key("usr:3"), value("c"));   // shares "us", not the prefix
+        store.put(key("v"), value("d"));
+
+        List<String> seen = new ArrayList<>();
+        try (KeyValueIterator<Bytes, byte[]> it = store.prefixScan("user:", new StringSerializer())) {
+            while (it.hasNext()) seen.add(string(it.next().key.get()));
+        }
+        assertEquals(List.of("user:1", "user:2"), seen);
+        store.close();
+    }
+
+    /**
+     * A prefix of all-{@code 0xFF} bytes has no successor. An implementation spelled as {@code
+     * [prefix, prefix++)} that lets the upper bound wrap to empty returns nothing at all — silently,
+     * and only for this input.
+     *
+     * <p>What this pins, stated precisely: it catches that wrapped spelling. It does <em>not</em>
+     * distinguish the engine's prefix path from a range whose successor is computed correctly and
+     * left unbounded — verified by neutering it both ways, and both are right answers.
+     */
+    @Test
+    void aPrefixOfMaximalBytesStillScans(@TempDir Path dir) {
+        KeyValueStore<Bytes, byte[]> store = open(dir);
+        byte[] high = new byte[] {(byte) 0xFF, (byte) 0xFF};
+        store.put(Bytes.wrap(high), value("a"));
+        store.put(Bytes.wrap(new byte[] {(byte) 0xFF, (byte) 0xFF, 0x01}), value("b"));
+        store.put(key("aaa"), value("c"));
+
+        int seen = 0;
+        try (KeyValueIterator<Bytes, byte[]> it = store.prefixScan(high, new ByteArraySerializer())) {
+            while (it.hasNext()) {
+                it.next();
+                ++seen;
+            }
+        }
+        assertEquals(2, seen, "the 0xFF prefix and everything under it");
+        store.close();
+    }
+
+    /**
+     * <b>Restore is registered as a batching callback</b>, not the per-record form. Restore is the
+     * tail of every rebalance, so the difference is one write-path traversal per changelog record
+     * against one per delivered chunk.
+     *
+     * <p>Asserted on the registered callback rather than on a method of ours, because what matters
+     * is what Streams will actually call.
+     */
+    @Test
+    void restoreIsBatchedAndAppliesInOrder(@TempDir Path dir) {
+        KeyValueStore<Bytes, byte[]> store =
+                ElysiumKVKeyValueBytesStoreSupplier.plain("state", ElysiumKVStoreConfig.local())
+                        .get();
+        MockProcessorContext<Object, Object> context = new MockProcessorContext<>(
+                new java.util.Properties() {{
+                    setProperty("application.id", "test");
+                    setProperty("bootstrap.servers", "localhost:9092");
+                }}, new TaskId(0, 0), dir.toFile());
+        CapturingContext capturing = new CapturingContext(context.getStateStoreContext());
+        store.init(capturing, store);
+
+        assertTrue(capturing.callback instanceof BatchingStateRestoreCallback,
+                   "restore must be batched, not one write-path traversal per record");
+
+        ((BatchingStateRestoreCallback) capturing.callback).restoreAll(List.of(
+                KeyValue.pair(value("a"), value("1")),
+                KeyValue.pair(value("b"), value("2")),
+                KeyValue.pair(value("a"), null)));  // a changelog tombstone, later in the batch
+
+        assertNull(store.get(key("a")), "the tombstone must win, being later in the batch");
+        assertEquals("2", string(store.get(key("b"))));
+        store.close();
+    }
+
+    /** Records the restore callback the store registers, delegating everything else. */
+    private static final class CapturingContext implements StateStoreContext {
+        private final StateStoreContext delegate;
+        private StateRestoreCallback callback;
+
+        CapturingContext(StateStoreContext delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void register(StateStore store, StateRestoreCallback callback) {
+            this.callback = callback;
+            delegate.register(store, callback);
+        }
+
+        @Override
+        public void register(StateStore store, StateRestoreCallback callback, CommitCallback commit) {
+            this.callback = callback;
+            delegate.register(store, callback, commit);
+        }
+
+        @Override
+        public String applicationId() {
+            return delegate.applicationId();
+        }
+
+        @Override
+        public TaskId taskId() {
+            return delegate.taskId();
+        }
+
+        @Override
+        public Optional<RecordMetadata> recordMetadata() {
+            return delegate.recordMetadata();
+        }
+
+        @Override
+        public Serde<?> keySerde() {
+            return delegate.keySerde();
+        }
+
+        @Override
+        public Serde<?> valueSerde() {
+            return delegate.valueSerde();
+        }
+
+        @Override
+        public File stateDir() {
+            return delegate.stateDir();
+        }
+
+        @Override
+        public StreamsMetrics metrics() {
+            return delegate.metrics();
+        }
+
+        @Override
+        public Map<String, Object> appConfigs() {
+            return delegate.appConfigs();
+        }
+
+        @Override
+        public Map<String, Object> appConfigsWithPrefix(String prefix) {
+            return delegate.appConfigsWithPrefix(prefix);
+        }
     }
 
     @Test
