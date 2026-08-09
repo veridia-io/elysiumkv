@@ -7,13 +7,24 @@ import io.veridia.elysiumkv.WriteBatch;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.query.FailureReason;
+import org.apache.kafka.streams.query.KeyQuery;
+import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.query.PositionBound;
+import org.apache.kafka.streams.query.Query;
+import org.apache.kafka.streams.query.QueryConfig;
+import org.apache.kafka.streams.query.QueryResult;
+import org.apache.kafka.streams.query.RangeQuery;
+import org.apache.kafka.streams.query.ResultOrder;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.KeyValueStore;
 
@@ -25,6 +36,11 @@ import org.apache.kafka.streams.state.KeyValueStore;
  * resumes. The only thing that changes is where the bytes live — which is the point, because that
  * is what lets state exceed local disk.
  *
+ * <p><b>This is the plain variant.</b> A KTable needs {@link ElysiumKVTimestampedKeyValueStore}
+ * instead; the two differ only by a marker interface, for the reasons given there. Which one you
+ * get is the supplier's choice, mirroring how Streams splits {@code RocksDBStore} from {@code
+ * RocksDBTimestampedStore} rather than making one class serve both.
+ *
  * <p><b>What this costs, stated rather than discovered.</b> In {@link StorageMode#REMOTE} a cold
  * read is an object-store GET on the processing path — tens of milliseconds against microseconds
  * locally. It pays off when key access is skewed toward recent data, so migrated files are rarely
@@ -32,13 +48,31 @@ import org.apache.kafka.streams.state.KeyValueStore;
  * topology that scans or randomly accesses the whole keyspace will be slower.</b>
  */
 public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
-    private final String name;
+    final String name;
     private final ElysiumKVStoreConfig config;
 
     private ElysiumKVOptions options;
     private ElysiumKV db;
     private StateStoreContext context;
     private volatile boolean open;
+
+    /**
+     * How far this store's contents have advanced through its input topics.
+     *
+     * <p><b>Not optional for a store used through the DSL.</b> {@code StateStore.getPosition()} has
+     * a default that throws, and Streams' caching layer calls it on every commit — so a store that
+     * leaves it unimplemented cannot be materialized into a KTable at all. It fails at the first
+     * commit rather than at construction, which is why calling the store directly never revealed it.
+     *
+     * <p>Tracked from {@code recordMetadata()} rather than through Streams' internal helper, so this
+     * adapter depends only on published API.
+     *
+     * <p>Note that a store materialized with caching on never has this value read: {@code
+     * CachingKeyValueStore} keeps a position of its own and answers from it. It is the
+     * caching-disabled path that reaches here — hence {@code volatile}, since interactive queries
+     * read the position on a different thread from the stream thread that advances it.
+     */
+    private volatile Position position = Position.emptyPosition();
 
     ElysiumKVKeyValueStore(String name, ElysiumKVStoreConfig config) {
         this.name = Objects.requireNonNull(name, "name");
@@ -83,6 +117,22 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
     }
 
     @Override
+    public Position getPosition() {
+        return position;
+    }
+
+    /**
+     * Advances the position to the record being processed. Called on every write, because the
+     * position has to describe what the store contains — a query bounded on it is otherwise answered
+     * from state that does not yet include the record the bound names.
+     */
+    private void advancePosition() {
+        if (context == null) return;
+        context.recordMetadata().ifPresent(meta ->
+                position = position.withComponent(meta.topic(), meta.partition(), meta.offset()));
+    }
+
+    @Override
     public void put(Bytes key, byte[] value) {
         assertOpen();
         if (value == null) {
@@ -90,6 +140,7 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
         } else {
             db.put(key.get(), value);
         }
+        advancePosition();
     }
 
     @Override
@@ -116,6 +167,7 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
             }
             db.write(batch);
         }
+        advancePosition();
     }
 
     @Override
@@ -123,6 +175,7 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
         assertOpen();
         byte[] existing = db.getCopy(key.get());
         db.delete(key.get());
+        advancePosition();
         return existing;
     }
 
@@ -158,6 +211,108 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
     public long approximateNumEntries() {
         assertOpen();
         return db.stats().entryCount();
+    }
+
+    /**
+     * Answers an IQv2 query. Without this, {@code StateStore.query}'s default reports every query as
+     * unsupported, so {@code KafkaStreams.query(...)} cannot read this store at all.
+     *
+     * <p>Only {@link KeyQuery} and {@link RangeQuery} are answerable here — the window and versioned
+     * queries address stores this is not one of, and are declined as unknown rather than guessed at.
+     *
+     * <p><b>Reached only when caching is disabled.</b> {@code CachingKeyValueStore} answers {@code
+     * KeyQuery} from the cache and never consults the store underneath, so with caching on this code
+     * runs for range queries alone. Same shape as {@link #getPosition()}.
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public <R> QueryResult<R> query(Query<R> query, PositionBound positionBound, QueryConfig config) {
+        // The bound is a freshness demand: the caller is asking not to be served state older than a
+        // point it has already observed. Refusing is a correct answer — silently serving staler data
+        // is not, which is why this precedes any read.
+        if (!isPermitted(positionBound)) {
+            return QueryResult.notUpToBound(getPosition(), positionBound, partition());
+        }
+
+        QueryResult<R> result;
+        try {
+            if (query instanceof KeyQuery) {
+                KeyQuery<Bytes, byte[]> keyQuery = (KeyQuery<Bytes, byte[]>) query;
+                // A missing key is a successful query with a null result, not a failure — that is
+                // the convention the DSL's own stores follow, and callers distinguish the two.
+                result = (QueryResult<R>) QueryResult.forResult(get(keyQuery.getKey()));
+            } else if (query instanceof RangeQuery) {
+                RangeQuery<Bytes, byte[]> rangeQuery = (RangeQuery<Bytes, byte[]>) query;
+                if (rangeQuery.resultOrder() == ResultOrder.DESCENDING) {
+                    // Declined outright rather than served by buffering the range and reversing it:
+                    // this store exists to hold state larger than memory, so the one query that
+                    // would have to materialize its whole result is the one least safe to fake.
+                    return QueryResult.forFailure(
+                            FailureReason.STORE_EXCEPTION,
+                            "ElysiumKV iterates forward only, so a descending RangeQuery cannot be "
+                                    + "served by store '" + name + "'. Query ascending and reverse "
+                                    + "the result if it is small enough to hold.");
+                }
+                Optional<Bytes> lower = rangeQuery.getLowerBound();
+                Optional<Bytes> upper = rangeQuery.getUpperBound();
+                KeyValueIterator<Bytes, byte[]> iterator =
+                        lower.isPresent() || upper.isPresent()
+                                ? range(lower.orElse(null), upper.orElse(null))
+                                : all();
+                result = (QueryResult<R>) QueryResult.forResult(iterator);
+            } else {
+                return QueryResult.forUnknownQueryType(query, this);
+            }
+        } catch (Exception e) {
+            return QueryResult.forFailure(
+                    FailureReason.STORE_EXCEPTION,
+                    query.getClass().getSimpleName() + " failed on store '" + name + "': " + e);
+        }
+
+        // What the answer was actually read from, so a caller chaining bounds can use this reply as
+        // the bound for its next one.
+        result.setPosition(getPosition());
+        if (config.isCollectExecutionInfo()) {
+            result.addExecutionInfo(query.getClass().getSimpleName() + " served by " + name);
+        }
+        return result;
+    }
+
+    /**
+     * Whether this store has advanced far enough to satisfy the bound, by the same rule the DSL's
+     * stores apply: a bound speaks only about <em>this</em> task's partition, so a component naming
+     * some other partition is not this store's business and is skipped. Within our partition, never
+     * having seen the topic is a refusal — absence of evidence cannot be read as being caught up.
+     */
+    private boolean isPermitted(PositionBound bound) {
+        if (bound.isUnbounded()) {
+            return true;
+        }
+        Integer partition = partition();
+        if (partition == null) {
+            // No context means no partition to compare against, so the demand cannot be shown to be
+            // met. Refuse rather than assume.
+            return false;
+        }
+        Position required = bound.position();
+        Position reached = getPosition();
+        for (String topic : required.getTopics()) {
+            Map<Integer, Long> requiredOffsets = required.getPartitionPositions(topic);
+            if (!requiredOffsets.containsKey(partition)) {
+                continue;
+            }
+            Map<Integer, Long> reachedOffsets = reached.getPartitionPositions(topic);
+            Long seen = reachedOffsets.get(partition);
+            if (seen == null || seen < requiredOffsets.get(partition)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The partition this store's task owns, or null if it was initialized without a context. */
+    private Integer partition() {
+        return context == null ? null : context.taskId().partition();
     }
 
     @Override
