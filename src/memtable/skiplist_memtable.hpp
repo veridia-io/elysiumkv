@@ -40,6 +40,8 @@ public:
     std::optional<Entry> get(Slice key) const override;
     std::unique_ptr<InternalIterator> ascending() const override;
     std::unique_ptr<InternalIterator> ascending_from(Slice key) const override;
+    std::unique_ptr<InternalIterator> descending() const override;
+    std::unique_ptr<InternalIterator> descending_from(Slice key) const override;
     size_t approximate_bytes() const override;
 
     /// Wall-clock time the memtable was created, in ms. A flushed L0 file
@@ -95,6 +97,14 @@ private:
     int random_height();
     /// Last node with key < target, per level, into `prev` when non-null.
     Node* find_greater_or_equal(Slice key, Node** prev) const;
+    /// Last node with key < target, or `head_` when every key is >= it.
+    ///
+    /// A backward step costs a fresh descent rather than following a pointer: the list is singly
+    /// linked, and adding back pointers would widen every node — a cost paid by every write — to
+    /// speed up scans alone. O(log n) per step is the better trade.
+    Node* find_less_than(Slice key) const;
+    /// Last node in the list, or `head_` when it is empty.
+    Node* find_last() const;
     void insert(Slice key, ValueType type, Slice value);
 
     Arena arena_;

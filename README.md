@@ -188,7 +188,17 @@ if (auto found = db->get(key)) {
 auto it = db->prefix_iterator(prefix);
 while (it->next()) consume(it->key(), it->value());
 it->status();                         // exhaustion and failure look alike otherwise
+
+auto down = db->reverse_iterator(lo, hi);   // next() still advances — downwards
+while (down->next()) consume(down->key(), down->value());
 ```
+
+Every scan has a descending twin (`reverse_iterator`, `reverse_prefix_iterator`,
+and `reverseIterator`/`reversePrefixIterator` in Java). **Bounds keep their
+meaning in both directions** — `lo` inclusive, `hi` exclusive — so the two
+describe the same set of keys and differ only in delivery order. A scan chooses a
+direction once: there is no `prev()`, because turning around mid-scan would cost a
+re-seek of every underlying source at each turn.
 
 Errors are values: the public API returns `std::expected`, and exceptions never
 cross it. **Absence is a distinct status, and nothing else is folded into it** — an

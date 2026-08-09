@@ -67,6 +67,11 @@ std::string DiffOp::describe() const {
         case Kind::ScanAll: return "scan_all()";
         case Kind::ScanRange: return "scan_range(" + quote(key) + ", " + quote(upper) + ")";
         case Kind::ScanPrefix: return "scan_prefix(" + quote(key) + ")";
+        case Kind::ReverseScanAll: return "reverse_scan_all()";
+        case Kind::ReverseScanRange:
+            return "reverse_scan_range(" + quote(key) + ", " + quote(upper) + ")";
+        case Kind::ReverseScanPrefix: return "reverse_scan_prefix(" + quote(key) + ")";
+        case Kind::ReverseIterAcrossCompaction: return "reverse_iter_across_compaction()";
         case Kind::Flush: return "flush()";
         case Kind::Compact: return "compact()";
         case Kind::IterAcrossFlush: return "iterate_across_flush()";
@@ -107,9 +112,19 @@ std::vector<DiffOp> generate_ops(uint64_t seed, int count, GeneratorOptions opti
         } else if (choice < 60) {
             op.kind = DiffOp::Kind::Remove;
             op.key = key_for(rng, options.distinct_keys);
-        } else if (choice < 78) {
+        } else if (choice < 75) {
             op.kind = DiffOp::Kind::Get;
             op.key = key_for(rng, options.distinct_keys);
+        } else if (choice < 76) {
+            op.kind = DiffOp::Kind::ReverseScanAll;
+        } else if (choice < 77) {
+            op.kind = DiffOp::Kind::ReverseScanRange;
+            op.key = key_for(rng, options.distinct_keys);
+            op.upper = key_for(rng, options.distinct_keys);
+            if (op.upper < op.key) std::swap(op.key, op.upper);
+        } else if (choice < 78) {
+            op.kind = DiffOp::Kind::ReverseScanPrefix;
+            op.key = prefix_for(rng);
         } else if (choice < 84) {
             op.kind = DiffOp::Kind::Batch;
             for (int j = 0; j < 8; ++j) {
@@ -130,8 +145,10 @@ std::vector<DiffOp> generate_ops(uint64_t seed, int count, GeneratorOptions opti
             op.key = prefix_for(rng);
         } else if (choice < 94) {
             op.kind = DiffOp::Kind::IterAcrossFlush;
-        } else if (choice < 96) {
+        } else if (choice < 95) {
             op.kind = DiffOp::Kind::IterAcrossCompaction;
+        } else if (choice < 96) {
+            op.kind = DiffOp::Kind::ReverseIterAcrossCompaction;
         } else if (choice < 97) {
             op.kind = DiffOp::Kind::Compact;
         } else if (choice < 99) {

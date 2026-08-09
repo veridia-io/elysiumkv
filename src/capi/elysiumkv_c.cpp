@@ -1044,6 +1044,51 @@ elysiumkv_status elysiumkv_iter_prefix(elysiumkv_db* db, const uint8_t* prefix, 
     });
 }
 
+elysiumkv_status elysiumkv_iter_create_reverse(elysiumkv_db* db, const uint8_t* lo, size_t lo_len,
+                                       const uint8_t* hi, size_t hi_len, elysiumkv_iter** out) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr || out == nullptr) {
+            return fail(Status::Config, "elysiumkv_iter_create_reverse: null argument");
+        }
+        auto handle = std::make_unique<elysiumkv_iter>();
+        handle->owner = db;
+        // Each bound stays independent, for the same reason as the forward call: folding them
+        // together turns "from lo to the end" into the empty range.
+        if (hi == nullptr) {
+            handle->iterator = lo == nullptr
+                                       ? db->reads()->reverse_iterator()
+                                       : db->reads()->reverse_iterator(as_slice(lo, lo_len));
+        } else {
+            handle->iterator =
+                    db->reads()->reverse_iterator(as_slice(lo, lo_len), as_slice(hi, hi_len));
+        }
+        {
+            std::lock_guard<std::mutex> lock(db->iters_mutex);
+            db->iters.insert(handle.get());
+        }
+        *out = handle.release();
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_iter_prefix_reverse(elysiumkv_db* db, const uint8_t* prefix,
+                                       size_t prefix_len, elysiumkv_iter** out) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr || out == nullptr) {
+            return fail(Status::Config, "elysiumkv_iter_prefix_reverse: null argument");
+        }
+        auto handle = std::make_unique<elysiumkv_iter>();
+        handle->owner = db;
+        handle->iterator = db->reads()->reverse_prefix_iterator(as_slice(prefix, prefix_len));
+        {
+            std::lock_guard<std::mutex> lock(db->iters_mutex);
+            db->iters.insert(handle.get());
+        }
+        *out = handle.release();
+        return ELYSIUMKV_OK;
+    });
+}
+
 bool elysiumkv_iter_next(elysiumkv_iter* iter) {
     return guard_value(
         [&]() -> bool {

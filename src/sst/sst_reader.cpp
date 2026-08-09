@@ -59,12 +59,44 @@ public:
         if (!data_.valid()) advance_block();
     }
 
+    void seek_to_last() override {
+        index_.seek_to_last();
+        load_current_block(Edge::Last);
+        if (data_.valid()) return;
+        retreat_block();
+    }
+
+    void seek_for_prev(Slice target) override {
+        // Index keys are the last key of each block, so the first index entry with key >= target
+        // names the only block that can contain target — and if none does, target is past every
+        // key in the file and the answer is simply the last entry.
+        index_.seek(target);
+        if (!index_.valid()) {
+            seek_to_last();
+            return;
+        }
+        load_current_block(Edge::First);
+        if (data_.valid()) data_.seek_for_prev(target);
+        // An empty result here means target precedes this block's first key, so the entry we want
+        // is the last one of an earlier block.
+        while (!data_.valid() && index_.valid() && status_ == Status::Ok) retreat_block();
+    }
+
+    void prev() override {
+        if (!data_.valid()) return;
+        data_.prev();
+        if (!data_.valid()) retreat_block();
+    }
+
     Slice key() const override { return data_.key(); }
     Slice value() const override { return data_.value(); }
     ValueType type() const override { return data_.type(); }
 
 private:
-    void load_current_block() {
+    /// Which end of a freshly loaded block to stand on — the direction of travel decides.
+    enum class Edge { First, Last };
+
+    void load_current_block(Edge edge = Edge::First) {
         data_ = BlockIterator();
         if (!index_.valid()) return;
 
@@ -79,11 +111,37 @@ private:
             return;
         }
         data_ = BlockIterator(*block);
-        data_.seek_to_first();
+        if (edge == Edge::First) {
+            data_.seek_to_first();
+        } else {
+            data_.seek_to_last();
+        }
+    }
+
+    /// Carries a spent block's failure into the iterator before the block is replaced.
+    ///
+    /// Without this, a block that failed to decode is indistinguishable from one that merely ran
+    /// out: both leave `data_` invalid, and the next load overwrites the status that said which it
+    /// was. A corrupt block would then be silently skipped rather than reported.
+    void absorb_data_status() {
+        if (status_ == Status::Ok && data_.status() != Status::Ok) status_ = data_.status();
+    }
+
+    void retreat_block() {
+        while (status_ == Status::Ok) {
+            absorb_data_status();
+            if (status_ != Status::Ok || !index_.valid()) return;
+            index_.prev();
+            if (!index_.valid()) return;
+            load_current_block(Edge::Last);
+            if (data_.valid()) return;
+        }
     }
 
     void advance_block() {
         while (status_ == Status::Ok) {
+            absorb_data_status();
+            if (status_ != Status::Ok) return;
             if (!index_.valid()) return;
             index_.next();
             if (!index_.valid()) return;

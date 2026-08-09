@@ -402,6 +402,21 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_iter_create(elysiumkv_db*, const uint8_
                                    const uint8_t* hi, size_t hi_len, elysiumkv_iter** out);
 ELYSIUMKV_API elysiumkv_status elysiumkv_iter_prefix(elysiumkv_db*, const uint8_t* prefix, size_t prefix_len,
                                    elysiumkv_iter** out);
+
+/* The same two scans, descending: elysiumkv_iter_next still means "advance", and
+ * it advances towards smaller keys. The first call yields the largest key in
+ * range.
+ *
+ * Bounds mean what they mean forward — `lo` inclusive, `hi` exclusive — so both
+ * directions describe the same set and only the delivery order differs.
+ *
+ * Separate entry points rather than a flag on elysiumkv_iter_create, because adding
+ * a parameter to a shipped signature is an ABI break and a new symbol is not. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_iter_create_reverse(elysiumkv_db*, const uint8_t* lo,
+                                                   size_t lo_len, const uint8_t* hi,
+                                                   size_t hi_len, elysiumkv_iter** out);
+ELYSIUMKV_API elysiumkv_status elysiumkv_iter_prefix_reverse(elysiumkv_db*, const uint8_t* prefix,
+                                                   size_t prefix_len, elysiumkv_iter** out);
 /* The first call positions at the first key in range. Key and value are valid
  * only after it returns true, and only until the next call. */
 ELYSIUMKV_API bool elysiumkv_iter_next(elysiumkv_iter*);

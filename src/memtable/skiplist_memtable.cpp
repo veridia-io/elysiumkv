@@ -32,6 +32,22 @@ public:
         load_value();
     }
 
+    void seek_to_last() override {
+        set(table_->find_last());
+    }
+    void seek_for_prev(Slice target) override {
+        Node* at_or_after = table_->find_greater_or_equal(target, nullptr);
+        if (at_or_after != nullptr && at_or_after->key() == target) {
+            set(at_or_after);  // an exact hit satisfies <=
+        } else {
+            set(table_->find_less_than(target));
+        }
+    }
+    void prev() override {
+        if (node_ == nullptr) return;
+        set(table_->find_less_than(node_->key()));
+    }
+
     Slice key() const override { return node_->key(); }
     Slice value() const override { return value_ == nullptr ? Slice() : value_->slice(); }
     ValueType type() const override {
@@ -39,6 +55,12 @@ public:
     }
 
 private:
+    /// `head_` is the sentinel before the first key, so reaching it means the scan is done.
+    void set(Node* node) {
+        node_ = node == table_->head_ ? nullptr : node;
+        load_value();
+    }
+
     /// One acquire load per entry: the record is immutable, so key and value can
     /// never disagree even if the writer replaces the value mid-iteration.
     void load_value() {
@@ -167,6 +189,46 @@ std::optional<Entry> SkiplistMemtable::get(Slice key) const {
     const ValueRecord* record = node->value.load(std::memory_order_acquire);
     if (record == nullptr) return std::nullopt;
     return Entry{record->type, record->slice()};
+}
+
+Node* SkiplistMemtable::find_less_than(Slice key) const {
+    Node* node = head_;
+    int level = max_height_.load(std::memory_order_acquire) - 1;
+    while (true) {
+        Node* next = node->next[level].load(std::memory_order_acquire);
+        if (next != nullptr && next->key() < key) {
+            node = next;
+            continue;
+        }
+        if (level == 0) return node;
+        --level;
+    }
+}
+
+Node* SkiplistMemtable::find_last() const {
+    Node* node = head_;
+    int level = max_height_.load(std::memory_order_acquire) - 1;
+    while (true) {
+        Node* next = node->next[level].load(std::memory_order_acquire);
+        if (next != nullptr) {
+            node = next;
+            continue;
+        }
+        if (level == 0) return node;
+        --level;
+    }
+}
+
+std::unique_ptr<InternalIterator> SkiplistMemtable::descending() const {
+    auto it = std::make_unique<SkiplistIterator>(this);
+    it->seek_to_last();
+    return it;
+}
+
+std::unique_ptr<InternalIterator> SkiplistMemtable::descending_from(Slice key) const {
+    auto it = std::make_unique<SkiplistIterator>(this);
+    it->seek_for_prev(key);
+    return it;
 }
 
 std::unique_ptr<InternalIterator> SkiplistMemtable::ascending() const {

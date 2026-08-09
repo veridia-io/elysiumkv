@@ -20,6 +20,12 @@ struct DiffOp {
         ScanAll,
         ScanRange,
         ScanPrefix,
+        /// The same three scans descending. Compared against the oracle's answer reversed, so the
+        /// bar is not merely "descending" but "the same set, in the opposite order" — a reverse
+        /// scan that dropped or duplicated an entry passes an ordering check and fails this one.
+        ReverseScanAll,
+        ReverseScanRange,
+        ReverseScanPrefix,
         Flush,
         /// Force every compaction the picker offers.
         Compact,
@@ -32,6 +38,10 @@ struct DiffOp {
         IterAcrossCompaction,
         /// Clean close and reopen: flush first, so everything must come back.
         Reopen,
+        /// The same, descending. A reverse scan pins its Version exactly as a forward one does, but
+        /// it is `prev()` that runs after the files moved — and nothing else calls `prev()` while a
+        /// compaction is unlinking underneath it.
+        ReverseIterAcrossCompaction,
         /// ARCHITECTURE.md "Fault injection" — the process stops existing here. Everything since the last
         /// successful flush is lost, and nothing else is. Expressing kill points
         /// as positions in the op stream is what makes them reproduce from a

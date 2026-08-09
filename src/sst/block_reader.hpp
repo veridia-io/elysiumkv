@@ -30,6 +30,14 @@ public:
     void seek(Slice target);
     void next();
 
+    void seek_to_last();
+    /// Positions at the last entry with key <= target.
+    void seek_for_prev(Slice target);
+    /// Steps back one entry. The block format is forward-only — entries are prefix-compressed
+    /// against their predecessor — so this re-reads from the nearest restart point at or before the
+    /// current entry and scans up to it. Bounded by the restart interval, not by the block.
+    void prev();
+
     Slice key() const { return key_.slice(); }
     Slice value() const { return value_; }
     ValueType type() const { return type_; }
@@ -38,6 +46,7 @@ public:
 
 private:
     uint32_t restart_offset(uint32_t index) const;
+    uint32_t restart_before(size_t offset) const;
     void seek_to_restart(uint32_t index);
     /// Decodes the entry at `offset` into key_/value_. `shared` bytes are taken
     /// from the current key_, so callers must reset it at a restart point.
@@ -50,6 +59,9 @@ private:
     size_t restart_array_ = 0;
     uint32_t num_restarts_ = 0;
 
+    /// Where the current entry begins. Only prev() needs it, and only because a backward step is
+    /// expressed as "find the entry whose next_offset_ is this one".
+    size_t current_offset_ = 0;
     size_t next_offset_ = 0;
     /// Inline, not a std::string: rebuilding the key must not allocate (ARCHITECTURE.md "Benchmarks").
     KeyBuffer key_;

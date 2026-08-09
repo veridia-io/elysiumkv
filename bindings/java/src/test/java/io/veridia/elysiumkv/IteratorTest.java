@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import org.junit.jupiter.api.Test;
@@ -49,6 +50,57 @@ class IteratorTest {
                 assertEquals(10, seen.size());
                 assertEquals(TestSupport.string(TestSupport.key(10)), seen.get(0));
                 assertEquals(TestSupport.string(TestSupport.key(19)), seen.get(9));
+            }
+            db.close();
+        }
+    }
+
+    /**
+     * A descending scan must deliver the same entries as the ascending one, reversed — not merely a
+     * decreasing sequence, which is what most ways of breaking it would still produce.
+     */
+    @Test
+    void aReverseScanIsTheForwardScanReversed(@TempDir Path dir) throws Exception {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.open());
+            for (int i = 0; i < 400; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v" + i));
+            db.flush();
+            for (int i = 400; i < 500; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v" + i));
+
+            List<String> ascending = new ArrayList<>();
+            try (ElysiumKVIterator it = db.prefixIterator(TestSupport.bytes("key:"))) {
+                while (it.next()) ascending.add(TestSupport.string(it.keyBytes()));
+            }
+            List<String> descending = new ArrayList<>();
+            try (ElysiumKVIterator it = db.reversePrefixIterator(TestSupport.bytes("key:"))) {
+                while (it.next()) descending.add(TestSupport.string(it.keyBytes()));
+                it.status();
+            }
+
+            Collections.reverse(descending);
+            assertEquals(ascending, descending);
+            assertEquals(500, ascending.size());
+            db.close();
+        }
+    }
+
+    /** Bounds describe the same set in both directions: lower inclusive, upper exclusive. */
+    @Test
+    void reverseBoundsAreHalfOpenToo(@TempDir Path dir) throws Exception {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.open());
+            for (int i = 0; i < 100; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v"));
+            db.flush();
+
+            try (ElysiumKVIterator it =
+                         db.reverseIterator(TestSupport.key(10), TestSupport.key(20))) {
+                List<String> seen = new ArrayList<>();
+                while (it.next()) seen.add(TestSupport.string(it.keyBytes()));
+                assertEquals(10, seen.size());
+                assertEquals(TestSupport.string(TestSupport.key(19)), seen.get(0),
+                             "starts below the exclusive upper bound");
+                assertEquals(TestSupport.string(TestSupport.key(10)), seen.get(9),
+                             "ends on the inclusive lower bound");
             }
             db.close();
         }
@@ -122,6 +174,43 @@ class IteratorTest {
 
             List<String> batched = new ArrayList<>();
             try (BatchedIterator scan = db.batchedPrefixIterator(TestSupport.bytes("key:"))) {
+                while (scan.next()) {
+                    batched.add(TestSupport.string(scan.keyBytes()) + "="
+                                + TestSupport.string(scan.valueBytes()));
+                }
+                scan.status();
+            }
+
+            assertEquals(2000, perEntry.size());
+            assertEquals(perEntry, batched);
+            db.close();
+        }
+    }
+
+    /**
+     * The batched descending scan must agree with the per-entry descending one, entry for entry —
+     * the batched path refills its buffer independently of direction, so a refill that dropped an
+     * entry at a boundary would show up only here.
+     */
+    @Test
+    void theBatchedReverseScanMatchesThePerEntryOne(@TempDir Path dir) throws Exception {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.open());
+            for (int i = 0; i < 2000; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v" + i));
+            db.flush();
+
+            List<String> perEntry = new ArrayList<>();
+            try (ElysiumKVIterator it = db.reversePrefixIterator(TestSupport.bytes("key:"))) {
+                while (it.next()) {
+                    perEntry.add(TestSupport.string(it.keyBytes()) + "="
+                                 + TestSupport.string(it.valueBytes()));
+                }
+                it.status();
+            }
+
+            List<String> batched = new ArrayList<>();
+            try (BatchedIterator scan =
+                         db.batchedReversePrefixIterator(TestSupport.bytes("key:"))) {
                 while (scan.next()) {
                     batched.add(TestSupport.string(scan.keyBytes()) + "="
                                 + TestSupport.string(scan.valueBytes()));

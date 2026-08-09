@@ -33,6 +33,30 @@ public:
         pick_smallest();
     }
 
+    /// The mirror of next(), and the mirror of the tie-break too: on equal keys the earlier child
+    /// still wins, because recency is positional and does not depend on which way the scan runs.
+    void seek_to_last() override {
+        for (auto& child : children_) child->seek_to_last();
+        pick_largest();
+    }
+
+    void seek_for_prev(Slice target) override {
+        for (auto& child : children_) child->seek_for_prev(target);
+        pick_largest();
+    }
+
+    void prev() override {
+        if (current_ < 0) return;
+        const size_t current = static_cast<size_t>(current_);
+        const Slice key = children_[current]->key();
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (i == current) continue;
+            if (children_[i]->valid() && children_[i]->key() == key) children_[i]->prev();
+        }
+        children_[current]->prev();
+        pick_largest();
+    }
+
     void next() override {
         if (current_ < 0) return;
 
@@ -56,6 +80,18 @@ public:
     ValueType type() const override { return children_[static_cast<size_t>(current_)]->type(); }
 
 private:
+    void pick_largest() {
+        current_ = -1;
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (!children_[i]->valid()) continue;
+            if (current_ < 0 ||
+                children_[i]->key() > children_[static_cast<size_t>(current_)]->key()) {
+                current_ = static_cast<int>(i);
+            }
+            // A tie leaves `current_` on the earlier child, exactly as the forward pick does.
+        }
+    }
+
     void pick_smallest() {
         current_ = -1;
         for (size_t i = 0; i < children_.size(); ++i) {

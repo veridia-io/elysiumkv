@@ -237,6 +237,20 @@ private:
                 for (const auto& entry : oracle_.prefix(op.key)) expected.push_back(entry);
                 return check_prefix_scan(op.key, expected);
             }
+            case DiffOp::Kind::ReverseScanAll:
+                return check_reverse_scan(Slice(), Slice(), false,
+                                          reversed(oracle_entries(oracle_)));
+            case DiffOp::Kind::ReverseScanRange: {
+                Entries expected;
+                for (const auto& entry : oracle_.range(op.key, op.upper)) expected.push_back(entry);
+                return check_reverse_scan(Slice::from(op.key), Slice::from(op.upper), true,
+                                          reversed(expected));
+            }
+            case DiffOp::Kind::ReverseScanPrefix: {
+                Entries expected;
+                for (const auto& entry : oracle_.prefix(op.key)) expected.push_back(entry);
+                return check_reverse_prefix_scan(op.key, reversed(expected));
+            }
             case DiffOp::Kind::Flush: {
                 const Status status = db_->flush();
                 if (status != Status::Ok) {
@@ -256,6 +270,8 @@ private:
                 return check_scan(Slice(), Slice(), false, oracle_entries(oracle_));
             }
             case DiffOp::Kind::IterAcrossCompaction: return check_iterate_across_compaction();
+            case DiffOp::Kind::ReverseIterAcrossCompaction:
+                return check_reverse_iterate_across_compaction();
             case DiffOp::Kind::Reopen: {
                 const Status status = db_->flush();
                 if (status != Status::Ok) {
@@ -352,6 +368,31 @@ private:
         return std::nullopt;
     }
 
+    static Entries reversed(Entries entries) {
+        std::reverse(entries.begin(), entries.end());
+        return entries;
+    }
+
+    std::optional<std::string> check_reverse_scan(Slice lower, Slice upper, bool bounded,
+                                                  const Entries& expected) {
+        Entries observed;
+        auto it = bounded ? db_->reverse_iterator(lower, upper) : db_->reverse_iterator();
+        if (auto message = collect(*it, observed)) return message;
+        const std::string mismatch = describe_mismatch(observed, expected);
+        if (!mismatch.empty()) return "reverse: " + mismatch;
+        return std::nullopt;
+    }
+
+    std::optional<std::string> check_reverse_prefix_scan(const std::string& prefix,
+                                                         const Entries& expected) {
+        Entries observed;
+        auto it = db_->reverse_prefix_iterator(Slice::from(prefix));
+        if (auto message = collect(*it, observed)) return message;
+        const std::string mismatch = describe_mismatch(observed, expected);
+        if (!mismatch.empty()) return "reverse prefix " + quote(prefix) + ": " + mismatch;
+        return std::nullopt;
+    }
+
     std::optional<std::string> check_prefix_scan(const std::string& prefix,
                                                  const Entries& expected) {
         Entries observed;
@@ -369,6 +410,35 @@ private:
     /// ARCHITECTURE.md "Versions are immutable snapshots" — the failure this component exists to prevent: an iterator reading a
     /// file that compaction unlinked mid-scan. Silent, load-dependent, and it
     /// does not reproduce without deliberate effort.
+    /// The reverse twin: half a descending scan, then a compaction, then the rest. The iterator
+    /// holds the Version it started on, so the files it is mid-way through reading must stay
+    /// readable even though compaction has unlinked them.
+    std::optional<std::string> check_reverse_iterate_across_compaction() {
+        Entries expected = oracle_entries(oracle_);
+        std::reverse(expected.begin(), expected.end());
+        Entries observed;
+
+        auto it = db_->reverse_iterator();
+        const size_t half = expected.size() / 2;
+        while (observed.size() < half && it->next()) {
+            observed.emplace_back(it->key().to_string(), it->value().to_string());
+        }
+
+        if (Status status = db_->flush(); status != Status::Ok) {
+            return std::string("flush mid-reverse-iteration: ") + std::string(status_name(status));
+        }
+        flushed_ = oracle_;
+        if (Status status = engine().compact_until_quiet(); status != Status::Ok) {
+            return std::string("compact mid-reverse-iteration: ") +
+                   std::string(status_name(status));
+        }
+
+        if (auto message = collect(*it, observed)) return message;
+        const std::string mismatch = describe_mismatch(observed, expected);
+        if (!mismatch.empty()) return "reverse across compaction: " + mismatch;
+        return std::nullopt;
+    }
+
     std::optional<std::string> check_iterate_across_compaction() {
         const Entries expected = oracle_entries(oracle_);
         Entries observed;

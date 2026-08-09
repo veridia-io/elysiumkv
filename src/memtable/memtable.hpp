@@ -27,6 +27,8 @@ public:
     virtual std::optional<Entry> get(Slice key) const = 0;
     virtual std::unique_ptr<InternalIterator> ascending() const = 0;
     virtual std::unique_ptr<InternalIterator> ascending_from(Slice key) const = 0;
+    virtual std::unique_ptr<InternalIterator> descending() const = 0;
+    virtual std::unique_ptr<InternalIterator> descending_from(Slice key) const = 0;
     virtual size_t approximate_bytes() const = 0;
     virtual ~Memtable() = default;
 };

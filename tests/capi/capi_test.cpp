@@ -665,6 +665,56 @@ TEST_F(CApiTest, EachIteratorBoundIsIndependentlyOptional) {
     EXPECT_EQ(elysiumkv_close(db), 0u);
 }
 
+/// The reverse entry points, across the ABI. Separate symbols rather than a flag on the forward
+/// call, so this also pins that both exist and are reachable — a binding verifies the ABI by its
+/// export set, and a missing symbol here is a link failure in whichever consumer reaches it first.
+TEST_F(CApiTest, ReverseIterationCrossesTheAbi) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 20; ++i) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "k%02d", i);
+        ASSERT_EQ(put(db, key, "v"), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    const auto collect = [&](elysiumkv_iter* iter) {
+        std::vector<std::string> keys;
+        while (elysiumkv_iter_next(iter)) {
+            const uint8_t* key = nullptr;
+            size_t key_len = 0;
+            elysiumkv_iter_key(iter, &key, &key_len);
+            keys.emplace_back(reinterpret_cast<const char*>(key), key_len);
+        }
+        EXPECT_EQ(elysiumkv_iter_status(iter), ELYSIUMKV_OK);
+        elysiumkv_iter_destroy(iter);
+        return keys;
+    };
+
+    elysiumkv_iter* iter = nullptr;
+    ASSERT_EQ(elysiumkv_iter_create_reverse(db, nullptr, 0, nullptr, 0, &iter), ELYSIUMKV_OK);
+    const std::vector<std::string> descending = collect(iter);
+    ASSERT_EQ(descending.size(), 20u);
+    EXPECT_EQ(descending.front(), "k19");
+    EXPECT_EQ(descending.back(), "k00");
+
+    // Bounds keep their forward meaning: lower inclusive, upper exclusive.
+    ASSERT_EQ(elysiumkv_iter_create_reverse(db, reinterpret_cast<const uint8_t*>("k05"), 3,
+                                          reinterpret_cast<const uint8_t*>("k10"), 3, &iter),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(collect(iter),
+              (std::vector<std::string>{"k09", "k08", "k07", "k06", "k05"}));
+
+    ASSERT_EQ(elysiumkv_iter_prefix_reverse(db, reinterpret_cast<const uint8_t*>("k1"), 2, &iter),
+              ELYSIUMKV_OK);
+    const std::vector<std::string> prefixed = collect(iter);
+    ASSERT_EQ(prefixed.size(), 10u);
+    EXPECT_EQ(prefixed.front(), "k19");
+    EXPECT_EQ(prefixed.back(), "k10");
+
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
 // ARCHITECTURE.md "The ABI boundary" — the batched advance. The measurement that justified it: a Java scan costs
 // ~419ns per entry through next/key/value and ~58ns batched, against ~36ns in
 // C++. The correctness requirement is simply that it is the same scan.

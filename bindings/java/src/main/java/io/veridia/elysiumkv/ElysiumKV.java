@@ -225,6 +225,27 @@ public final class ElysiumKV implements ReadOnlyStore {
     }
 
     /**
+     * The same range scan, descending. {@code next()} still advances; it advances towards smaller
+     * keys, so the first entry is the largest in range.
+     *
+     * <p>Bounds keep the meaning they have forward — {@code lo} inclusive, {@code hi} exclusive —
+     * so both directions describe the same set of keys and differ only in delivery order.
+     */
+    @Override
+    public ElysiumKVIterator reverseIterator(byte[] lo, byte[] hi) {
+        long iter = Native.iterCreateReverse(handle(), lo, lo == null ? 0 : lo.length, hi,
+                                             hi == null ? 0 : hi.length);
+        return track(new ElysiumKVIterator(this, iter, checked));
+    }
+
+    /** Prefix scan, descending. */
+    @Override
+    public ElysiumKVIterator reversePrefixIterator(byte[] prefix) {
+        long iter = Native.iterPrefixReverse(handle(), prefix, prefix.length);
+        return track(new ElysiumKVIterator(this, iter, checked));
+    }
+
+    /**
      * The same scan, batched: about 7x faster per entry, at the cost of copying
      * each entry instead of borrowing it. See {@link BatchedIterator} for the
      * numbers. Prefer this for a long scan.
@@ -232,6 +253,15 @@ public final class ElysiumKV implements ReadOnlyStore {
     @Override
     public BatchedIterator batchedPrefixIterator(byte[] prefix) {
         long iter = Native.iterPrefix(handle(), prefix, prefix.length);
+        BatchedIterator batched = new BatchedIterator(this, iter, checked);
+        batchedIterators.add(batched);
+        return batched;
+    }
+
+    /** The same batched scan, descending. */
+    @Override
+    public BatchedIterator batchedReversePrefixIterator(byte[] prefix) {
+        long iter = Native.iterPrefixReverse(handle(), prefix, prefix.length);
         BatchedIterator batched = new BatchedIterator(this, iter, checked);
         batchedIterators.add(batched);
         return batched;

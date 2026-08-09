@@ -18,6 +18,17 @@ public:
     virtual void seek(Slice target) = 0;
     virtual void next() = 0;
 
+    /// --- reverse navigation ---
+    ///
+    /// An iterator runs in one direction. The leaf iterators below tolerate a turn, but the
+    /// merging iterator does not: reversing there means repositioning every child relative to the
+    /// emitted key, and no caller has wanted it. Ask for the direction you intend at construction.
+    virtual void seek_to_last() = 0;
+    /// Positions at the last entry with key <= target — the mirror of seek(), and inclusive for the
+    /// same reason seek() is: it answers "where does a scan from here begin", not "find this key".
+    virtual void seek_for_prev(Slice target) = 0;
+    virtual void prev() = 0;
+
     virtual Slice key() const = 0;
     virtual Slice value() const = 0;
     virtual ValueType type() const = 0;

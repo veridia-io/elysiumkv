@@ -80,6 +80,11 @@ public:
     std::unique_ptr<Iterator> iterator(Slice lower_inclusive, Slice upper_exclusive) override;
     std::unique_ptr<Iterator> iterator(Slice lower_inclusive) override;
     std::unique_ptr<Iterator> prefix_iterator(Slice prefix) override;
+    std::unique_ptr<Iterator> reverse_iterator() override;
+    std::unique_ptr<Iterator> reverse_iterator(Slice lower_inclusive,
+                                               Slice upper_exclusive) override;
+    std::unique_ptr<Iterator> reverse_iterator(Slice lower_inclusive) override;
+    std::unique_ptr<Iterator> reverse_prefix_iterator(Slice prefix) override;
 
     Status flush() override;
     Status compact_level(int level) override;
@@ -365,7 +370,8 @@ private:
     std::vector<FileMetadata> delete_obsolete(const std::vector<FileMetadata>& files);
     /// Every source in recency order: live memtable, frozen memtable, L0 by
     /// descending file number, then each deeper level (ARCHITECTURE.md "Positional recency").
-    std::unique_ptr<Iterator> make_iterator(Slice lower, Slice upper, bool has_upper);
+    std::unique_ptr<Iterator> make_iterator(Slice lower, Slice upper, bool has_upper,
+                                            bool reverse);
 
     const ResolvedLevel& level_config(int level) const;
     uint64_t now_ms() const { return options_.clock(); }

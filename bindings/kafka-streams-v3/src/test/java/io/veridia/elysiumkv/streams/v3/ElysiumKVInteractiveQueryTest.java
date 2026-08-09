@@ -168,23 +168,37 @@ class ElysiumKVInteractiveQueryTest {
     }
 
     /**
-     * <b>A descending range is refused, not approximated.</b> The engine iterates forward only, and
-     * the alternative — buffering the range to reverse it — is worst precisely where this store is
-     * meant to be used, on state too large to hold in memory. A caller that gets a failure can fall
-     * back; one that gets an OutOfMemoryError cannot.
+     * <b>A descending range is served, streamed.</b> The engine iterates backwards natively, so the
+     * result is produced one entry at a time in both directions — a range larger than memory is
+     * answerable descending, which is the reason not to fake this by buffering and reversing.
      */
     @Test
-    void aDescendingRangeQueryIsRefusedRatherThanBuffered(@TempDir Path dir) {
+    void aDescendingRangeQueryReturnsTheRangeInReverse(@TempDir Path dir) {
         try (TopologyTestDriver driver = new TopologyTestDriver(topology(), config(dir))) {
             StateStore store = storeWith(driver);
 
             QueryResult<KeyValueIterator<String, Long>> result =
                     run(store, RangeQuery.<String, Long>withNoBounds().withDescendingKeys());
 
-            assertTrue(result.isFailure(), "a descending range cannot be served");
-            assertEquals(FailureReason.STORE_EXCEPTION, result.getFailureReason());
-            assertTrue(result.getFailureMessage().contains("forward only"),
-                       () -> "the failure should say why: " + result.getFailureMessage());
+            assertTrue(result.isSuccess(), () -> "query failed: " + result.getFailureMessage());
+            assertEquals(List.of(KeyValue.pair("c", 100L), KeyValue.pair("b", 10L),
+                                 KeyValue.pair("a", 3L)),
+                         drain(result.getResult()));
+        }
+    }
+
+    /** Descending honours the bounds too, and they keep their forward inclusivity. */
+    @Test
+    void aBoundedDescendingRangeQueryStaysInsideItsBounds(@TempDir Path dir) {
+        try (TopologyTestDriver driver = new TopologyTestDriver(topology(), config(dir))) {
+            StateStore store = storeWith(driver);
+
+            QueryResult<KeyValueIterator<String, Long>> result =
+                    run(store, RangeQuery.<String, Long>withRange("a", "b").withDescendingKeys());
+
+            assertTrue(result.isSuccess(), () -> "query failed: " + result.getFailureMessage());
+            assertEquals(List.of(KeyValue.pair("b", 10L), KeyValue.pair("a", 3L)),
+                         drain(result.getResult()));
         }
     }
 
