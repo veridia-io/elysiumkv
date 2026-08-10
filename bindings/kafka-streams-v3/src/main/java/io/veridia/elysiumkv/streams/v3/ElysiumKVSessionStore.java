@@ -420,7 +420,11 @@ public class ElysiumKVSessionStore implements SessionStore<Bytes, byte[]> {
         }
     }
 
-    private final class SessionIterator implements KeyValueIterator<Windowed<Bytes>, byte[]> {
+    /**
+     * Static, unlike {@code ScanCursor}: this reads nothing from the enclosing store, where the
+     * cursor needs the database. The window store's iterators split the same way.
+     */
+    private static final class SessionIterator implements KeyValueIterator<Windowed<Bytes>, byte[]> {
         private final ScanCursor cursor;
 
         SessionIterator(ScanCursor cursor) {
