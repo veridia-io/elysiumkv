@@ -424,8 +424,13 @@ public class ElysiumKVWindowStore implements WindowStore<Bytes, byte[]> {
         }
     }
 
-    /** {@code fetch(key, from, to)} yields the timestamp as its key. */
-    private final class TimestampedIterator implements WindowStoreIterator<byte[]> {
+    /**
+     * {@code fetch(key, from, to)} yields the timestamp as its key.
+     *
+     * <p>Static, unlike its two siblings: this one reads nothing from the enclosing store, where
+     * {@code WindowedIterator} needs the window size and {@code ScanCursor} needs the database.
+     */
+    private static final class TimestampedIterator implements WindowStoreIterator<byte[]> {
         private final ScanCursor cursor;
 
         TimestampedIterator(ScanCursor cursor) {
