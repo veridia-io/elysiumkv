@@ -329,36 +329,9 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
         return result;
     }
 
-    /**
-     * Whether this store has advanced far enough to satisfy the bound, by the same rule the DSL's
-     * stores apply: a bound speaks only about <em>this</em> task's partition, so a component naming
-     * some other partition is not this store's business and is skipped. Within our partition, never
-     * having seen the topic is a refusal — absence of evidence cannot be read as being caught up.
-     */
+    /** Delegates to {@link PositionBounds}, which both stores share so the rule cannot diverge. */
     private boolean isPermitted(PositionBound bound) {
-        if (bound.isUnbounded()) {
-            return true;
-        }
-        Integer partition = partition();
-        if (partition == null) {
-            // No context means no partition to compare against, so the demand cannot be shown to be
-            // met. Refuse rather than assume.
-            return false;
-        }
-        Position required = bound.position();
-        Position reached = getPosition();
-        for (String topic : required.getTopics()) {
-            Map<Integer, Long> requiredOffsets = required.getPartitionPositions(topic);
-            if (!requiredOffsets.containsKey(partition)) {
-                continue;
-            }
-            Map<Integer, Long> reachedOffsets = reached.getPartitionPositions(topic);
-            Long seen = reachedOffsets.get(partition);
-            if (seen == null || seen < requiredOffsets.get(partition)) {
-                return false;
-            }
-        }
-        return true;
+        return PositionBounds.isPermitted(getPosition(), bound, partition());
     }
 
     /** The partition this store's task owns, or null if it was initialized without a context. */
