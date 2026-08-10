@@ -214,6 +214,27 @@ public:
     virtual Status remove(Slice key) = 0;
     virtual Status write(WriteBatch&) = 0;
 
+    /// Drops every key below `key`, in one manifest edit rather than one tombstone per key.
+    ///
+    /// **Monotone.** A call at or below the current point is a no-op returning `Ok`, so replay is
+    /// idempotent and truncated data can never come back. There is no un-truncate.
+    ///
+    /// Visibility changes at once; space comes back over time. A file whose every key is below the
+    /// point is unlinked whole, with no rewrite — which is what makes this cheap enough to run
+    /// continuously. A file straddling the point keeps its live half until compaction narrows it.
+    ///
+    /// **An open iterator is unaffected**, because it pins the Version it started on — the same
+    /// rule that already keeps its files readable after a compaction unlinks them.
+    ///
+    /// **The floor is permanent: a later write below it is refused with `Status::Config`, not
+    /// accepted and hidden.** Keys below the point are unreadable because the point says so, not
+    /// because anything was written per key, so the engine cannot tell a key written before the
+    /// truncation from one written after — positional recency is the only ordering it has. The
+    /// alternative would be a `put` that returns `Ok` and cannot be read back. A caller that wants
+    /// to clear a range and go on writing into it wants a range delete, which is a different
+    /// operation with a different cost.
+    virtual Status truncate_below(Slice key) = 0;
+
     /// Forces memtable -> L0 and waits for it.
     virtual Status flush() = 0;
 

@@ -33,6 +33,21 @@ std::string key_for(std::mt19937_64& rng, int distinct_keys) {
     return buf;
 }
 
+/// A truncation point, drawn from the bottom cluster only.
+///
+/// Not `key_for`: the floor is monotone and the keyspace has sixteen clusters, so truncating below
+/// a uniformly drawn key erases about half the store every time it fires. A run doing that thirty
+/// times keeps almost nothing alive, and the other operations are then agreeing about an empty
+/// store — which is how this first showed up, as the tight-budget configs reporting that they had
+/// tested nothing. Confining the floor to cluster 00 makes it creep, which is also what a real
+/// caller does.
+std::string truncation_key_for(std::mt19937_64& rng, int distinct_keys) {
+    const int id = static_cast<int>(rng() % static_cast<unsigned>(distinct_keys));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "cluster:00:key:%08d", id);
+    return buf;
+}
+
 std::string value_for(std::mt19937_64& rng) {
     // Zero-length values are included deliberately. An empty value is a value —
     // distinct from a tombstone — and a generator with a floor of 8 can never
@@ -67,6 +82,7 @@ std::string DiffOp::describe() const {
         case Kind::ScanAll: return "scan_all()";
         case Kind::ScanRange: return "scan_range(" + quote(key) + ", " + quote(upper) + ")";
         case Kind::ScanPrefix: return "scan_prefix(" + quote(key) + ")";
+        case Kind::TruncateBelow: return "truncate_below(" + quote(key) + ")";
         case Kind::ReverseScanAll: return "reverse_scan_all()";
         case Kind::ReverseScanRange:
             return "reverse_scan_range(" + quote(key) + ", " + quote(upper) + ")";
@@ -112,9 +128,12 @@ std::vector<DiffOp> generate_ops(uint64_t seed, int count, GeneratorOptions opti
         } else if (choice < 60) {
             op.kind = DiffOp::Kind::Remove;
             op.key = key_for(rng, options.distinct_keys);
-        } else if (choice < 75) {
+        } else if (choice < 74) {
             op.kind = DiffOp::Kind::Get;
             op.key = key_for(rng, options.distinct_keys);
+        } else if (choice < 75) {
+            op.kind = DiffOp::Kind::TruncateBelow;
+            op.key = truncation_key_for(rng, options.distinct_keys);
         } else if (choice < 76) {
             op.kind = DiffOp::Kind::ReverseScanAll;
         } else if (choice < 77) {

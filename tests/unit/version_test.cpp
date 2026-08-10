@@ -20,6 +20,29 @@ FileMetadata file(int level, uint64_t number, std::string smallest, std::string 
                         .min_write_time_ms = write_time};
 }
 
+/// The truncation point may only move forward, asserted on `Version::apply` directly.
+///
+/// `DbImpl::truncate_below` refuses a lower call before it ever builds an edit, so this rule is
+/// unreachable through the public API — but it is what makes *manifest replay* safe, where edits
+/// arrive in whatever order the log holds them. Testing it where it lives is the only way to see
+/// it fail.
+TEST(Version, TheTruncationPointOnlyEverMovesForward) {
+    Version base({}, 1, {}, "mmm");
+
+    VersionEdit backwards;
+    backwards.truncation_point = "aaa";
+    EXPECT_EQ(Version::apply(base, backwards)->truncation_point(), "mmm")
+            << "an earlier edit replayed later must not resurrect data";
+
+    VersionEdit forwards;
+    forwards.truncation_point = "zzz";
+    EXPECT_EQ(Version::apply(base, forwards)->truncation_point(), "zzz");
+
+    VersionEdit silent;
+    EXPECT_EQ(Version::apply(base, silent)->truncation_point(), "mmm")
+            << "an edit that says nothing about truncation leaves it where it was";
+}
+
 TEST(VersionEdit, RoundTrips) {
     VersionEdit edit;
     edit.next_file_number = 42;

@@ -103,6 +103,22 @@ void DbImpl::schedule_compaction() {
 
 void DbImpl::note_maintenance_state_changed() { invalidate_maintenance(); }
 
+/// Unlinks every file whose keys all sit below the truncation point. No rewrite, no read: the
+/// files leave the version in one edit and reach the object store through the ordinary
+/// obsolete-object path, which is what keeps an open reader safe from them.
+bool DbImpl::reclaim_truncated_files(Status& status) {
+    auto version = versions_->current();
+    const std::vector<FileMetadata> dead = version->files_entirely_truncated();
+    if (dead.empty()) return false;
+
+    VersionEdit edit;
+    for (const FileMetadata& file : dead) {
+        edit.deleted.push_back(FileRef{file.level, file.file_number});
+    }
+    status = versions_->apply(std::move(edit));
+    return status == Status::Ok;
+}
+
 void DbImpl::background_compaction_loop() {
     while (true) {
         {
@@ -122,6 +138,13 @@ void DbImpl::background_compaction_loop() {
         const size_t pending_before = versions_->pending_deletions_hint();
         versions_->collect_obsolete();
         bool did_work = versions_->pending_deletions_hint() < pending_before;
+        // Files the truncation point has made unreadable, before anything else: they are removed
+        // by a manifest edit alone, so dropping them first spares a compaction the work of
+        // rewriting bytes that are already dead. It applies a version edit, which makes it a
+        // *deleting task* — sound only because it shares this one executor with compaction,
+        // migration and eviction, the same reason they are sound.
+        if (reclaim_truncated_files(status)) did_work = true;
+
         // ARCHITECTURE.md "Migration between tiers" — migrations off a Transient tier preempt everything, including
         // compaction. Draining them first is that rule.
         while (run_one_migration(status)) {
@@ -465,6 +488,12 @@ Status DbImpl::compact_until_quiet() {
         // Migration first: it preempts compaction, and in Inline mode the
         // caller is the only thread that will ever run either.
         bool worked = false;
+        // Same order as the threaded executor, for the same reason: files the truncation point
+        // emptied go by manifest edit alone, so dropping them first spares a compaction the work
+        // of rewriting dead bytes. Inline mode has to run it too, or reclamation would be a
+        // property only the threaded build had.
+        if (reclaim_truncated_files(status)) worked = true;
+        if (status != Status::Ok) return status;
         while (run_one_migration(status)) worked = true;
         if (status != Status::Ok) return status;
         if (run_one_compaction(status)) worked = true;
@@ -541,6 +570,15 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // range — no deeper level holds an overlapping file. Dynamic, not the last
     // configured level.
     const bool drop_tombstones = compaction.output_is_bottommost;
+    // Truncated keys are dropped wherever the compaction lands, not only at the bottom. A tombstone
+    // has to survive to the bottommost level because a deeper file may still hold the key it
+    // shadows; a truncation point shadows every level at once, so there is nothing left to shadow
+    // and nothing to carry down.
+    //
+    // **This reclaims space; it does not change an answer** — the read clamp already hides these
+    // keys. It is what narrows a file straddling the point, the whole ones below it never reaching
+    // a compaction at all.
+    const std::string truncation_point = versions_->current()->truncation_point();
     const uint64_t min_write_time = compaction.min_write_time_ms();
     const WatermarkInterval watermark = compaction.watermark();
     const size_t grandparent_limit = max_grandparent_overlap_bytes(target);
@@ -592,6 +630,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
 
     for (merged->seek_to_first(); merged->valid(); merged->next()) {
         if (drop_tombstones && merged->type() == ValueType::Delete) continue;
+        if (!truncation_point.empty() && merged->key() < Slice::from(truncation_point)) continue;
         if (writer == nullptr) writer = std::make_unique<SstWriter>(sst_options);
         writer->add(merged->key(), merged->type(), merged->value());
 

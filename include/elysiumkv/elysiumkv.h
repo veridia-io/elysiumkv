@@ -380,6 +380,19 @@ ELYSIUMKV_API uint64_t elysiumkv_pins_outstanding(const elysiumkv_db*);
 ELYSIUMKV_API elysiumkv_status elysiumkv_put(elysiumkv_db*, const uint8_t* key, size_t key_len, const uint8_t* value,
                            size_t value_len);
 ELYSIUMKV_API elysiumkv_status elysiumkv_delete(elysiumkv_db*, const uint8_t* key, size_t key_len);
+/* Drops every key below `key` in one manifest edit, rather than one tombstone
+ * per key.
+ *
+ * Monotone: a call at or below the current point is a no-op returning OK, so
+ * this is safe to drive from a loop that does not track what it already asked
+ * for. There is no un-truncate.
+ *
+ * Visibility changes at once; space returns over time. A file whose keys are all
+ * below the point is unlinked whole; one straddling it is narrowed by the next
+ * compaction. An open iterator is unaffected — it holds the version it started
+ * on, exactly as it does across a compaction. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_truncate_below(elysiumkv_db*, const uint8_t* key,
+                                             size_t key_len);
 
 ELYSIUMKV_API elysiumkv_batch* elysiumkv_batch_create(void);
 ELYSIUMKV_API void elysiumkv_batch_destroy(elysiumkv_batch*);

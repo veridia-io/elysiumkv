@@ -911,6 +911,20 @@ elysiumkv_status elysiumkv_put(elysiumkv_db* db, const uint8_t* key, size_t key_
     });
 }
 
+elysiumkv_status elysiumkv_truncate_below(elysiumkv_db* db, const uint8_t* key, size_t key_len) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr) return fail(Status::Config, "elysiumkv_truncate_below: null db");
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_truncate_below: handle is read-only");
+        }
+        const Status status = db->writes()->truncate_below(as_slice(key, key_len));
+        if (status != Status::Ok) {
+            return fail(status, std::string("truncate_below: ") + std::string(status_name(status)));
+        }
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_delete(elysiumkv_db* db, const uint8_t* key, size_t key_len) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_delete: null db");

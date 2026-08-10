@@ -207,6 +207,19 @@ public final class ElysiumKV implements ReadOnlyStore {
         Native.compactLevel(handle(), level);
     }
 
+    /**
+     * Drops every key below {@code key} in one manifest edit, rather than one tombstone per key.
+     *
+     * <p><b>Monotone.</b> A call at or below the current point is a no-op, so this is safe to drive
+     * from a loop that does not track what it already asked for. There is no un-truncate.
+     *
+     * <p>Visibility changes at once; space returns over time. An open iterator is unaffected — it
+     * holds the version it started on, as it already does across a compaction.
+     */
+    public void truncateBelow(byte[] key) {
+        Native.truncateBelow(handle(), key, key.length);
+    }
+
     // --- iteration -----------------------------------------------------------
 
     /** Half-open range scan; null bounds are unbounded. */

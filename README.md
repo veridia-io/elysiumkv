@@ -36,8 +36,8 @@ useful rather than to be novel.
 
 ## What it does
 
-- **Ordered key-value storage** — put, delete, point lookup, range scan, prefix
-  scan, atomic batches.
+- **Ordered key-value storage** — put, delete, point lookup, range and prefix
+  scans in either direction, atomic batches.
 - **Leveled compaction** with a background thread, write stalls and tombstone
   reclamation.
 - **Storage tiers**: several object stores per database, with files migrating
@@ -50,13 +50,20 @@ useful rather than to be novel.
   rolled back to what a lost transient tier could not have held. This is the
   resume point for a changelog-backed store; see
   [ARCHITECTURE.md](ARCHITECTURE.md#the-watermark-is-an-interval-and-only-its-lower-bound-is-load-bearing).
+- **Prefix truncation**: `truncate_below(key)` drops everything under a key by
+  moving one value in the manifest, rather than writing a tombstone per key. A
+  file entirely below the point is unlinked whole — nothing read, nothing
+  rewritten — which is what makes it cheap enough to run continuously against an
+  ageing keyspace. **The floor is permanent**: a later write below it is refused
+  rather than accepted and hidden, because recency here is positional and the
+  engine cannot tell a key written before the truncation from one written after.
 - **Zero-copy reads**: a lookup can hand back a pointer into the block cache,
   pinned until you release it, with no copy at any layer — including through the
   Java binding.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (52 functions, C99) and a Java binding over JNI
+- **Bindings**: a stable C ABI (55 functions, C99) and a Java binding over JNI
   needing only Java 11, plus a Kafka Streams state store in
   `bindings/kafka-streams-v3`.
 
@@ -191,6 +198,8 @@ it->status();                         // exhaustion and failure look alike other
 
 auto down = db->reverse_iterator(lo, hi);   // next() still advances — downwards
 while (down->next()) consume(down->key(), down->value());
+
+db->truncate_below(cutoff);           // everything under `cutoff` is gone
 ```
 
 Every scan has a descending twin (`reverse_iterator`, `reverse_prefix_iterator`,
@@ -459,8 +468,12 @@ and a 1M-key store must cost about the same, or file pruning is not working.
 
 ## What is not implemented
 
-- **Range deletes.** The entry encoding reserves room for them; the compaction
-  interaction is not designed.
+- **Range deletes.** `truncate_below` covers the case where the range is a prefix
+  of the keyspace and the boundary only ever advances, which is what an ageing
+  store needs; an arbitrary `[begin, end)` is not implemented. It is a larger
+  piece of work than it looks: with no sequence numbers, deciding which keys a
+  range tombstone shadows has to be answered positionally, and the tombstones
+  need a place in a frozen SST format.
 - **A write-ahead log.** Deliberate: the changelog you are already replaying is
   the log, so duplicating it would double every write. The watermark is what
   makes that trade workable — it tells you where to resume, and an unflushed

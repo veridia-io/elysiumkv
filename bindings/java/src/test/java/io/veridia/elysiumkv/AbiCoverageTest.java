@@ -281,6 +281,14 @@ class AbiCoverageTest {
             assertTrue(db.recoveredWatermark().isEmpty(),
                        "nothing was flushed under a watermark in this fixture");
 
+            // Last on purpose: it removes keys, and every count asserted above is over the fixture
+            // as it was built.
+            exercise("truncateBelow");
+            db.truncateBelow(TestSupport.key(50));
+            assertThrows(ConfigException.class,
+                         () -> db.put(TestSupport.key(10), TestSupport.bytes("v")),
+                         "the floor refuses a write below it");
+
             exercise("statsSnapshot");
             ElysiumKVStats stats = db.stats();
             assertEquals(2, stats.levels().size());

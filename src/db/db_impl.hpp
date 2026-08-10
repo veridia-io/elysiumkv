@@ -75,6 +75,8 @@ public:
     Status put(Slice key, Slice value) override;
     Status remove(Slice key) override;
     Status write(WriteBatch& batch) override;
+    Status truncate_below(Slice key) override;
+    Status check_below_truncation(Slice key) const;
 
     std::unique_ptr<Iterator> iterator() override;
     std::unique_ptr<Iterator> iterator(Slice lower_inclusive, Slice upper_exclusive) override;
@@ -294,6 +296,8 @@ private:
     void note_maintenance_state_changed();
     /// ARCHITECTURE.md "The differential oracle" — the compaction counterpart of `run_one_flush`, with the same
     /// contract: performs exactly one compaction, reports whether it did work.
+    /// Drops files the truncation point has emptied. Same `run_one()` contract as the others.
+    bool reclaim_truncated_files(Status& status);
     bool run_one_compaction(Status& status);
     Status run_compaction(const Compaction& compaction);
     /// ARCHITECTURE.md "Migration between tiers" — the third kind of background work, and structurally the simplest:

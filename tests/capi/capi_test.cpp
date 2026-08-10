@@ -665,6 +665,36 @@ TEST_F(CApiTest, EachIteratorBoundIsIndependentlyOptional) {
     EXPECT_EQ(elysiumkv_close(db), 0u);
 }
 
+/// Truncation across the ABI, including that the floor then refuses a write below it — the part a
+/// caller is most likely to meet by accident.
+TEST_F(CApiTest, TruncateBelowCrossesTheAbi) {
+    elysiumkv_db* db = open();
+    ASSERT_NE(db, nullptr);
+    for (int i = 0; i < 20; ++i) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "k%02d", i);
+        ASSERT_EQ(put(db, key, "v"), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+
+    ASSERT_EQ(elysiumkv_truncate_below(db, reinterpret_cast<const uint8_t*>("k10"), 3),
+              ELYSIUMKV_OK);
+
+    elysiumkv_iter* iter = nullptr;
+    ASSERT_EQ(elysiumkv_iter_create(db, nullptr, 0, nullptr, 0, &iter), ELYSIUMKV_OK);
+    int seen = 0;
+    while (elysiumkv_iter_next(iter)) ++seen;
+    elysiumkv_iter_destroy(iter);
+    EXPECT_EQ(seen, 10);
+
+    // Idempotent, and the floor refuses what falls under it.
+    EXPECT_EQ(elysiumkv_truncate_below(db, reinterpret_cast<const uint8_t*>("k05"), 3),
+              ELYSIUMKV_OK);
+    EXPECT_NE(put(db, "k03", "v"), ELYSIUMKV_OK);
+
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
 /// The reverse entry points, across the ABI. Separate symbols rather than a flag on the forward
 /// call, so this also pins that both exist and are reachable — a binding verifies the ABI by its
 /// export set, and a missing symbol here is a link failure in whichever consumer reaches it first.

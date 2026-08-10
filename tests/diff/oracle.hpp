@@ -16,6 +16,11 @@ class Oracle {
 public:
     void put(const std::string& key, const std::string& value) { entries_[key] = value; }
     void remove(const std::string& key) { entries_.erase(key); }
+    /// Erases everything below `key` — the whole of what `truncate_below` means, which is the
+    /// point of stating it against a `std::map`.
+    void truncate_below(const std::string& key) {
+        entries_.erase(entries_.begin(), entries_.lower_bound(key));
+    }
 
     std::optional<std::string> get(const std::string& key) const {
         auto it = entries_.find(key);

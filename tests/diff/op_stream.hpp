@@ -20,6 +20,9 @@ struct DiffOp {
         ScanAll,
         ScanRange,
         ScanPrefix,
+        /// Drops every key below `key`. Durable the moment it returns, so a kill does not undo
+        /// it — which is why the replay applies it to the post-crash oracle as well.
+        TruncateBelow,
         /// The same three scans descending. Compared against the oracle's answer reversed, so the
         /// bar is not merely "descending" but "the same set, in the opposite order" — a reverse
         /// scan that dropped or duplicated an entry passes an ordering check and fails this one.
