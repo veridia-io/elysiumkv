@@ -267,6 +267,28 @@ class ElysiumKVWindowStoreTest {
         store.close();
     }
 
+    /**
+     * A reopened store must report what is on disk, not what its in-memory clamps happen to say.
+     *
+     * <p>Both are derived from {@code observedStreamTime}, which starts empty — so before the store
+     * seeded itself from disk, a reopen clamped every scan to segment zero and the store answered
+     * nothing at all. Restore from a changelog masks it by replaying records; a store reopened on
+     * existing local state has nothing to replay.
+     */
+    @Test
+    void aReopenedStoreStillSeesWhatIsOnDisk(@TempDir Path dir) {
+        WindowStore<Bytes, byte[]> store = open(dir);
+        store.put(key("a"), value("early"), 1_000L);
+        store.put(key("a"), value("later"), Duration.ofMinutes(3).toMillis());
+        store.flush();
+        store.close();
+
+        WindowStore<Bytes, byte[]> reopened = open(dir);
+        assertEquals(2, drain(reopened.fetch(key("a"), 0L, Duration.ofMinutes(5).toMillis())).size(),
+                     "a reopen must not clamp the store down to nothing");
+        reopened.close();
+    }
+
     @Test
     void backwardScansAgreeWithForwardOnes(@TempDir Path dir) {
         WindowStore<Bytes, byte[]> store = open(dir);

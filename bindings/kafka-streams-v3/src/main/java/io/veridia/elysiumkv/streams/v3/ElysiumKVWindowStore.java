@@ -105,6 +105,8 @@ public class ElysiumKVWindowStore implements WindowStore<Bytes, byte[]> {
         db = ElysiumKV.open(options);
         open = true;
 
+        seedLiveBandFromDisk();
+
         if (ctx != null) {
             // A changelog record carries Kafka's key layout, which is this store's minus the
             // segment prefix — so restoring is a prefix and a copy, never a parse and a rebuild.
@@ -126,6 +128,39 @@ public class ElysiumKVWindowStore implements WindowStore<Bytes, byte[]> {
                 }
             };
             ctx.register(root, restore);
+        }
+    }
+
+    /**
+     * Recovers the live band from what is on disk, because the clamps are derived from fields that
+     * start empty.
+     *
+     * <p>Without this a reopened store reports itself empty: {@code observedStreamTime} is -1, so
+     * every scan clamps to segment zero and finds nothing, however much data is there. Restore from
+     * a changelog happens to fix it by replaying records, which is why it does not show up in the
+     * usual Streams path — but a store reopened on existing local state has no changelog to replay,
+     * and would silently answer nothing.
+     *
+     * <p>Two seeks: the newest key gives the upper clamp, the oldest gives the lower one. The lower
+     * is not needed for correctness — the engine's truncation floor already hides what is below it —
+     * but without it a long-lived store builds a range object per segment back to zero on every
+     * scan.
+     */
+    private void seedLiveBandFromDisk() {
+        try (io.veridia.elysiumkv.ElysiumKVIterator newest = db.reverseIterator(null, null)) {
+            if (newest.next()) {
+                final byte[] key = new byte[newest.key().remaining()];
+                newest.key().duplicate().get(key);
+                observedStreamTime = Math.max(observedStreamTime, WindowKeys.timestampOf(key));
+            }
+        }
+        try (io.veridia.elysiumkv.ElysiumKVIterator oldest = db.iterator(null, null)) {
+            if (oldest.next()) {
+                final byte[] key = new byte[oldest.key().remaining()];
+                oldest.key().duplicate().get(key);
+                truncatedThrough = WindowKeys.segmentId(WindowKeys.timestampOf(key),
+                                                        segmentIntervalMs) - 1;
+            }
         }
     }
 
