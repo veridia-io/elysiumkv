@@ -11,3 +11,4 @@ compile_commands.json
 
 # Assembled by the publish workflow: one directory per platform's libelysiumkv_jni.
 bindings/java/native-staging/
+/reference-implementations

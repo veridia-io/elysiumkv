@@ -98,8 +98,13 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/vcpkg/archives
-          key: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-
+          # `aws` is in the key because the published library is built with the SDK, and
+          # vcpkg.json does not change when that is switched on — the feature is selected by a
+          # CMake option. Without it a hit on a pre-AWS cache would restore an archive missing
+          # aws-sdk-cpp, rebuild it, and then not save it, since actions/cache only writes on a
+          # miss. Every release would pay the full SDK build.
+          key: vcpkg-aws-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-aws-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-
 
       - name: Set up vcpkg
         run: |
@@ -115,9 +120,18 @@ jobs:
           java-version: '11'
 
       # The glue links the static archive, so the engine builds first.
+      #
+      # **Built with the remote implementations.** The jar is the only artifact most consumers
+      # ever see, so a jar without S3 makes remote tiers unreachable for everyone who does not
+      # build from source — and the failure is a configuration error at the first call, long after
+      # the choice was made. The SDK is the heaviest thing in this build, which is why it stays off
+      # by default for development and for the four-preset matrix; a release is the one place worth
+      # paying it. Verified not to widen the export surface: the glue still exports two symbols and
+      # the C ABI only its own, so nothing of the SDK, curl or OpenSSL is interposed on a host
+      # process that has its own.
       - name: Build the native library
         run: |
-          cmake --preset release -DELYSIUMKV_VERSION="$ELYSIUMKV_VERSION"
+          cmake --preset release -DELYSIUMKV_BUILD_AWS=ON -DELYSIUMKV_VERSION="$ELYSIUMKV_VERSION"
           # A stale CMakeCache would silently keep an older value, and the generated header is the
           # only place the result is observable before the library is in someone's hands.
           grep -F "\"$ELYSIUMKV_VERSION\"" build/release/generated/elysiumkv/elysiumkv_version.hpp \
