@@ -87,8 +87,16 @@ TEST(Soak, ResidentMemoryPlateausUnderSteadyState) {
 
     // Non-vacuity: the measurement has to move, or the assertion below is
     // asserting nothing.
+    //
+    // Phrased as spread rather than as "the tail exceeds the first sample", which is what this
+    // asked before. That form assumed resident memory climbs from the first sample onward — an
+    // assumption the OS is free to break, since it reclaims pages under pressure whatever the
+    // process is doing, and one in tension with the very property under test. It failed on a
+    // machine where RSS *fell* over the run, reporting a broken measurement when the measurement
+    // was working. What the guard needs to rule out is a constant, and a constant has no spread.
     ASSERT_GT(middle_peak, 0u);
-    EXPECT_GT(tail_peak, samples.front())
+    const auto [low, high] = std::minmax_element(samples.begin(), samples.end());
+    EXPECT_GT(*high, *low)
         << "resident memory never moved — is it being measured at all?";
 
     const double growth = static_cast<double>(tail_peak) / static_cast<double>(middle_peak);

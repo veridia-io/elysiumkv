@@ -12,15 +12,15 @@ Current versions:
 | Format | Version | Constant |
 | --- | --- | --- |
 | SST file | 1 | `Footer::kFormatVersion1` |
-| Manifest edit | 2 | `kEditFormatVersion` |
-| Manifest snapshot | 2 | `kSnapshotFormatVersion` |
+| Manifest edit | 3 | `kEditFormatVersion` |
+| Manifest snapshot | 3 | `kSnapshotFormatVersion` |
 | Stats buffer | 1 | `kStatsFormatVersion` |
 
 Conventions throughout: **little-endian** fixed-width integers; `varint32`/`varint64` are
 LEB128-style, 7 bits per byte, low group first, high bit set to continue. `‖` means concatenation.
 
-**Manifest version 2 is a clean break: there is no dual-read path.** A manifest written at version 1
-is refused with `Status::Unsupported` — not `Status::Corrupt`, which would tell an operator their
+**Every manifest version is a clean break: there is no dual-read path.** A manifest written at an
+earlier version is refused with `Status::Unsupported` — not `Status::Corrupt`, which would tell an operator their
 bytes are damaged when they are merely older, and not read-with-defaults, which would mean carrying
 two shapes forever. [CONTRIBUTING.md](CONTRIBUTING.md) asks that a format change teach the reader
 both shapes; this is a deliberate exception for a `0.x` engine, stated here rather than left
@@ -197,13 +197,14 @@ and a migration carries it unchanged.
 Framed with `compression_type = 0`.
 
 ```
-format_version     varint32   2
+format_version     varint32   3
 next_file_number   varint64
 added_count        varint64
 added              file entry × added_count
 deleted_count      varint64
 deleted            (varint64 level ‖ varint64 file_number) × deleted_count
 compaction_pointers
+truncation_point   string
 ```
 
 ### Snapshot
@@ -211,12 +212,20 @@ compaction_pointers
 Framed with **zstd**, because a snapshot is always read whole.
 
 ```
-format_version     varint32   2
+format_version     varint32   3
 next_file_number   varint64
 file_count         varint64
 files              file entry × file_count
 compaction_pointers
+truncation_point   string
 ```
+
+The **truncation point** is the key below which everything has been dropped. Empty means no
+truncation, which is also the correct reading of "truncate below the empty key" — nothing sorts
+under it. It is **monotone**: applying an edit takes the max of the edit's value and the version's,
+so replaying the manifest is idempotent and an edit replayed out of order cannot resurrect data.
+A file whose largest key is below the point holds nothing readable and is unlinked whole; a file
+straddling it is narrowed by the next compaction to cover it.
 
 ## 7. Stats buffer (C ABI)
 

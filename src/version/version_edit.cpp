@@ -6,8 +6,8 @@
 namespace elysiumkv {
 namespace {
 
-constexpr uint32_t kEditFormatVersion = 2;
-constexpr uint32_t kSnapshotFormatVersion = 2;
+constexpr uint32_t kEditFormatVersion = 3;
+constexpr uint32_t kSnapshotFormatVersion = 3;
 /// A manifest snapshot for a mature store is a few hundred KB; the bound only
 /// has to keep a corrupt length from becoming an allocation.
 constexpr size_t kMaxManifestBytes = 256u << 20;
@@ -136,6 +136,7 @@ std::string encode_version_edit(const VersionEdit& edit) {
     }
 
     put_pointers(content, edit.compaction_pointers);
+    put_string(content, edit.truncation_point);
     return frame(content, Compression::None);
 }
 
@@ -178,6 +179,7 @@ Result<VersionEdit> decode_version_edit(Slice bytes) {
     }
 
     if (!get_pointers(p, limit, edit.compaction_pointers)) return std::unexpected(Status::Corrupt);
+    if (!get_string(p, limit, edit.truncation_point)) return std::unexpected(Status::Corrupt);
     return edit;
 }
 
@@ -188,6 +190,7 @@ std::string encode_version_snapshot(const VersionSnapshot& snapshot) {
     put_varint64(content, snapshot.files.size());
     for (const FileMetadata& file : snapshot.files) put_file(content, file);
     put_pointers(content, snapshot.compaction_pointers);
+    put_string(content, snapshot.truncation_point);
 
     // Unlike SST data blocks, a snapshot is always read whole, so whole-object
     // compression is the right shape here.
@@ -222,6 +225,7 @@ Result<VersionSnapshot> decode_version_snapshot(Slice bytes) {
     if (!get_pointers(p, limit, snapshot.compaction_pointers)) {
         return std::unexpected(Status::Corrupt);
     }
+    if (!get_string(p, limit, snapshot.truncation_point)) return std::unexpected(Status::Corrupt);
     return snapshot;
 }
 

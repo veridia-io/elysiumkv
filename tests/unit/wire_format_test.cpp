@@ -252,6 +252,7 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     edit.added.push_back(file);
     edit.deleted.push_back(FileRef{1, 99});
     edit.compaction_pointers.emplace_back(1, std::string("mmm"));
+    edit.truncation_point = "ttt";
 
     const std::string framed = encode_version_edit(edit);
 
@@ -262,7 +263,7 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     const std::string content = framed.substr(0, content_len);
 
     size_t at = 0;
-    EXPECT_EQ(take_varint(content, at), 2u) << "format_version";
+    EXPECT_EQ(take_varint(content, at), 3u) << "format_version";
     EXPECT_EQ(take_varint(content, at), 4243u) << "next_file_number";
     ASSERT_EQ(take_varint(content, at), 1u) << "added_count";
 
@@ -287,12 +288,15 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     ASSERT_EQ(take_varint(content, at), 1u) << "compaction pointer count";
     EXPECT_EQ(take_varint(content, at), 1u) << "pointer level";
     EXPECT_EQ(take_string(content, at), "mmm");
+
+    EXPECT_EQ(take_string(content, at), "ttt") << "truncation_point";
     EXPECT_EQ(at, content.size()) << "no unaccounted bytes in the record";
 }
 
 TEST(WireFormat, ManifestSnapshotIsZstdFramedAndRoundTrips) {
     VersionSnapshot snapshot;
     snapshot.next_file_number = 9;
+    snapshot.truncation_point = "cutoff";
     for (int i = 0; i < 40; ++i) {
         FileMetadata file;
         file.level = i % 3;
@@ -313,6 +317,7 @@ TEST(WireFormat, ManifestSnapshotIsZstdFramedAndRoundTrips) {
     auto decoded = decode_version_snapshot(Slice::from(framed));
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded->next_file_number, 9u);
+    EXPECT_EQ(decoded->truncation_point, "cutoff");
     ASSERT_EQ(decoded->files.size(), snapshot.files.size());
     EXPECT_EQ(decoded->files[7].smallest_key, snapshot.files[7].smallest_key);
 }

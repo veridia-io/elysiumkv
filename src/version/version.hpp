@@ -17,10 +17,11 @@ class Version {
 public:
     Version() = default;
     Version(std::vector<std::vector<FileMetadata>> levels, uint64_t next_file_number,
-            std::map<int, std::string> compaction_pointers)
+            std::map<int, std::string> compaction_pointers, std::string truncation_point = {})
         : levels_(std::move(levels)),
           next_file_number_(next_file_number),
-          compaction_pointers_(std::move(compaction_pointers)) {}
+          compaction_pointers_(std::move(compaction_pointers)),
+          truncation_point_(std::move(truncation_point)) {}
 
     const std::vector<std::vector<FileMetadata>>& levels() const { return levels_; }
     size_t num_levels() const { return levels_.size(); }
@@ -28,6 +29,16 @@ public:
 
     uint64_t next_file_number() const { return next_file_number_; }
     const std::map<int, std::string>& compaction_pointers() const { return compaction_pointers_; }
+
+    /// Keys below this are gone. Carried on the Version rather than on the DB so that an iterator,
+    /// which already pins a Version for its lifetime, keeps reading the world as it was when it
+    /// started — the same rule that keeps its files alive.
+    const std::string& truncation_point() const { return truncation_point_; }
+    bool truncated(Slice key) const {
+        return !truncation_point_.empty() && key < Slice::from(truncation_point_);
+    }
+    /// Files no surviving key can be read from: reclaimable whole, with no rewrite.
+    std::vector<FileMetadata> files_entirely_truncated() const;
 
     uint64_t total_bytes(int level) const;
     size_t file_count(int level) const;
@@ -62,6 +73,7 @@ private:
     std::vector<std::vector<FileMetadata>> levels_;
     uint64_t next_file_number_ = 1;
     std::map<int, std::string> compaction_pointers_;
+    std::string truncation_point_;
 };
 
 }  // namespace elysiumkv

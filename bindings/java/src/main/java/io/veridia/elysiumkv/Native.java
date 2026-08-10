@@ -195,6 +195,8 @@ final class Native {
 
     static native long iterPrefix(long db, byte[] prefix, int prefixLength);
 
+    static native void truncateBelow(long db, byte[] key, int keyLength);
+
     static native long iterCreateReverse(long db, byte[] lo, int loLength, byte[] hi, int hiLength);
 
     static native long iterPrefixReverse(long db, byte[] prefix, int prefixLength);

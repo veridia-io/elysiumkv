@@ -71,10 +71,17 @@ struct VersionEdit {
     /// compaction at that level — must survive a restart, or the sweep restarts
     /// from the beginning of the keyspace and rewrites the same hot region.
     std::vector<std::pair<int, std::string>> compaction_pointers;
+    /// Everything below this key has been truncated away. Empty means "no change" — which is also
+    /// the correct reading of "truncate below the empty key", since no key sorts under it.
+    ///
+    /// **Monotone by construction**: `Version::apply` takes the max, so replaying the manifest is
+    /// idempotent and an out-of-order edit cannot resurrect data. That is the property that lets
+    /// truncation be a single field instead of a log of ranges.
+    std::string truncation_point;
 
     bool empty() const {
         return added.empty() && deleted.empty() && compaction_pointers.empty() &&
-               next_file_number == 0;
+               truncation_point.empty() && next_file_number == 0;
     }
 };
 
@@ -89,6 +96,7 @@ struct VersionSnapshot {
     uint64_t next_file_number = 1;
     std::vector<FileMetadata> files;
     std::vector<std::pair<int, std::string>> compaction_pointers;
+    std::string truncation_point;
 };
 
 std::string encode_version_snapshot(const VersionSnapshot&);

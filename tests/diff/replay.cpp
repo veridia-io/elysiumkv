@@ -195,12 +195,14 @@ private:
         switch (op.kind) {
             case DiffOp::Kind::Put: {
                 const Status status = db_->put(Slice::from(op.key), Slice::from(op.value));
+                if (below_floor(op.key)) return expect_refused("put", status);
                 if (status != Status::Ok) return std::string("put: ") + std::string(status_name(status));
                 oracle_.put(op.key, op.value);
                 return std::nullopt;
             }
             case DiffOp::Kind::Remove: {
                 const Status status = db_->remove(Slice::from(op.key));
+                if (below_floor(op.key)) return expect_refused("remove", status);
                 if (status != Status::Ok) {
                     return std::string("remove: ") + std::string(status_name(status));
                 }
@@ -210,18 +212,28 @@ private:
             case DiffOp::Kind::Get: return check_get(op.key);
             case DiffOp::Kind::Batch: {
                 WriteBatch batch;
+                bool any_below = false;
                 for (const auto& [is_delete, key, value] : op.batch) {
+                    if (below_floor(key)) any_below = true;
                     if (is_delete) {
                         batch.remove(Slice::from(key));
-                        oracle_.remove(key);
                     } else {
                         batch.put(Slice::from(key), Slice::from(value));
-                        oracle_.put(key, value);
                     }
                 }
                 const Status status = db_->write(batch);
+                // A batch lands whole or not at all, so one key under the floor refuses all of it
+                // and the oracle must not see any of them.
+                if (any_below) return expect_refused("write", status);
                 if (status != Status::Ok) {
                     return std::string("write: ") + std::string(status_name(status));
+                }
+                for (const auto& [is_delete, key, value] : op.batch) {
+                    if (is_delete) {
+                        oracle_.remove(key);
+                    } else {
+                        oracle_.put(key, value);
+                    }
                 }
                 return std::nullopt;
             }
@@ -236,6 +248,18 @@ private:
                 Entries expected;
                 for (const auto& entry : oracle_.prefix(op.key)) expected.push_back(entry);
                 return check_prefix_scan(op.key, expected);
+            }
+            case DiffOp::Kind::TruncateBelow: {
+                const Status status = db_->truncate_below(Slice::from(op.key));
+                if (status != Status::Ok) {
+                    return std::string("truncate_below: ") + std::string(status_name(status));
+                }
+                oracle_.truncate_below(op.key);
+                if (op.key > floor_) floor_ = op.key;
+                // A manifest edit is durable when it returns, so the point survives a kill even
+                // though the memtable does not. Applying it to `flushed_` is what says so.
+                flushed_.truncate_below(op.key);
+                return std::nullopt;
             }
             case DiffOp::Kind::ReverseScanAll:
                 return check_reverse_scan(Slice(), Slice(), false,
@@ -368,6 +392,17 @@ private:
         return std::nullopt;
     }
 
+    /// The truncation floor is permanent, so the oracle has to expect a refusal rather than a
+    /// write. Modelled here rather than by generating only legal streams, because "the engine
+    /// refuses this" is the behaviour under test.
+    bool below_floor(const std::string& key) const { return !floor_.empty() && key < floor_; }
+
+    std::optional<std::string> expect_refused(const char* what, Status status) const {
+        if (status == Status::Config) return std::nullopt;
+        return std::string(what) + " below the truncation floor should have been refused, got " +
+               std::string(status_name(status));
+    }
+
     static Entries reversed(Entries entries) {
         std::reverse(entries.begin(), entries.end());
         return entries;
@@ -493,6 +528,8 @@ private:
     std::unique_ptr<DB> db_;
     Oracle oracle_;
     Oracle flushed_;
+    /// Durable and monotone, so it survives a kill and a reopen exactly as the manifest does.
+    std::string floor_;
     std::atomic<uint64_t> now_ms_{1'000'000};
 };
 

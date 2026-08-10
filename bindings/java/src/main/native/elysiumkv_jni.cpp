@@ -736,6 +736,14 @@ jlong JNICALL iter_prefix_reverse(JNIEnv* env, jclass, jlong db, jbyteArray pref
                  jlong{0});
 }
 
+void JNICALL truncate_below(JNIEnv* env, jclass, jlong db, jbyteArray key, jint key_length) {
+    guard_void(env, [&] {
+        ByteArrayCopy key_bytes(env, key, key_length);
+        if (env->ExceptionCheck()) return;
+        check(env, elysiumkv_truncate_below(as_db(db), key_bytes.data(), key_bytes.size()));
+    });
+}
+
 jboolean JNICALL iter_next(JNIEnv*, jclass, jlong iter) {
     return elysiumkv_iter_next(as_iter(iter)) ? JNI_TRUE : JNI_FALSE;
 }
@@ -986,6 +994,8 @@ const JNINativeMethod kMethods[] = {
 
     {const_cast<char*>("iterCreate"), const_cast<char*>("(J[BI[BI)J"),
      reinterpret_cast<void*>(iter_create)},
+    {const_cast<char*>("truncateBelow"), const_cast<char*>("(J[BI)V"),
+     reinterpret_cast<void*>(truncate_below)},
     {const_cast<char*>("iterCreateReverse"), const_cast<char*>("(J[BI[BI)J"),
      reinterpret_cast<void*>(iter_create_reverse)},
     {const_cast<char*>("iterPrefixReverse"), const_cast<char*>("(J[BI)J"),

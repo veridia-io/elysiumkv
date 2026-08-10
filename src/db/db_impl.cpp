@@ -408,6 +408,7 @@ Status check_entry_size(Slice key, Slice value) {
 
 Status DbImpl::put(Slice key, Slice value) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
+    if (Status status = check_below_truncation(key); status != Status::Ok) return status;
     if (Status status = check_entry_size(key, value); status != Status::Ok) return status;
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
@@ -420,6 +421,7 @@ Status DbImpl::put(Slice key, Slice value) {
 
 Status DbImpl::remove(Slice key) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
+    if (Status status = check_below_truncation(key); status != Status::Ok) return status;
     if (Status status = check_entry_size(key, Slice()); status != Status::Ok) return status;
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
@@ -428,6 +430,44 @@ Status DbImpl::remove(Slice key) {
         mem_->remove(key);
     }
     return maybe_freeze_memtable(false);
+}
+
+/// The floor is permanent, so a write below it is refused rather than accepted and hidden.
+///
+/// **This is the whole of what makes truncation cheap.** Keys below the point are unreadable
+/// because the *point* says so, not because anything was written per key — so the engine has no
+/// way to tell a key written before the truncation from one written after, positional recency
+/// being the only ordering it has. Accepting such a write would mean a `put` that returned `Ok`
+/// and then could not be read back, which is the one outcome worth ruling out by construction.
+/// A caller that wants to delete a range and keep writing into it wants `delete_range`, not this.
+Status DbImpl::check_below_truncation(Slice key) const {
+    return versions_->current()->truncated(key) ? Status::Config : Status::Ok;
+}
+
+Status DbImpl::truncate_below(Slice key) {
+    if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
+    if (key.empty()) return Status::Ok;      // nothing sorts below the empty key
+
+    // Monotone, and the check is here rather than only in `Version::apply` so that a repeated call
+    // costs no manifest write at all. Idempotence is the property that makes this safe to drive
+    // from a loop that does not track what it already asked for.
+    if (!(versions_->current()->truncation_point() < key.to_string())) return Status::Ok;
+
+    // **The memtables are deliberately left alone.** The read clamp hides keys below the point
+    // wherever they live, memtable included, so touching them would change no answer — and it is
+    // not even the optimisation it looks like: the skiplist cannot unlink a node, so `remove` adds
+    // a tombstone record. Truncating a memtable would therefore make it *larger*, turn its puts
+    // into tombstones, and still leave a file to flush. The whole-file reclaim collects that file
+    // afterwards for a fraction of the cost.
+    VersionEdit edit;
+    edit.truncation_point = key.to_string();
+    if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) return status;
+
+    // Whole files below the point are now unreadable and can go without a rewrite. Left to the
+    // maintenance loop rather than done here: it already owns file removal and its retention
+    // windows, and doing it inline would put an object-store round trip on the caller's thread.
+    invalidate_maintenance();
+    return Status::Ok;
 }
 
 Status DbImpl::write(WriteBatch& batch) {
@@ -439,6 +479,11 @@ Status DbImpl::write(WriteBatch& batch) {
         const Status status = check_entry_size(Slice::from(op.key),
                                                op.is_delete ? Slice() : Slice::from(op.value));
         if (status != Status::Ok) return status;
+        // Checked in the same pass and for the same reason: a batch lands whole or not at all, so
+        // a key under the floor has to be found before anything is applied.
+        if (Status below = check_below_truncation(Slice::from(op.key)); below != Status::Ok) {
+            return below;
+        }
     }
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
@@ -1094,6 +1139,10 @@ std::vector<FileMetadata> DbImpl::delete_obsolete(const std::vector<FileMetadata
 }
 
 Result<Pinned> DbImpl::get(Slice key) {
+    // Below the truncation point is absence, and absence is not an error — the same answer a
+    // deleted key gives, reached without touching a single file.
+    if (versions_->current()->truncated(key)) return std::unexpected(Status::NotFound);
+
     std::shared_ptr<SkiplistMemtable> mem;
     std::shared_ptr<SkiplistMemtable> imm;
     {
@@ -1148,6 +1197,16 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
         imm = imm_;
     }
     auto version = versions_->current();
+
+    // Truncated keys are not skipped entry by entry: the scan simply starts above them. Clamping
+    // the lower bound also serves a reverse scan, whose stop condition is that same bound — so one
+    // clamp covers both directions and neither pays per entry.
+    std::string clamped;
+    if (!version->truncation_point().empty() &&
+        (lower.empty() || lower < Slice::from(version->truncation_point()))) {
+        clamped = version->truncation_point();
+        lower = Slice::from(clamped);
+    }
 
     std::vector<std::unique_ptr<InternalIterator>> children;
     std::vector<std::shared_ptr<SkiplistMemtable>> memtables;

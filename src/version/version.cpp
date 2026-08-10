@@ -73,6 +73,21 @@ std::vector<FileMetadata> Version::all_files() const {
     return result;
 }
 
+std::vector<FileMetadata> Version::files_entirely_truncated() const {
+    std::vector<FileMetadata> dead;
+    if (truncation_point_.empty()) return dead;
+    const Slice point = Slice::from(truncation_point_);
+    for (const auto& files : levels_) {
+        for (const FileMetadata& file : files) {
+            // The bound is the file's own largest key, so a file is only dead when *every* key in
+            // it is below the point. A file straddling the point keeps its live half and is
+            // narrowed by compaction instead.
+            if (Slice::from(file.largest_key) < point) dead.push_back(file);
+        }
+    }
+    return dead;
+}
+
 std::shared_ptr<const Version> Version::apply(const Version& base, const VersionEdit& edit) {
     std::vector<std::vector<FileMetadata>> levels = base.levels_;
 
@@ -101,8 +116,14 @@ std::shared_ptr<const Version> Version::apply(const Version& base, const Version
 
     const uint64_t next_file_number =
         std::max(base.next_file_number_, edit.next_file_number);
+
+    // Monotone: an edit can only move the point forward. Replaying the manifest is therefore
+    // idempotent, and an edit that arrives after a later one cannot bring truncated keys back.
+    std::string truncation_point = base.truncation_point_;
+    if (edit.truncation_point > truncation_point) truncation_point = edit.truncation_point;
+
     return std::make_shared<const Version>(std::move(levels), next_file_number,
-                                           std::move(pointers));
+                                           std::move(pointers), std::move(truncation_point));
 }
 
 }  // namespace elysiumkv
