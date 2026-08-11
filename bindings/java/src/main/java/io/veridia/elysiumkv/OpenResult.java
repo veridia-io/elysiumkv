@@ -1,6 +1,5 @@
 package io.veridia.elysiumkv;
 
-import java.util.Collections;
 import java.util.List;
 
 /**
@@ -20,7 +19,12 @@ public final class OpenResult {
     OpenResult(ElysiumKV db, List<String> discardedStores, long discardedFiles,
                boolean requiresRecovery) {
         this.db = db;
-        this.discardedStores = Collections.unmodifiableList(discardedStores);
+        // `List.copyOf`, not `unmodifiableList`. The latter is a *view*: it makes this reference
+        // read-only while leaving the caller's list writable underneath it, so the safety depends on
+        // the caller never keeping a reference — true today, and exactly the kind of thing that
+        // stops being true later without anything here changing. Copying settles it locally, at the
+        // cost of a handful of strings once per open.
+        this.discardedStores = List.copyOf(discardedStores);
         this.discardedFiles = discardedFiles;
         this.requiresRecovery = requiresRecovery;
     }

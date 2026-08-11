@@ -186,6 +186,23 @@ protected:
                "races it rather than testing it";
     }
 
+    /// Settles the store, waits for the coordinator to catch up with it, and only then takes the
+    /// clock out of the gate.
+    ///
+    /// **One call, because the three steps are meaningless apart.** Once the clock is suppressed the
+    /// only thing left that can open the gate is `epoch != last_reconciled_epoch_` — so suppressing
+    /// while the coordinator is still behind leaves it armed on state, and its next tick does the
+    /// very work the control says is impossible. Whether that happens depends on how busy the
+    /// machine is, which is why every instance of it has been found on CI and none locally.
+    ///
+    /// Written as one step after the third of those: the pairing had been fixed twice by hand and
+    /// missed once, which is the point at which a convention should stop being a convention.
+    void suppress_timed_maintenance() {
+        wait_until_quiescent();
+        wait_until_the_gate_is_closed();
+        engine().suppress_timed_maintenance_for_test(true);
+    }
+
     TestStore store_{2};
     Options options_;
     std::atomic<uint64_t> now_{1'000'000};
@@ -221,9 +238,7 @@ TEST_F(MaintenanceTest, WithoutATimedReconcileTheQuietStoreNeverRescuesAnything)
     write(60);
     ASSERT_EQ(db_->flush(), Status::Ok);
     ASSERT_TRUE(settle([&] { return files_on(0) > 0; }));
-    wait_until_quiescent();
-    wait_until_the_gate_is_closed();
-    engine().suppress_timed_maintenance_for_test(true);
+    suppress_timed_maintenance();
 
     // Sampled *before* the window opens, because the two ways this can fail need different answers
     // and telling them apart afterwards is not possible: a rescue installs a version, so the epoch
@@ -339,11 +354,10 @@ TEST_F(MaintenanceTest, WithTheClockOutOfTheGateTheUnInvalidatedPredicateNeverRu
     open(base(capacity_bound_options()));
     engine().pin_maintenance_epoch_for_test(true);
     engine().suppress_maintenance_wakes_for_test(true);
-    // Same wait as the positive case, and here it is what the test *is*: a coordinator that has not
-    // yet caught up opens the gate once, drains the capacity, and the assertion below then fails on
-    // a slow machine while passing on a fast one. That is how this failed under tsan on macOS.
-    ASSERT_TRUE(settle([&] { return engine().maintenance_gate_closed_for_test(); }));
-    engine().suppress_timed_maintenance_for_test(true);
+    // Here the wait is what the test *is*: a coordinator that has not yet caught up opens the gate
+    // once, drains the capacity, and the assertion below then fails on a slow machine while passing
+    // on a fast one. That is how this failed under tsan on macOS.
+    suppress_timed_maintenance();
 
     fill_over_capacity();
     EXPECT_FALSE(settle([&] { return tier(0).bytes <= kTierBudget; },
@@ -760,10 +774,10 @@ TEST_F(ConvergenceTest, PlacementConvergesOnAStoreThatHasGoneQuiet) {
 TEST_F(ConvergenceTest, WithNoTimedReconcileItDoesNotConverge) {
     open(converging_options());
     fill();
-    // Suppressed *after* the store is quiescent, so the only change left for anything to notice is
-    // the clock — and the clock has been taken out of the gate.
-    wait_until_quiescent();
-    engine().suppress_timed_maintenance_for_test(true);
+    // Suppressed *after* the store is quiescent and the coordinator has caught up with it, so the
+    // only change left for anything to notice is the clock — and the clock has been taken out of
+    // the gate.
+    suppress_timed_maintenance();
     go_quiet();
 
     EXPECT_FALSE(settle([&] { return convergence_failure().empty(); },

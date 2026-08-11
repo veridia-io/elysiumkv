@@ -466,22 +466,8 @@ jobs:
             --benchmark_format=json > bench-results.json
       # The first run on a given OS has nothing to compare against: it writes the
       # baseline and passes. The gate is live from the second main build onward.
-      #
-      # ===================== TEMPORARY: THE RATCHET IS OFF =====================
-      # `--update` overwrites the baseline and returns success without comparing,
-      # so this step currently gates nothing. It is here because the benchmarks
-      # changed shape — the prefix-scan store is no longer rebuilt inside the
-      # measurement and no engine threads run during it — so every stored
-      # baseline describes a different experiment and would read as a change
-      # nobody made.
-      #
-      # **Remove `--update` once each OS in the matrix has recorded one baseline
-      # on main.** That is one green push per runner; the step name says so in
-      # the CI log until it happens, because a disabled gate that looks enabled
-      # is the failure mode worth designing out.
-      # =========================================================================
-      - name: Check against baseline (RATCHET DISABLED — rebaselining)
-        run: python3 bench/check_regression.py bench-results.json --update
+      - name: Check against baseline
+        run: python3 bench/check_regression.py bench-results.json
 
       # Only main ratchets the stored baseline, so a slow PR cannot raise the bar
       # for the PRs behind it. The run number keeps the key unique — cache
