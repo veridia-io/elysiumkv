@@ -441,8 +441,15 @@ Status DbImpl::delete_range(Slice lower, Slice upper) {
     // engine could not tell it from one made before the truncation; a *delete* below the floor asks
     // for something already true, so the honest answer is to narrow the range to the part that
     // still exists and get on with it.
+    //
+    // The version is held in a named variable for the length of the check. `current()` hands back
+    // the `shared_ptr` **by value**, so `current()->truncation_point()` yields a reference into a
+    // Version whose last owner dies at the semicolon — and a compaction installing a new version at
+    // that moment frees the string this is still reading. Binding a reference to a member of a
+    // temporary's pointee extends nothing.
+    auto version = versions_->current();
     std::string clamped;
-    const std::string& floor = versions_->current()->truncation_point();
+    const std::string& floor = version->truncation_point();
     if (!floor.empty() && lower < Slice::from(floor)) {
         clamped = floor;
         lower = Slice::from(clamped);
