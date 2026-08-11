@@ -70,6 +70,14 @@ public:
     /// Installs generation 1 holding an empty version.
     Status create();
 
+    /// The current version, by value.
+    ///
+    /// **Hold the returned pointer for as long as anything reads into the Version.** A compaction
+    /// or a flush installs a new version at any moment, and the old one is destroyed as soon as its
+    /// last owner goes — so `current()->truncation_point()` yields a reference that is dangling by
+    /// the next statement, since the temporary owner dies at the semicolon and binding a reference
+    /// to a member of its pointee extends nothing. Copying out of the expression is fine; keeping a
+    /// reference into it is not. This shipped once, in `delete_range`, and tsan found it.
     std::shared_ptr<const Version> current() const;
 
     /// Persists the edit, *then* swaps in the new version. A failure to persist

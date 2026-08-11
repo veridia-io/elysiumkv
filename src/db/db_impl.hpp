@@ -193,7 +193,6 @@ public:
     /// test fail on CI while passing locally.
     void pin_transient_stall_for_test(std::optional<bool> state) {
         pinned_transient_stall_.store(state.has_value() ? (*state ? 1 : 0) : -1);
-        if (state.has_value()) transient_stalled_.store(*state);
     }
     /// ARCHITECTURE.md "Negative controls" — **the engine as it was**: the coordinator's clock plays
     /// no part, so neither a time transition nor the periodic bypass opens the gate and only an
@@ -213,7 +212,19 @@ public:
     uint64_t maintenance_epoch_for_test() const { return maintenance_epoch(); }
     /// The published transient-tier stall state. One evaluator: the coordinator computes it, the
     /// write path reads it. See `publish_transient_stall`.
-    bool transient_stalled() const { return transient_stalled_.load(); }
+    ///
+    /// **The test pin is applied here rather than written into the flag**, and that is a race fix
+    /// rather than a tidying. Writing it meant `publish_transient_stall` — which reads the pin,
+    /// then scans every file, then stores — could begin before the pin was set and finish after,
+    /// putting the computed value back over it. The window is the length of a scan, which under a
+    /// sanitizer is long enough to lose; it failed on Linux under tsan. Deciding at the point of
+    /// use removes the window instead of narrowing it, and leaves exactly one place that knows the
+    /// pin exists.
+    bool transient_stalled() const {
+        const int pinned = pinned_transient_stall_.load();
+        if (pinned >= 0) return pinned != 0;
+        return transient_stalled_.load();
+    }
     void mark_recovery_complete() override { requires_recovery_.store(false); }
 
 private:
