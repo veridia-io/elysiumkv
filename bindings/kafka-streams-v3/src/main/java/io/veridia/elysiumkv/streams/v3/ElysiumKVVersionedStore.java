@@ -6,6 +6,9 @@ import io.veridia.elysiumkv.ElysiumKVOptions;
 import io.veridia.elysiumkv.WriteBatch;
 import java.io.File;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -15,10 +18,20 @@ import org.apache.kafka.streams.processor.BatchingStateRestoreCallback;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.query.FailureReason;
+import org.apache.kafka.streams.query.MultiVersionedKeyQuery;
 import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.query.PositionBound;
+import org.apache.kafka.streams.query.Query;
+import org.apache.kafka.streams.query.QueryConfig;
+import org.apache.kafka.streams.query.QueryResult;
+import org.apache.kafka.streams.query.ResultOrder;
+import org.apache.kafka.streams.query.VersionedKeyQuery;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.VersionedBytesStore;
 import org.apache.kafka.streams.state.VersionedKeyValueStore;
+import org.apache.kafka.streams.state.VersionedRecord;
+import org.apache.kafka.streams.state.VersionedRecordIterator;
 
 /**
  * A Kafka Streams versioned store backed by a single ElysiumKV store.
@@ -418,6 +431,147 @@ public class ElysiumKVVersionedStore implements VersionedBytesStore {
             buffer.duplicate().get(bytes);
             return bytes;
         }
+    }
+
+    // --- interactive queries -------------------------------------------------
+
+    /**
+     * Answers an IQv2 query. The metered layer above serializes the key and asks in {@code Bytes},
+     * then deserializes what comes back with the <em>plain</em> value serde — so the records here
+     * carry the raw value with the timestamp beside it, not the {@code timestamp ‖ value} form the
+     * store surface returns.
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public <R> QueryResult<R> query(Query<R> query, PositionBound positionBound, QueryConfig config) {
+        if (!PositionBounds.isPermitted(getPosition(), positionBound, partition())) {
+            return QueryResult.notUpToBound(getPosition(), positionBound, partition());
+        }
+
+        QueryResult<R> result;
+        try {
+            if (query instanceof VersionedKeyQuery) {
+                final VersionedKeyQuery<Bytes, byte[]> single =
+                        (VersionedKeyQuery<Bytes, byte[]>) query;
+                result = (QueryResult<R>) QueryResult.forResult(
+                        versionAt(single.key(),
+                                  single.asOfTimestamp().map(Instant::toEpochMilli).orElse(null)));
+            } else if (query instanceof MultiVersionedKeyQuery) {
+                final MultiVersionedKeyQuery<Bytes, byte[]> multi =
+                        (MultiVersionedKeyQuery<Bytes, byte[]>) query;
+                result = (QueryResult<R>) QueryResult.forResult(versionsBetween(multi));
+            } else {
+                return QueryResult.forUnknownQueryType(query, this);
+            }
+        } catch (Exception e) {
+            return QueryResult.forFailure(
+                    FailureReason.STORE_EXCEPTION,
+                    query.getClass().getSimpleName() + " failed on store '" + name + "': " + e);
+        }
+
+        result.setPosition(getPosition());
+        if (config.isCollectExecutionInfo()) {
+            result.addExecutionInfo(query.getClass().getSimpleName() + " served by " + name);
+        }
+        return result;
+    }
+
+    private Integer partition() {
+        return context == null ? null : context.taskId().partition();
+    }
+
+    /** One version, as of a time or as of now. Null for a key that had no value then. */
+    private VersionedRecord<byte[]> versionAt(Bytes key, Long asOf) {
+        final byte[] timestamped = asOf == null ? get(key) : get(key, asOf);
+        if (timestamped == null) return null;
+        return new VersionedRecord<>(valueOf(timestamped), timestampOf(timestamped));
+    }
+
+    /**
+     * Every version of a key whose validity overlaps the asked-for interval.
+     *
+     * <p>A version is included when it began at or before {@code toTime} and had not yet been
+     * superseded at {@code fromTime} — the question is which versions <em>were in force</em> during
+     * the interval, not which were written during it. So the version current before the interval
+     * began is part of the answer.
+     *
+     * <p>Collected rather than streamed, because a version's {@code validTo} is the next version's
+     * timestamp: the answer for one entry is not known until the following one has been read, and
+     * the newest needs to know there is nothing after it. One key's versions within the history
+     * retention are bounded by how often that key was written, which is what a caller asking for
+     * them has already accepted.
+     */
+    private VersionedRecordIterator<byte[]> versionsBetween(MultiVersionedKeyQuery<Bytes, byte[]> q) {
+        final Bytes key = q.key();
+        final long fromTime = q.fromTime().map(Instant::toEpochMilli).orElse(Long.MIN_VALUE);
+        final long toTime = q.toTime().map(Instant::toEpochMilli).orElse(Long.MAX_VALUE);
+
+        final List<VersionedRecord<byte[]>> ordered = new ArrayList<>();
+        final List<Long> stamps = new ArrayList<>();   // when each collected version began
+        final List<byte[]> stored = new ArrayList<>();
+
+        // History, oldest first, across the live band.
+        for (long segment = firstLiveSegment(); segment <= lastLiveSegment(); ++segment) {
+            try (ElysiumKVIterator it = db.iterator(
+                         VersionedKeys.historyLowerBound(key, segment, 0L).get(),
+                         exclusive(VersionedKeys.historyUpperBound(key, segment, Long.MAX_VALUE)
+                                           .get()))) {
+                while (it.next()) {
+                    final byte[] storeKey = new byte[it.key().remaining()];
+                    it.key().duplicate().get(storeKey);
+                    if (!VersionedKeys.isHistoryEntryFor(storeKey, key)) continue;
+                    final byte[] value = new byte[it.value().remaining()];
+                    it.value().duplicate().get(value);
+                    stamps.add(VersionedKeys.timestampOfValue(value));
+                    stored.add(value);
+                }
+            }
+        }
+
+        final byte[] latest = db.getCopy(VersionedKeys.latestKey(key).get());
+        if (latest != null) {
+            stamps.add(VersionedKeys.timestampOfValue(latest));
+            stored.add(latest);
+        }
+
+        for (int i = 0; i < stored.size(); ++i) {
+            final long validFrom = stamps.get(i);
+            // The newest version has no successor, so it is still in force.
+            final Long validTo = i + 1 < stored.size() ? stamps.get(i + 1) : null;
+            if (validFrom > toTime) continue;
+            if (validTo != null && validTo <= fromTime) continue;
+            if (VersionedKeys.isTombstone(stored.get(i))) continue;  // a deletion is not a value
+            final byte[] value = VersionedKeys.toTimestampedFormat(stored.get(i));
+            ordered.add(validTo == null
+                                ? new VersionedRecord<>(valueOf(value), validFrom)
+                                : new VersionedRecord<>(valueOf(value), validFrom, validTo));
+        }
+
+        if (q.resultOrder() == ResultOrder.DESCENDING) Collections.reverse(ordered);
+        return new ListVersionedRecordIterator(ordered);
+    }
+
+    /** The collected versions, handed out under the interface Streams expects. */
+    private static final class ListVersionedRecordIterator
+            implements VersionedRecordIterator<byte[]> {
+        private final java.util.Iterator<VersionedRecord<byte[]>> delegate;
+
+        ListVersionedRecordIterator(List<VersionedRecord<byte[]>> records) {
+            this.delegate = records.iterator();
+        }
+
+        @Override
+        public boolean hasNext() {
+            return delegate.hasNext();
+        }
+
+        @Override
+        public VersionedRecord<byte[]> next() {
+            return delegate.next();
+        }
+
+        @Override
+        public void close() {}
     }
 
     // --- lifecycle -----------------------------------------------------------
