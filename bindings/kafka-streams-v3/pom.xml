@@ -31,10 +31,39 @@
     A Kafka Streams state store backed by ElysiumKV, so state can live on tiered storage instead of
     local disk alone. Built against the Kafka 3.x StateStore interface.
   </description>
+  <url>https://github.com/veridia-io/elysiumkv</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/licenses/MIT</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>veridia</id>
+      <name>Veridia</name>
+      <email>oss@veridia.io</email>
+      <organization>Veridia</organization>
+      <organizationUrl>https://github.com/veridia-io</organizationUrl>
+    </developer>
+  </developers>
+
+  <scm>
+    <url>https://github.com/veridia-io/elysiumkv</url>
+    <connection>scm:git:git://github.com/veridia-io/elysiumkv.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/veridia-io/elysiumkv.git</developerConnection>
+  </scm>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>11</maven.compiler.release>
+    <!-- The engine this adapter is built against. A property rather than a literal so the release
+         can point it at the version being published, from the same tag that names both. Adapter
+         and engine are versioned together: they share a repository and a release. -->
+    <elysiumkv.version>0.0.0-SNAPSHOT</elysiumkv.version>
     <kafka.version>3.9.1</kafka.version>
     <junit.version>5.13.4</junit.version>
   </properties>
@@ -43,7 +72,7 @@
     <dependency>
       <groupId>io.veridia</groupId>
       <artifactId>elysiumkv</artifactId>
-      <version>0.0.0-SNAPSHOT</version>
+      <version>${elysiumkv.version}</version>
     </dependency>
 
     <dependency>
@@ -80,6 +109,81 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.11.2</version>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <!-- Same reasoning as the engine binding: the docs here are prose about behaviour, and
+               doclint would fail the build over missing @param tags on self-evident setters. -->
+          <additionalJOptions><additionalJOption>-Xdoclint:none</additionalJOption></additionalJOptions>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.9.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <!-- Publish without a manual step in the Central UI, and do not report success until
+               Central says it is published: a deploy that returns while validation is still
+               pending would let a failed release look green. -->
+          <autoPublish>true</autoPublish>
+          <waitUntil>published</waitUntil>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.7</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+              </execution>
+            </executions>
+            <configuration>
+              <!-- Loopback pinentry with no agent: a runner has no interactive terminal, and the
+                   passphrase arrives through MAVEN_GPG_PASSPHRASE. -->
+              <useAgent>false</useAgent>
+              <gpgArguments>
+                <arg>--batch</arg>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
