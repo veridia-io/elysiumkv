@@ -145,13 +145,22 @@ protected:
 
     int files_on(int tier_index) { return tier(tier_index).file_count; }
 
-    /// Waits until nothing has invalidated the coordinator's epoch for several ticks.
+    /// Waits until nothing has invalidated the coordinator's epoch for several ticks **and the
+    /// coordinator has caught up with it**.
     ///
     /// **A control that takes the clock out of the gate needs this, and is racy without it.** The
     /// gate opens on *any* epoch change, and an executor that did work invalidates the epoch — so
     /// for a while after the last `put`, reconciles keep happening for reasons that have nothing to
     /// do with time. One of them would observe the advanced clock and do exactly the work the
     /// control asserts cannot happen. "No writes are arriving" is not the same as "quiescent".
+    ///
+    /// **A stable epoch is not enough, which is the subtler half.** Once the clock is out of the
+    /// gate, the only thing that can open it is `epoch != last_reconciled_epoch_` — so a reading
+    /// that has been stable for several ticks while the coordinator has not yet *reconciled* it
+    /// leaves the gate armed, and the next tick opens it and does the work anyway. Sampling the
+    /// epoch says the store stopped changing; it does not say the coordinator noticed. Waiting on
+    /// `maintenance_gate_closed_for_test` is what says that, and the header points here in as many
+    /// words: a guess about how many ticks is long enough was wrong on a loaded CI runner.
     void wait_until_quiescent() {
         uint64_t last = engine().maintenance_epoch_for_test();
         int stable = 0;
@@ -159,7 +168,8 @@ protected:
         while (stable < 5 && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(kTick);
             const uint64_t now = engine().maintenance_epoch_for_test();
-            stable = now == last ? stable + 1 : 0;
+            const bool caught_up = engine().maintenance_gate_closed_for_test();
+            stable = (now == last && caught_up) ? stable + 1 : 0;
             last = now;
         }
         EXPECT_GE(stable, 5) << "the store never settled, so nothing after this is a clean control";
@@ -203,9 +213,21 @@ TEST_F(MaintenanceTest, WithoutATimedReconcileTheQuietStoreNeverRescuesAnything)
     wait_until_quiescent();
     engine().suppress_timed_maintenance_for_test(true);
 
+    // Sampled *before* the window opens, because the two ways this can fail need different answers
+    // and telling them apart afterwards is not possible: a rescue installs a version, so the epoch
+    // moves whenever the test fails and comparing it across the window says nothing. Whether the
+    // gate was already armed when the window opened is the question, and it can only be asked here.
+    const bool armed_before_the_window = !engine().maintenance_gate_closed_for_test();
+
     advance(Duration(300'000));
     EXPECT_FALSE(settle([&] { return files_on(0) == 0; }, std::chrono::milliseconds(400)))
-        << "with no timed reconcile the file must sit there — that is the defect being fixed";
+        << "with no timed reconcile the file must sit there — that is the defect being fixed"
+        << (armed_before_the_window
+                    ? "; the gate was already armed by an epoch change before the clock moved, so "
+                      "work left over from the flush completed late and this is the control racing "
+                      "its own setup rather than the engine rescuing on time"
+                    : "; the gate was closed when the window opened, so nothing but the clock can "
+                      "have opened it");
 }
 
 // The same for a durable-to-durable age migration, which is the lowest-priority background task
