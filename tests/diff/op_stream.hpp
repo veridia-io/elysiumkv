@@ -23,6 +23,11 @@ struct DiffOp {
         /// Drops every key below `key`. Durable the moment it returns, so a kill does not undo
         /// it — which is why the replay applies it to the post-crash oracle as well.
         TruncateBelow,
+        /// Deletes `[key, upper)`. **Unlike a truncation this is not durable when it returns**: it
+        /// is a record in the memtable, so a kill before the next flush loses it and the keys come
+        /// back. The replay therefore applies it to the live oracle and *not* to the post-crash
+        /// one, which is the distinction between the two operations stated as a test.
+        DeleteRange,
         /// The same three scans descending. Compared against the oracle's answer reversed, so the
         /// bar is not merely "descending" but "the same set, in the opposite order" — a reverse
         /// scan that dropped or duplicated an entry passes an ordering check and fails this one.

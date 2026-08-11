@@ -13,8 +13,11 @@ bool is_overlapping_level(int level, const ResolvedLevel& config) {
 
 void widen(const std::vector<FileMetadata>& files, std::string& lower, std::string& upper) {
     for (const FileMetadata& file : files) {
-        if (lower.empty() || file.smallest_key < lower) lower = file.smallest_key;
-        if (upper.empty() || file.largest_key > upper) upper = file.largest_key;
+        // Effective, not data: a file's range tombstones widen what it must be merged against.
+        const std::string file_low = file.effective_smallest();
+        const std::string file_high = file.effective_largest();
+        if (lower.empty() || file_low < lower) lower = file_low;
+        if (upper.empty() || file_high > upper) upper = file_high;
     }
 }
 

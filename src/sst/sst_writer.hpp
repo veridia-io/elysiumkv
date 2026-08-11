@@ -30,6 +30,12 @@ struct SstBuildResult {
     uint64_t num_tombstones = 0;
     std::string smallest_key;
     std::string largest_key;
+    uint64_t num_range_tombstones = 0;
+    /// The span the file's range tombstones cover, which is **not** bounded by `smallest_key` and
+    /// `largest_key`: a file can delete a range it holds no keys in at all, and a reader that
+    /// consulted only the data span would walk straight past the tombstone that answers its query.
+    std::string smallest_range_key;
+    std::string largest_range_key;
 };
 
 /// ARCHITECTURE.md "Inside an SST" — builds a whole SST in memory. A `BlobStore` has no streaming write, so
@@ -44,6 +50,11 @@ public:
     /// level (ARCHITECTURE.md "Compaction").
     void add(Slice key, ValueType type, Slice value);
 
+    /// Records a range delete carried by this file. Bounds must arrive sorted and disjoint —
+    /// fragmentation is the caller's job, because only the caller knows which overlapping ranges
+    /// are still live.
+    void add_range_tombstone(Slice lower, Slice upper);
+
     uint64_t num_entries() const { return num_entries_; }
     /// What the file would weigh if finished now — the input to output cutting.
     size_t estimated_bytes() const;
@@ -56,12 +67,16 @@ private:
     SstOptions options_;
     BlockBuilder data_block_;
     BlockBuilder index_block_;
+    BlockBuilder range_del_block_;
     BloomBuilder bloom_;
     std::string file_;
     std::string smallest_key_;
     std::string largest_key_;
     uint64_t num_entries_ = 0;
     uint64_t num_tombstones_ = 0;
+    uint64_t num_range_tombstones_ = 0;
+    std::string smallest_range_key_;
+    std::string largest_range_key_;
     bool finished_ = false;
 };
 
@@ -71,8 +86,11 @@ private:
 /// `drop_tombstones` is set only when the output lands in the bottommost level
 /// that could contain the key — ARCHITECTURE.md "Compaction" admits no other condition, because without
 /// snapshots there is nothing else to consider.
+///
+/// `range_tombstones` must already be a sorted disjoint cover — `merge_ranges` produces one.
 Result<SstBuildResult> build_sst(InternalIterator& source, const SstOptions& options,
-                                 bool drop_tombstones = false);
+                                 bool drop_tombstones = false,
+                                 const std::vector<RangeTombstone>& range_tombstones = {});
 
 }  // namespace elysiumkv
 

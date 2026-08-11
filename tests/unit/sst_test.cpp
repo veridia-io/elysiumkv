@@ -206,6 +206,106 @@ TEST_P(SstTest, PinnedValuesOutliveTheirReader) {
     EXPECT_GT(pin->size(), 0u);
 }
 
+// --- range tombstones ----------------------------------------------------------
+
+/* A range tombstone rides in its own block and is addressed by seek, not by scanning.
+ *
+ * **The file's own entries are deliberately unaffected by its own tombstone.** That rule is what
+ * makes range deletes implementable without sequence numbers: within one file there is no ordering
+ * to appeal to, so a tombstone shadows everything strictly older in `(level, file_number)` order
+ * and nothing beside it. `range_deletes` answers only the shadowing question; the caller asks it
+ * after finding no point entry here.
+ */
+TEST_P(SstTest, ARangeTombstoneCoversItsHalfOpenIntervalAndNothingElse) {
+    SstOptions options;
+    options.compression = GetParam();
+    SstWriter writer(options);
+    for (const Entry& e : sample(40)) writer.add(Slice::from(e.key), e.type, Slice::from(e.value));
+    writer.add_range_tombstone(Slice::from("user:00000010"), Slice::from("user:00000020"));
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(store_.put(kName, Slice::from(built->bytes)).get(), Status::Ok);
+    file_size_ = built->bytes.size();
+
+    auto reader = open();
+    ASSERT_NE(reader, nullptr);
+    ASSERT_TRUE(reader->has_range_tombstones());
+
+    EXPECT_FALSE(*reader->range_deletes(Slice::from("user:00000009")));
+    EXPECT_TRUE(*reader->range_deletes(Slice::from("user:00000010"))) << "lower bound is included";
+    EXPECT_TRUE(*reader->range_deletes(Slice::from("user:00000015")));
+    EXPECT_FALSE(*reader->range_deletes(Slice::from("user:00000020"))) << "upper bound is excluded";
+    EXPECT_FALSE(*reader->range_deletes(Slice::from("user:00000021")));
+
+    // The entries themselves are still there: shadowing is a question about older files.
+    auto found = reader->get(Slice::from("user:00000015"));
+    ASSERT_TRUE(found.has_value());
+    EXPECT_TRUE(found->has_value()) << "the file's own entry survives the file's own tombstone";
+}
+
+TEST_P(SstTest, SeveralRangeTombstonesAreEachAddressable) {
+    SstOptions options;
+    options.compression = GetParam();
+    SstWriter writer(options);
+    for (const Entry& e : sample(40)) writer.add(Slice::from(e.key), e.type, Slice::from(e.value));
+    writer.add_range_tombstone(Slice::from("a"), Slice::from("b"));
+    writer.add_range_tombstone(Slice::from("m"), Slice::from("n"));
+    writer.add_range_tombstone(Slice::from("y"), Slice::from("z"));
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(store_.put(kName, Slice::from(built->bytes)).get(), Status::Ok);
+    file_size_ = built->bytes.size();
+
+    auto reader = open();
+    ASSERT_NE(reader, nullptr);
+    for (const char* covered : {"a", "aa", "m", "mm", "y", "yy"}) {
+        EXPECT_TRUE(*reader->range_deletes(Slice::from(covered))) << covered;
+    }
+    for (const char* clear : {"", "b", "l", "n", "x", "z", "zz"}) {
+        EXPECT_FALSE(*reader->range_deletes(Slice::from(clear))) << clear;
+    }
+
+    auto listed = reader->range_tombstones();
+    ASSERT_TRUE(listed.has_value());
+    ASSERT_EQ(listed->size(), 3u);
+    EXPECT_EQ((*listed)[0].lower, "a");
+    EXPECT_EQ((*listed)[2].upper, "z");
+}
+
+/* **A file with no range tombstones stays format v1.** The version is per file precisely so that
+ * adding this feature does not reformat a keyspace nobody deleted from — and so that a reader that
+ * predates range tombstones keeps reading those files, while refusing exactly the ones whose keys
+ * it would otherwise report as present.
+ */
+TEST_P(SstTest, AFileWithoutRangeTombstonesKeepsTheOlderFormatVersion) {
+    const SstBuildResult plain = write(sample(20));
+    EXPECT_EQ(plain.num_range_tombstones, 0u);
+    auto reader = open();
+    ASSERT_NE(reader, nullptr);
+    EXPECT_FALSE(reader->has_range_tombstones());
+    EXPECT_FALSE(*reader->range_deletes(Slice::from("user:00000005")))
+        << "a file with no tombstone block shadows nothing";
+}
+
+/* The covered span is reported separately from the data span, because it is not bounded by it: a
+ * file can delete a range it holds no keys in, and a read path that consulted only `smallest_key`
+ * and `largest_key` would walk past the tombstone that answers its query.
+ */
+TEST_P(SstTest, TheCoveredSpanIsReportedEvenWhereTheFileHoldsNoSuchKeys) {
+    SstOptions options;
+    options.compression = GetParam();
+    SstWriter writer(options);
+    writer.add(Slice::from("user:00000000"), ValueType::Put, Slice::from("v"));
+    writer.add_range_tombstone(Slice::from("zzz:aaa"), Slice::from("zzz:bbb"));
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+
+    EXPECT_EQ(built->largest_key, "user:00000000");
+    EXPECT_EQ(built->smallest_range_key, "zzz:aaa");
+    EXPECT_EQ(built->largest_range_key, "zzz:bbb")
+        << "the file deletes a range it holds no keys in, and must say so";
+}
+
 INSTANTIATE_TEST_SUITE_P(Codecs, SstTest,
                          ::testing::Values(Compression::None, Compression::Lz4,
                                            Compression::Zstd),

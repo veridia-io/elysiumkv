@@ -795,6 +795,17 @@ void JNICALL truncate_below(JNIEnv* env, jclass, jlong db, jbyteArray key, jint 
     });
 }
 
+void JNICALL delete_range(JNIEnv* env, jclass, jlong db, jbyteArray lower, jbyteArray upper) {
+    guard_void(env, [&] {
+        ByteArrayCopy lower_bytes(env, lower, env->GetArrayLength(lower));
+        if (env->ExceptionCheck()) return;
+        ByteArrayCopy upper_bytes(env, upper, env->GetArrayLength(upper));
+        if (env->ExceptionCheck()) return;
+        check(env, elysiumkv_delete_range(as_db(db), lower_bytes.data(), lower_bytes.size(),
+                                          upper_bytes.data(), upper_bytes.size()));
+    });
+}
+
 jboolean JNICALL iter_next(JNIEnv*, jclass, jlong iter) {
     return elysiumkv_iter_next(as_iter(iter)) ? JNI_TRUE : JNI_FALSE;
 }
@@ -1054,6 +1065,8 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(iter_create)},
     {const_cast<char*>("optionsConfigureCompaction"), const_cast<char*>("(JDJ)V"),
      reinterpret_cast<void*>(options_configure_compaction)},
+    {const_cast<char*>("deleteRange"), const_cast<char*>("(J[B[B)V"),
+     reinterpret_cast<void*>(delete_range)},
     {const_cast<char*>("truncateBelow"), const_cast<char*>("(J[BI)V"),
      reinterpret_cast<void*>(truncate_below)},
     {const_cast<char*>("iterCreateReverse"), const_cast<char*>("(J[BI[BI)J"),

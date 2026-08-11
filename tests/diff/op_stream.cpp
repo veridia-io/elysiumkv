@@ -83,6 +83,7 @@ std::string DiffOp::describe() const {
         case Kind::ScanRange: return "scan_range(" + quote(key) + ", " + quote(upper) + ")";
         case Kind::ScanPrefix: return "scan_prefix(" + quote(key) + ")";
         case Kind::TruncateBelow: return "truncate_below(" + quote(key) + ")";
+        case Kind::DeleteRange: return "delete_range(" + quote(key) + ", " + quote(upper) + ")";
         case Kind::ReverseScanAll: return "reverse_scan_all()";
         case Kind::ReverseScanRange:
             return "reverse_scan_range(" + quote(key) + ", " + quote(upper) + ")";
@@ -128,9 +129,20 @@ std::vector<DiffOp> generate_ops(uint64_t seed, int count, GeneratorOptions opti
         } else if (choice < 60) {
             op.kind = DiffOp::Kind::Remove;
             op.key = key_for(rng, options.distinct_keys);
-        } else if (choice < 74) {
+        } else if (choice < 72) {
             op.kind = DiffOp::Kind::Get;
             op.key = key_for(rng, options.distinct_keys);
+        } else if (choice < 74) {
+            op.kind = DiffOp::Kind::DeleteRange;
+            // Two keys from the ordinary keyspace, ordered — so most ranges land inside one
+            // cluster and some straddle several. Left unordered one time in eight, because an
+            // inverted range is a no-op the engine has to get right and a generator that only ever
+            // produced valid ones would never ask.
+            std::string a = key_for(rng, options.distinct_keys);
+            std::string b = key_for(rng, options.distinct_keys);
+            if (rng() % 8 != 0 && b < a) std::swap(a, b);
+            op.key = std::move(a);
+            op.upper = std::move(b);
         } else if (choice < 75) {
             op.kind = DiffOp::Kind::TruncateBelow;
             op.key = truncation_key_for(rng, options.distinct_keys);

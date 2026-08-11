@@ -220,6 +220,24 @@ public final class ElysiumKV implements ReadOnlyStore {
         Native.truncateBelow(handle(), key, key.length);
     }
 
+    /**
+     * Deletes every key in {@code [lower, upper)} — the counterpart to {@link #truncateBelow} for a
+     * range that is not a prefix of the keyspace. A tenant sitting in the middle of a keyspace is
+     * the case that needs it.
+     *
+     * <p>Bounds keep their meaning rather than their role: {@code lower} is included and
+     * {@code upper} is not, the same convention the iterators use. An empty or inverted range
+     * deletes nothing and is not an error, exactly as an iterator over those bounds yields nothing.
+     *
+     * <p><b>Not permanent, and not as cheap as a truncation.</b> The range may be written to again
+     * immediately and a later write wins. A truncation moves one value in the manifest; this writes
+     * a tombstone that reads in the range consult until compaction resolves it. Space returns as
+     * the covered files are rewritten, or at once for a file the range covers whole.
+     */
+    public void deleteRange(byte[] lower, byte[] upper) {
+        Native.deleteRange(handle(), lower, upper);
+    }
+
     // --- iteration -----------------------------------------------------------
 
     /** Half-open range scan; null bounds are unbounded. */

@@ -963,6 +963,22 @@ elysiumkv_status elysiumkv_put(elysiumkv_db* db, const uint8_t* key, size_t key_
     });
 }
 
+elysiumkv_status elysiumkv_delete_range(elysiumkv_db* db, const uint8_t* lower, size_t lower_len,
+                                        const uint8_t* upper, size_t upper_len) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr) return fail(Status::Config, "elysiumkv_delete_range: null db");
+        if (db->writes() == nullptr) {
+            return fail(Status::Config, "elysiumkv_delete_range: handle is read-only");
+        }
+        const Status status =
+            db->writes()->delete_range(as_slice(lower, lower_len), as_slice(upper, upper_len));
+        if (status != Status::Ok) {
+            return fail(status, std::string("delete_range: ") + std::string(status_name(status)));
+        }
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_truncate_below(elysiumkv_db* db, const uint8_t* key, size_t key_len) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_truncate_below: null db");

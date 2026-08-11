@@ -171,9 +171,13 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
         return std::unexpected(Status::Corrupt);
     }
 
-    // One read for the whole footer; the trailer is validated out of the same
-    // bytes, so a well-formed file costs a single round trip here.
-    const auto tail_len = static_cast<size_t>(Footer::kFooterLengthV1);
+    // One read for the whole footer; the trailer is validated out of the same bytes, so a
+    // well-formed file costs a single round trip here. Sized to the **widest** footer this build
+    // knows rather than to the version it hopes for — the width is only discoverable from the
+    // trailer, which is inside these bytes, so reading a v1 width first would cost a second round
+    // trip on every v2 file to fetch the twelve bytes it turned out to need.
+    const auto tail_len = static_cast<size_t>(
+        std::min<uint64_t>(file_size, static_cast<uint64_t>(Footer::kFooterLengthV2)));
     auto tail = store.get(name, file_size - tail_len, tail_len).get();
     if (!tail) return std::unexpected(tail.error());
     if (tail->size() != tail_len) return std::unexpected(Status::Corrupt);
@@ -181,7 +185,7 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
     const Slice tail_slice = Slice::from(*tail);
     auto footer_length = Footer::footer_length_from_trailer(tail_slice);
     if (!footer_length) return std::unexpected(footer_length.error());
-    if (*footer_length != Footer::kFooterLengthV1) return std::unexpected(Status::Corrupt);
+    if (static_cast<uint64_t>(*footer_length) > file_size) return std::unexpected(Status::Corrupt);
 
     auto footer = Footer::decode(tail_slice);
     if (!footer) return std::unexpected(footer.error());
@@ -263,6 +267,38 @@ Result<std::optional<SstReader::Found>> SstReader::get(Slice key) {
     if (entries.key() != key) return std::optional<Found>{};
 
     return std::optional<Found>(Found{*block, entries.value(), entries.type()});
+}
+
+Result<bool> SstReader::range_deletes(Slice key) {
+    if (!has_range_tombstones()) return false;
+    auto block = load_block(footer_.range_del);
+    if (!block) return std::unexpected(block.error());
+
+    // The tombstones are disjoint and sorted by lower bound, so the only candidate is the last one
+    // starting at or before `key` — one seek rather than a scan, which is why they are stored in an
+    // ordinary block rather than a bespoke list.
+    BlockIterator it(*block);
+    it.seek_for_prev(key);
+    if (!it.valid()) return it.status() == Status::Ok ? Result<bool>{false}
+                                                      : std::unexpected(it.status());
+    return key < it.value();
+}
+
+Result<std::vector<RangeTombstone>> SstReader::range_tombstones() {
+    std::vector<RangeTombstone> out;
+    if (!has_range_tombstones()) return out;
+    auto block = load_block(footer_.range_del);
+    if (!block) return std::unexpected(block.error());
+
+    BlockIterator it(*block);
+    for (it.seek_to_first(); it.valid(); it.next()) {
+        const Slice lower = it.key();
+        const Slice upper = it.value();
+        out.push_back(RangeTombstone{std::string(lower.data(), lower.data() + lower.size()),
+                                     std::string(upper.data(), upper.data() + upper.size())});
+    }
+    if (it.status() != Status::Ok) return std::unexpected(it.status());
+    return out;
 }
 
 std::unique_ptr<InternalIterator> SstReader::iterator() {

@@ -76,6 +76,7 @@ public:
     Status remove(Slice key) override;
     Status write(WriteBatch& batch) override;
     Status truncate_below(Slice key) override;
+    Status delete_range(Slice lower, Slice upper) override;
     Status check_below_truncation(Slice key) const;
 
     std::unique_ptr<Iterator> iterator() override;
@@ -141,6 +142,9 @@ public:
     /// interval. The sweep is idempotent and its patience comes from the clock, not from how often
     /// it is called.
     Status sweep_orphans_for_test() { return sweep_orphans(); }
+    /// One reclaim pass on the calling thread: files a truncation point or a range tombstone has
+    /// made unreadable, dropped by manifest edit alone.
+    bool reclaim_truncated_files_for_test(Status& status) { return reclaim_truncated_files(status); }
     /// One reconcile pass on the calling thread, so a test can drive the coordinator's decision
     /// without waiting for a tick. `force_full` bypasses the O(1) gate, which is what the
     /// periodic bypass does every minute in the running loop.

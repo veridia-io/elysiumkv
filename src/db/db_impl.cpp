@@ -427,6 +427,32 @@ Status DbImpl::put(Slice key, Slice value) {
     return maybe_freeze_memtable(false);
 }
 
+Status DbImpl::delete_range(Slice lower, Slice upper) {
+    if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
+    if (Status status = check_entry_size(lower, Slice()); status != Status::Ok) return status;
+    if (Status status = check_entry_size(upper, Slice()); status != Status::Ok) return status;
+
+    // Clamped rather than refused, unlike a `put`. A write below the floor is refused because the
+    // engine could not tell it from one made before the truncation; a *delete* below the floor asks
+    // for something already true, so the honest answer is to narrow the range to the part that
+    // still exists and get on with it.
+    std::string clamped;
+    const std::string& floor = versions_->current()->truncation_point();
+    if (!floor.empty() && lower < Slice::from(floor)) {
+        clamped = floor;
+        lower = Slice::from(clamped);
+    }
+    if (!(lower < upper)) return Status::Ok;   // deletes nothing, like an iterator over these bounds
+
+    if (Status status = throttle_writes(); status != Status::Ok) return status;
+    {
+        std::lock_guard<std::mutex> lock(mem_mutex_);
+        if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
+        mem_->delete_range(lower, upper);
+    }
+    return maybe_freeze_memtable(false);
+}
+
 Status DbImpl::remove(Slice key) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
     if (Status status = check_below_truncation(key); status != Status::Ok) return status;
@@ -548,7 +574,7 @@ bool DbImpl::memtable_flush_due(bool force) const {
     // nothing in it whose durability could be at risk, and flushing it would write an
     // empty file on every interval of an idle store.
     if (!options_.flush_interval.has_value()) return false;
-    if (mem_->num_entries() == 0) return false;
+    if (mem_->empty()) return false;
 
     const uint64_t now = now_ms();
     const uint64_t born = mem_->creation_time_ms();
@@ -561,7 +587,7 @@ Status DbImpl::freeze_and_flush_inline(bool force) {
         std::lock_guard<std::mutex> lock(mem_mutex_);
         if (imm_ == nullptr) {
             if (!memtable_flush_due(force)) return Status::Ok;
-            if (mem_->num_entries() == 0) return Status::Ok;
+            if (mem_->empty()) return Status::Ok;
             imm_ = std::move(mem_);
             mem_ = new_memtable();
         }
@@ -585,7 +611,7 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
 
     std::unique_lock<std::mutex> lock(mem_mutex_);
     if (!memtable_flush_due(force)) return Status::Ok;
-    if (mem_->num_entries() == 0 && imm_ == nullptr) return Status::Ok;
+    if (mem_->empty() && imm_ == nullptr) return Status::Ok;
 
     // Backpressure: one memtable may be in flight. Without a WAL there is
     // nowhere else to put writes, so the writer waits.
@@ -612,7 +638,7 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
             stalled_total_ms_.fetch_add(stall_ended - stall_began, std::memory_order_relaxed);
         }
     }
-    if (mem_->num_entries() == 0) return Status::Ok;
+    if (mem_->empty()) return Status::Ok;
 
     imm_ = std::move(mem_);
     mem_ = new_memtable();
@@ -871,9 +897,12 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     sst_options.bloom_bits_per_key = options_.bloom_bits_per_key;
     sst_options.compression = level.compression;
 
-    auto built = build_sst(*source, sst_options);
+    // A memtable that saw only a `delete_range` has no entries and still has something to say, so
+    // the emptiness test is over both.
+    const std::vector<RangeTombstone> ranges = memtable->range_tombstones();
+    auto built = build_sst(*source, sst_options, /*drop_tombstones=*/false, ranges);
     if (!built) return built.error();
-    if (built->num_entries == 0) return Status::Ok;
+    if (built->num_entries == 0 && built->num_range_tombstones == 0) return Status::Ok;
 
     // ARCHITECTURE.md "A tier is not a level" — placement from the memtable's age alone.
     const Tier& tier = tier_for(memtable->creation_time_ms());
@@ -890,6 +919,9 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     file.file_bytes = built->bytes.size();
     file.num_entries = built->num_entries;
     file.num_tombstones = built->num_tombstones;
+    file.num_range_tombstones = built->num_range_tombstones;
+    file.smallest_range_key = built->smallest_range_key;
+    file.largest_range_key = built->largest_range_key;
     file.compression = level.compression;
     // A flushed L0 file inherits its memtable's creation time (ARCHITECTURE.md "The manifest is snapshots plus edits"); this is
     // the only place the value originates.
@@ -1159,6 +1191,10 @@ Result<Pinned> DbImpl::get(Slice key) {
         imm = imm_;
     }
 
+    // Newest source first, and at each one the point entry is asked about before the range: a range
+    // tombstone shadows everything strictly older and nothing beside it, so a point entry here
+    // always wins over a range recorded here, whichever arrived first. The memtable resolved that
+    // ordering when the range was recorded, which is why this need not.
     for (const auto& memtable : {mem, imm}) {
         if (memtable == nullptr) continue;
         if (auto entry = memtable->get(key)) {
@@ -1166,6 +1202,7 @@ Result<Pinned> DbImpl::get(Slice key) {
             // The keep-alive is the memtable itself: its arena owns the bytes.
             return Pinned(memtable, entry->value, &pins_outstanding_);
         }
+        if (memtable->range_deletes(key)) return std::unexpected(Status::NotFound);
     }
 
     auto version = versions_->current();
@@ -1173,16 +1210,32 @@ Result<Pinned> DbImpl::get(Slice key) {
         // L0 is ordered by descending file number, so the first hit is the most
         // recent; deeper levels are non-overlapping, so there is at most one.
         for (const FileMetadata& file : version->files_at(level)) {
-            if (!file_may_contain(file, key)) continue;
+            // Either span can be the reason to open this file. The tombstone span is not bounded by
+            // the data span — a file can delete a range it holds no keys in — so a lookup that
+            // consulted only the data span would walk straight past the file that answers it.
+            const bool may_hold = file_may_contain(file, key);
+            const bool may_cover = file.range_may_cover(key);
+            if (!may_hold && !may_cover) continue;
 
             auto reader = reader_for(file);
             if (!reader) return std::unexpected(reader.error());
 
-            auto found = (*reader)->get(key);
-            if (!found) return std::unexpected(classify_read_failure(found.error()));
-            if (!found->has_value()) continue;
-            if ((*found)->type == ValueType::Delete) return std::unexpected(Status::NotFound);
-            return Pinned((*found)->block, (*found)->value, &pins_outstanding_);
+            if (may_hold) {
+                auto found = (*reader)->get(key);
+                if (!found) return std::unexpected(classify_read_failure(found.error()));
+                if (found->has_value()) {
+                    if ((*found)->type == ValueType::Delete) {
+                        return std::unexpected(Status::NotFound);
+                    }
+                    return Pinned((*found)->block, (*found)->value, &pins_outstanding_);
+                }
+            }
+            // No entry here, so the file's own range tombstones decide what every older file holds.
+            if (may_cover) {
+                auto covered = (*reader)->range_deletes(key);
+                if (!covered) return std::unexpected(classify_read_failure(covered.error()));
+                if (*covered) return std::unexpected(Status::NotFound);
+            }
         }
     }
     return std::unexpected(Status::NotFound);
@@ -1217,6 +1270,7 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
     }
 
     std::vector<std::unique_ptr<InternalIterator>> children;
+    std::vector<std::vector<RangeTombstone>> child_ranges;
     std::vector<std::shared_ptr<SkiplistMemtable>> memtables;
     std::vector<std::shared_ptr<SstReader>> readers;
 
@@ -1224,6 +1278,7 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
         if (memtable == nullptr) continue;
         memtables.push_back(memtable);
         children.push_back(reverse ? memtable->descending() : memtable->ascending());
+        child_ranges.push_back(memtable->range_tombstones());
     }
 
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
@@ -1233,14 +1288,24 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
             auto reader = reader_for(file);
             if (!reader) {
                 children.push_back(std::make_unique<ErrorIterator>(reader.error()));
+                child_ranges.emplace_back();
                 continue;
             }
             readers.push_back(*reader);
             children.push_back((*reader)->iterator());
+            auto ranges = (*reader)->range_tombstones();
+            if (!ranges) {
+                children.back() = std::make_unique<ErrorIterator>(
+                    classify_read_failure(ranges.error()));
+                child_ranges.emplace_back();
+                continue;
+            }
+            child_ranges.push_back(std::move(*ranges));
         }
     }
 
-    return std::make_unique<DbIterator>(make_merging_iterator(std::move(children)),
+    return std::make_unique<DbIterator>(make_merging_iterator(std::move(children),
+                                                             std::move(child_ranges)),
                                         std::move(version), std::move(memtables),
                                         std::move(readers), lower.to_string(), upper.to_string(),
                                         has_upper, reverse);
@@ -1362,7 +1427,7 @@ Stats DbImpl::stats() const {
             stats.memtable_bytes += memtable->approximate_bytes();
             stats.memtable_entries += memtable->num_entries();
             stats.memtable_tombstones += memtable->num_tombstones();
-            if (memtable->num_entries() == 0) continue;
+            if (memtable->empty()) continue;
             const uint64_t created = memtable->creation_time_ms();
             if (oldest_write == 0 || created < oldest_write) oldest_write = created;
         }
@@ -1483,7 +1548,7 @@ Status DbImpl::set_watermark(uint64_t position) {
     }
     established_watermark_ = position;
     if (mem_ != nullptr) {
-        if (mem_->num_entries() == 0) {
+        if (mem_->empty()) {
             // **Empty, so both bounds move.** There are no writes for a lower bound to be wrong
             // about, and every write this memtable goes on to accept is at a position above
             // `position` by the premise. Not merely an optimisation: this is the state right

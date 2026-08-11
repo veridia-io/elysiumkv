@@ -45,6 +45,19 @@ public:
     /// them (ARCHITECTURE.md "Compaction").
     std::unique_ptr<InternalIterator> iterator();
 
+    /// Whether one of this file's range tombstones covers `key`.
+    ///
+    /// **Says nothing about the file's own entries**, which is the rule that makes range tombstones
+    /// implementable without sequence numbers: a range tombstone shadows everything strictly older
+    /// in `(level, file_number)` order and nothing in the file that carries it. So a caller asks
+    /// this only after finding no point entry here, and a hit means every *older* file is shadowed.
+    Result<bool> range_deletes(Slice key);
+
+    /// The file's range tombstones in key order, for compaction.
+    Result<std::vector<RangeTombstone>> range_tombstones();
+
+    bool has_range_tombstones() const { return footer_.range_del.length != 0; }
+
     uint64_t num_entries() const { return footer_.num_entries; }
     const std::string& name() const { return name_; }
 

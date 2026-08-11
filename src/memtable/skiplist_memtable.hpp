@@ -37,6 +37,9 @@ public:
 
     void put(Slice key, Slice value) override;
     void remove(Slice key) override;
+    void delete_range(Slice lower, Slice upper) override;
+    bool range_deletes(Slice key) const override;
+    std::vector<RangeTombstone> range_tombstones() const override;
     std::optional<Entry> get(Slice key) const override;
     std::unique_ptr<InternalIterator> ascending() const override;
     std::unique_ptr<InternalIterator> ascending_from(Slice key) const override;
@@ -68,6 +71,16 @@ public:
     /// How many of those are deletes. Maintained across type transitions, since overwriting a put
     /// with a delete changes the kind without changing the count.
     uint64_t num_tombstones() const { return tombstones_.load(std::memory_order_relaxed); }
+    uint64_t num_range_tombstones() const { return range_count_.load(std::memory_order_relaxed); }
+
+    /// Nothing here that a flush would have to write.
+    ///
+    /// **A memtable holding only a range delete is not empty**, which is why this exists rather
+    /// than `num_entries() == 0` at each call site. The tombstone is the content: dropping it as
+    /// "nothing to flush" would silently discard the deletion and let every key it covers come back
+    /// from the older files it exists to shadow. It is a write in every sense that matters here —
+    /// it is at risk until it is flushed, and it is what the watermark's lower bound is about.
+    bool empty() const { return num_entries() == 0 && num_range_tombstones() == 0; }
 
     struct ValueRecord {
         uint32_t size;
@@ -107,11 +120,25 @@ private:
     Node* find_last() const;
     void insert(Slice key, ValueType type, Slice value);
 
+    /// One recorded range, in the arena and never freed.
+    ///
+    /// **A linked list rather than a vector, for the same reason the skip list is a skip list**: the
+    /// contract here is one writer with concurrent lock-free readers, and a vector that reallocates
+    /// pulls the ground out from under a reader mid-walk. Pushing at the head is one release store,
+    /// the nodes are immutable once published, and the arena outlives every reader of them.
+    struct RangeNode {
+        Slice lower;
+        Slice upper;
+        RangeNode* next = nullptr;
+    };
+
     Arena arena_;
+    std::atomic<RangeNode*> ranges_{nullptr};
     Node* head_ = nullptr;
     std::atomic<int> max_height_{1};
     std::atomic<uint64_t> entries_{0};
     std::atomic<uint64_t> tombstones_{0};
+    std::atomic<uint64_t> range_count_{0};
     uint64_t creation_time_ms_ = 0;
     WatermarkInterval watermark_;
     uint32_t rng_state_ = 0x2545F491u;

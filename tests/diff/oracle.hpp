@@ -22,6 +22,13 @@ public:
         entries_.erase(entries_.begin(), entries_.lower_bound(key));
     }
 
+    /// Erases `[lower, upper)` — the whole of what `delete_range` means, which is the point of
+    /// stating it against a `std::map`. An empty or inverted range erases nothing.
+    void delete_range(const std::string& lower, const std::string& upper) {
+        if (!(lower < upper)) return;
+        entries_.erase(entries_.lower_bound(lower), entries_.lower_bound(upper));
+    }
+
     std::optional<std::string> get(const std::string& key) const {
         auto it = entries_.find(key);
         if (it == entries_.end()) return std::nullopt;

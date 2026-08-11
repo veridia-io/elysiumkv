@@ -450,6 +450,24 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_delete(elysiumkv_db*, const uint8_t* ke
 ELYSIUMKV_API elysiumkv_status elysiumkv_truncate_below(elysiumkv_db*, const uint8_t* key,
                                              size_t key_len);
 
+/* Deletes every key in [lower, upper) — the counterpart to elysiumkv_truncate_below
+ * for a range that is not a prefix of the keyspace. A tenant sitting in the
+ * middle of a keyspace is the case that needs it.
+ *
+ * Bounds keep their meaning rather than their role: lower is included, upper is
+ * not, the same convention the iterators use. An empty or inverted range deletes
+ * nothing and returns OK, exactly as an iterator over those bounds yields
+ * nothing.
+ *
+ * Unlike a truncation point this is not permanent: the range may be written to
+ * again straight away, and a later write wins. Nor is it as cheap — a truncation
+ * moves one value in the manifest, while this writes a tombstone that reads in
+ * the range consult until compaction resolves it. Space returns as the covered
+ * files are rewritten, or at once for a file the range covers whole. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_delete_range(elysiumkv_db*, const uint8_t* lower,
+                                           size_t lower_len, const uint8_t* upper,
+                                           size_t upper_len);
+
 ELYSIUMKV_API elysiumkv_batch* elysiumkv_batch_create(void);
 ELYSIUMKV_API void elysiumkv_batch_destroy(elysiumkv_batch*);
 ELYSIUMKV_API void elysiumkv_batch_put(elysiumkv_batch*, const uint8_t* key, size_t key_len, const uint8_t* value,

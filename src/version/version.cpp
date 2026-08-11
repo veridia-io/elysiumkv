@@ -50,9 +50,18 @@ std::vector<FileMetadata> Version::overlapping_half_open(int level, Slice lower,
                                                           Slice upper) const {
     std::vector<FileMetadata> result;
     for (const FileMetadata& file : files_at(level)) {
-        if (Slice::from(file.largest_key) < lower) continue;
-        if (!upper.empty() && upper <= Slice::from(file.smallest_key)) continue;
-        result.push_back(file);
+        // A file earns its place if either span overlaps. **The tombstone span is checked
+        // separately because it is not bounded by the data span**: a file can delete a range it
+        // holds no keys in, and pruning on the data span alone would drop the very file that
+        // answers the scan — silently, by returning keys the range delete removed.
+        const bool data_overlaps =
+            !(Slice::from(file.largest_key) < lower) &&
+            !(!upper.empty() && upper <= Slice::from(file.smallest_key));
+        const bool ranges_overlap =
+            file.num_range_tombstones != 0 &&
+            !(Slice::from(file.largest_range_key) <= lower) &&
+            !(!upper.empty() && upper <= Slice::from(file.smallest_range_key));
+        if (data_overlaps || ranges_overlap) result.push_back(file);
     }
     return result;
 }
@@ -60,8 +69,15 @@ std::vector<FileMetadata> Version::overlapping_half_open(int level, Slice lower,
 std::vector<FileMetadata> Version::overlapping_inclusive(int level, Slice first, Slice last) const {
     std::vector<FileMetadata> result;
     for (const FileMetadata& file : files_at(level)) {
-        if (Slice::from(file.largest_key) < first) continue;
-        if (last < Slice::from(file.smallest_key)) continue;
+        // **The candidate's effective span, not its data span** — the same reason the caller passes
+        // an effective span in. A file carrying only range tombstones has no data span at all, so
+        // matching on data alone leaves it behind: the L0 file next to it compacts down without it,
+        // and the tombstone is then at a shallower level than data written *after* it. Positional
+        // recency then says the tombstone is newer, and it deletes writes that came later.
+        const std::string file_first = file.effective_smallest();
+        const std::string file_last = file.effective_largest();
+        if (Slice::from(file_last) < first) continue;
+        if (last < Slice::from(file_first)) continue;
         result.push_back(file);
     }
     return result;
@@ -79,10 +95,70 @@ std::vector<FileMetadata> Version::files_entirely_truncated() const {
     const Slice point = Slice::from(truncation_point_);
     for (const auto& files : levels_) {
         for (const FileMetadata& file : files) {
-            // The bound is the file's own largest key, so a file is only dead when *every* key in
-            // it is below the point. A file straddling the point keeps its live half and is
-            // narrowed by compaction instead.
-            if (Slice::from(file.largest_key) < point) dead.push_back(file);
+            // The bound is the file's own largest *effective* key, so a file is only dead when
+            // everything it has to say is below the point. A file straddling the point keeps its
+            // live half and is narrowed by compaction instead.
+            //
+            // **Effective, because a file with no entries has an empty largest key** — and the
+            // empty key sorts below every truncation point, so a file carrying nothing but a range
+            // tombstone read as entirely truncated and was unlinked. The tombstone went with it and
+            // every key it covered came back. The differential suite found this; nothing about a
+            // file that deletes without holding anything is visible from the data span alone.
+            if (Slice::from(file.effective_largest()) < point) dead.push_back(file);
+        }
+    }
+    return dead;
+}
+
+std::vector<FileMetadata> Version::files_entirely_range_deleted() const {
+    std::vector<FileMetadata> dead;
+
+    // Candidates first: files whose *whole* covered span is a single tombstone.
+    //
+    // **Only a file carrying exactly one is usable from here.** The manifest records the span of a
+    // file's tombstones, which for two or more is a hull with gaps in it — and a hull says only
+    // where the tombstones are not, never that a particular key is covered. Reading the block would
+    // settle it, but a `Version` is a data structure and does no I/O. One tombstone is the case this
+    // exists for anyway: one `delete_range` evicting one tenant.
+    struct Cover {
+        int level;
+        uint64_t file_number;
+        Slice lower;
+        Slice upper;
+    };
+    std::vector<Cover> covers;
+    for (const auto& files : levels_) {
+        for (const FileMetadata& file : files) {
+            if (file.num_range_tombstones != 1) continue;
+            covers.push_back(Cover{file.level, file.file_number,
+                                   Slice::from(file.smallest_range_key),
+                                   Slice::from(file.largest_range_key)});
+        }
+    }
+    if (covers.empty()) return dead;
+
+    for (const auto& files : levels_) {
+        for (const FileMetadata& file : files) {
+            // A file carrying tombstones of its own is left alone: dropping it would drop those
+            // too, and they shadow files this cover says nothing about.
+            if (file.num_range_tombstones != 0) continue;
+            if (file.num_entries == 0) continue;
+            for (const Cover& cover : covers) {
+                // Strictly newer, in the one order this engine has: a lower level, or the same
+                // level and a higher file number. Equal is not newer — a tombstone shadows nothing
+                // in the file that carries it, and here that file *is* the candidate.
+                const bool newer = cover.level < file.level ||
+                                   (cover.level == file.level &&
+                                    cover.file_number > file.file_number);
+                if (!newer) continue;
+                // Every key in the file, inclusive of its largest, must fall inside the half-open
+                // range — so the upper bound has to sit strictly above the largest key.
+                if (cover.lower <= Slice::from(file.smallest_key) &&
+                    Slice::from(file.largest_key) < cover.upper) {
+                    dead.push_back(file);
+                    break;
+                }
+            }
         }
     }
     return dead;
