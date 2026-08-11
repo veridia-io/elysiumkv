@@ -12,8 +12,8 @@ Current versions:
 | Format | Version | Constant |
 | --- | --- | --- |
 | SST file | 1 | `Footer::kFormatVersion1` |
-| Manifest edit | 4 | `kEditFormatVersion` |
-| Manifest snapshot | 4 | `kSnapshotFormatVersion` |
+| Manifest edit | 5 | `kEditFormatVersion` |
+| Manifest snapshot | 5 | `kSnapshotFormatVersion` |
 | Stats buffer | 1 | `kStatsFormatVersion` |
 
 Conventions throughout: **little-endian** fixed-width integers; `varint32`/`varint64` are
@@ -203,6 +203,7 @@ smallest_range_key string
 largest_range_key  string
 compression        varint64   0 = none, 1 = lz4, 2 = zstd
 min_write_time_ms  varint64
+max_write_time_ms  varint64
 watermark_flags    varint64   bit 0 = low present, bit 1 = high present; other values invalid
 watermark_low      varint64   zero when bit 0 is clear
 watermark_high     varint64   zero when bit 1 is clear
@@ -216,6 +217,13 @@ reader that consulted only the data span would walk past the tombstone answering
 `store_id` is persisted rather than derived: tier and level are independent, so a file's store cannot
 be computed from its level. `min_write_time_ms` is carried over unchanged by migration, so placement
 stays monotone across a renumber.
+
+The two write times answer opposite questions and are both persisted for that reason.
+`min_write_time_ms` is the oldest write in the file and drives placement, so a file moves to cold
+storage as soon as any of it qualifies. `max_write_time_ms` is the newest — a flushed file takes its
+memtable's seal time, a compaction output the max over its inputs — and drives age-based expiry,
+which may only drop a file once *everything* in it has outlived the limit. Zero means unknown, and
+unknown never expires.
 
 The **watermark interval** is the embedder's durability frontier for this file's data: `low` is a
 strict lower bound on the positions it contains, `high` an upper bound. Presence is encoded because
@@ -231,7 +239,7 @@ and a migration carries it unchanged.
 Framed with `compression_type = 0`.
 
 ```
-format_version     varint32   4
+format_version     varint32   5
 next_file_number   varint64
 added_count        varint64
 added              file entry × added_count
@@ -246,7 +254,7 @@ truncation_point   string
 Framed with **zstd**, because a snapshot is always read whole.
 
 ```
-format_version     varint32   4
+format_version     varint32   5
 next_file_number   varint64
 file_count         varint64
 files              file entry × file_count

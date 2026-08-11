@@ -62,6 +62,19 @@ public:
     /// a caller with store access settles the rest by reading one block per cover.
     std::vector<RangeDropCandidate> range_drop_candidates() const;
 
+    /// Files whose **newest** write is at or before `cutoff` and which can therefore be unlinked
+    /// whole. See `Options::ttl` for what this does and does not promise.
+    std::vector<FileMetadata> files_expired_before(uint64_t cutoff) const;
+
+private:
+    /// Whether any file older than `file` — a deeper level, or the same level and a lower number —
+    /// overlaps its key range. **The soundness condition for dropping a file by age**: remove one
+    /// that shadows an older version of the same key and the older version comes back, which is a
+    /// resurrection rather than an expiry.
+    bool older_file_overlaps(const FileMetadata& file) const;
+
+public:
+
     uint64_t total_bytes(int level) const;
     size_t file_count(int level) const;
     /// Oldest write held anywhere at this level, or 0 when the level is empty.

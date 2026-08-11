@@ -53,6 +53,15 @@ public:
     uint64_t creation_time_ms() const { return creation_time_ms_; }
     void set_creation_time_ms(uint64_t ms) { creation_time_ms_ = ms; }
 
+    /// When this memtable stopped accepting writes.
+    ///
+    /// **An exact upper bound on every write time in it**, and cheaper than one: stamping each
+    /// entry would cost a clock read per `put`, while nothing arrives after the freeze. It is what
+    /// a flushed file records as the newest write it holds, which is what an age-based expiry has
+    /// to be measured against — the *oldest* write would expire a file still holding fresh data.
+    uint64_t sealed_time_ms() const { return sealed_time_ms_; }
+    void set_sealed_time_ms(uint64_t ms) { sealed_time_ms_ = ms; }
+
     /// The watermark interval the flush will stamp onto this memtable's file. Both halves are
     /// set by `DbImpl`, which owns the notion of "the last established watermark": `low` when
     /// the memtable is created, `high` every time `set_watermark` is called while it is live.
@@ -140,6 +149,7 @@ private:
     std::atomic<uint64_t> tombstones_{0};
     std::atomic<uint64_t> range_count_{0};
     uint64_t creation_time_ms_ = 0;
+    uint64_t sealed_time_ms_ = 0;
     WatermarkInterval watermark_;
     uint32_t rng_state_ = 0x2545F491u;
 };

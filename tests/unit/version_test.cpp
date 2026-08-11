@@ -129,6 +129,89 @@ TEST(Version, AHullOfSeveralRangesShortlistsWithoutDeciding) {
         << "the hull covers the file, but the tombstones inside it may not";
 }
 
+// --- expiry by age -------------------------------------------------------------
+
+/* `Options::ttl` drops a file whose every write has outlived the limit. The predicate is asserted
+ * here rather than through the engine because the interesting cases are states a running store
+ * reaches rarely and cannot be steered into on demand.
+ */
+TEST(Version, AFileWhoseNewestWriteHasExpiredIsDropped) {
+    FileMetadata old_file = file(1, 5, "a", "m");
+    old_file.max_write_time_ms = 100;
+
+    Version version({{}, {old_file}}, 10, {}, "");
+    const auto dead = version.files_expired_before(150);
+    ASSERT_EQ(dead.size(), 1u);
+    EXPECT_EQ(dead[0].file_number, 5u);
+
+    EXPECT_TRUE(version.files_expired_before(99).empty()) << "not yet";
+}
+
+/* **The soundness condition, and the reason this is not simply "drop what is old".**
+ *
+ * A file at a deeper level can hold data *newer* than a file above it — a compaction output takes
+ * the max over its inputs, so a deep file that absorbed recent keys carries a recent stamp while an
+ * older shallow file above it does not. Dropping the shallow one then does not remove its key; it
+ * uncovers the deeper, older version of that key. A resurrection, not an expiry.
+ */
+TEST(Version, AFileIsNotDroppedWhileSomethingOlderOverlapsIt) {
+    FileMetadata shallow = file(1, 9, "b", "d");
+    shallow.max_write_time_ms = 100;          // expired
+    FileMetadata deeper = file(2, 4, "a", "z");
+    deeper.max_write_time_ms = 10'000;        // absorbed recent keys, so not expired
+
+    Version version({{}, {shallow}, {deeper}}, 20, {}, "");
+    EXPECT_TRUE(version.files_expired_before(150).empty())
+        << "dropping the shallow file would uncover the deeper one's older version of its keys";
+}
+
+/// The same at level 0, where files overlap each other and the lower number is the older.
+TEST(Version, AnOlderLevelZeroSiblingAlsoBlocksTheDrop) {
+    FileMetadata newer = file(0, 9, "b", "d");
+    newer.max_write_time_ms = 100;
+    FileMetadata older = file(0, 4, "a", "z");
+    older.max_write_time_ms = 10'000;
+
+    Version version({{newer, older}}, 20, {}, "");
+    EXPECT_TRUE(version.files_expired_before(150).empty());
+}
+
+/// Nothing overlapping beneath it, so it goes.
+TEST(Version, AFileWithNothingOlderBeneathItIsDropped) {
+    FileMetadata shallow = file(1, 9, "b", "d");
+    shallow.max_write_time_ms = 100;
+    FileMetadata elsewhere = file(2, 4, "w", "z");   // deeper, but a different key range
+    elsewhere.max_write_time_ms = 10'000;
+
+    Version version({{}, {shallow}, {elsewhere}}, 20, {}, "");
+    const auto dead = version.files_expired_before(150);
+    ASSERT_EQ(dead.size(), 1u);
+    EXPECT_EQ(dead[0].file_number, 9u);
+}
+
+/// A file carrying range tombstones is spared: they would go with it, and they shadow files the age
+/// of this one says nothing about.
+TEST(Version, AnExpiredFileCarryingRangeTombstonesIsSpared) {
+    FileMetadata carrier = file(1, 5, "a", "m");
+    carrier.max_write_time_ms = 100;
+    carrier.num_range_tombstones = 1;
+    carrier.smallest_range_key = "a";
+    carrier.largest_range_key = "c";
+
+    Version version({{}, {carrier}}, 10, {}, "");
+    EXPECT_TRUE(version.files_expired_before(150).empty());
+}
+
+/// Unknown is not "very old". Nothing should reach the manifest without a stamp, but guessing from
+/// an absent one would delete a whole file.
+TEST(Version, AFileWithNoRecordedWriteTimeNeverExpires) {
+    FileMetadata unstamped = file(1, 5, "a", "m");
+    unstamped.max_write_time_ms = 0;
+
+    Version version({{}, {unstamped}}, 10, {}, "");
+    EXPECT_TRUE(version.files_expired_before(9'999'999).empty());
+}
+
 TEST(VersionEdit, RoundTrips) {
     VersionEdit edit;
     edit.next_file_number = 42;

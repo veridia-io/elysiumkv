@@ -6,8 +6,8 @@
 namespace elysiumkv {
 namespace {
 
-constexpr uint32_t kEditFormatVersion = 4;
-constexpr uint32_t kSnapshotFormatVersion = 4;
+constexpr uint32_t kEditFormatVersion = 5;
+constexpr uint32_t kSnapshotFormatVersion = 5;
 /// A manifest snapshot for a mature store is a few hundred KB; the bound only
 /// has to keep a corrupt length from becoming an allocation.
 constexpr size_t kMaxManifestBytes = 256u << 20;
@@ -71,6 +71,7 @@ void put_file(std::string& out, const FileMetadata& file) {
     put_string(out, file.largest_range_key);
     put_varint64(out, static_cast<uint64_t>(file.compression));
     put_varint64(out, file.min_write_time_ms);
+    put_varint64(out, file.max_write_time_ms);
     put_watermark(out, file.watermark);
 }
 
@@ -93,6 +94,7 @@ bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
     if (codec > static_cast<uint64_t>(Compression::Zstd)) return false;
     file.compression = static_cast<Compression>(codec);
     if (!get_varint64(p, limit, file.min_write_time_ms)) return false;
+    if (!get_varint64(p, limit, file.max_write_time_ms)) return false;
     return get_watermark(p, limit, file.watermark);
 }
 

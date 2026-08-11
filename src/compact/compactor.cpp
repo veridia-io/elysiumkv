@@ -108,7 +108,7 @@ void DbImpl::note_maintenance_state_changed() { invalidate_maintenance(); }
 /// Unlinks every file whose keys all sit below the truncation point. No rewrite, no read: the
 /// files leave the version in one edit and reach the object store through the ordinary
 /// obsolete-object path, which is what keeps an open reader safe from them.
-bool DbImpl::reclaim_truncated_files(Status& status) {
+bool DbImpl::reclaim_dead_files(Status& status) {
     auto version = versions_->current();
     std::vector<FileMetadata> dead = version->files_entirely_truncated();
     // Files a newer range tombstone covers whole go the same way and for the same reason: the bytes
@@ -122,6 +122,18 @@ bool DbImpl::reclaim_truncated_files(Status& status) {
     // compacted together looks like, the candidates the hull admits are settled by reading the
     // cover's range block. Reads are per cover rather than per candidate, and only for covers the
     // hull already made plausible.
+    // Age-expired files go the same way: one edit, nothing read. See `Options::ttl`.
+    if (options_.ttl.has_value()) {
+        const uint64_t now = now_ms();
+        const auto limit = static_cast<uint64_t>(options_.ttl->count());
+        // A clock that has not yet passed the limit expires nothing, rather than wrapping into a
+        // cutoff in the far future and dropping the store.
+        if (now > limit) {
+            const std::vector<FileMetadata> expired = version->files_expired_before(now - limit);
+            dead.insert(dead.end(), expired.begin(), expired.end());
+        }
+    }
+
     std::map<uint64_t, std::vector<RangeTombstone>> read_covers;
     for (const Version::RangeDropCandidate& candidate : version->range_drop_candidates()) {
         if (candidate.exact) {
@@ -181,7 +193,7 @@ void DbImpl::background_compaction_loop() {
         // rewriting bytes that are already dead. It applies a version edit, which makes it a
         // *deleting task* — sound only because it shares this one executor with compaction,
         // migration and eviction, the same reason they are sound.
-        if (reclaim_truncated_files(status)) did_work = true;
+        if (reclaim_dead_files(status)) did_work = true;
 
         // ARCHITECTURE.md "Migration between tiers" — migrations off a Transient tier preempt everything, including
         // compaction. Draining them first is that rule.
@@ -469,6 +481,8 @@ Status DbImpl::run_migration(const Migration& migration) {
     // Carried over unchanged, so placement stays monotone across the renumber
     // (ARCHITECTURE.md "A tier is not a level"): the file is exactly as old as it was.
     moved.min_write_time_ms = migration.file.min_write_time_ms;
+    // A byte copy does not change what the file holds, so both bounds ride across unchanged.
+    moved.max_write_time_ms = migration.file.max_write_time_ms;
     // The watermark interval likewise: a migration is a byte copy, so the file holds exactly the
     // writes it held before, and both bounds are still the bounds. `moved` is a copy of the
     // source metadata, so this is already true — stated because it is the kind of thing a later
@@ -539,7 +553,7 @@ Status DbImpl::compact_until_quiet() {
         // emptied go by manifest edit alone, so dropping them first spares a compaction the work
         // of rewriting dead bytes. Inline mode has to run it too, or reclamation would be a
         // property only the threaded build had.
-        if (reclaim_truncated_files(status)) worked = true;
+        if (reclaim_dead_files(status)) worked = true;
         if (status != Status::Ok) return status;
         while (run_one_migration(status)) worked = true;
         if (status != Status::Ok) return status;
@@ -654,6 +668,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // a compaction at all.
     const std::string truncation_point = versions_->current()->truncation_point();
     const uint64_t min_write_time = compaction.min_write_time_ms();
+    const uint64_t max_write_time = compaction.max_write_time_ms();
     const WatermarkInterval watermark = compaction.watermark();
     const size_t grandparent_limit = max_grandparent_overlap_bytes(target);
 
@@ -703,6 +718,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         // A compaction output takes the min() over its inputs (ARCHITECTURE.md "The manifest is snapshots plus edits"): the file
         // still holds those writes, so its exposure is unchanged by the move.
         file.min_write_time_ms = min_write_time;
+        file.max_write_time_ms = max_write_time;
         // `min` of the lows, `max` of the highs — computed once for the whole compaction, since
         // every output holds a slice of the same input set.
         file.watermark = watermark;

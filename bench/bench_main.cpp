@@ -39,6 +39,12 @@ public:
         Options options;
         options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
         options.memtable_bytes = 32u << 20;
+        // **No engine threads during measurement.** Every benchmark here is a read against a store
+        // that is already built and flushed, so background work has nothing to do — but the
+        // maintenance coordinator still wakes on its interval, and whether a tick lands inside a
+        // given repetition is luck. That turns into a few percent of spread between repetitions,
+        // which is noise about the scheduler rather than about the engine.
+        options.background = BackgroundMode::Inline;
 
         LevelOptions l0;
         l0.max_files = 100;
@@ -97,9 +103,25 @@ BENCHMARK(BM_PointLookupBloomRejected);
 /// ARCHITECTURE.md "Absence is an answer, not an error" and ARCHITECTURE.md "Benchmarks" — **a prefix scan must not scale with total key count.** The same
 /// 100-key prefix is scanned in a 100k-key store and a 1M-key store; ten times
 /// the keyspace must cost about the same, or SST pruning is not working.
+/// Built once per size and kept, like the point-lookup stores.
+///
+/// **A local would be rebuilt several times per reported number**, not once: the framework calls a
+/// benchmark repeatedly to find an iteration count and then once more per repetition, so a million
+/// keys were being written and flushed on each of those calls. That is most of the runtime, and it
+/// leaves the page cache and allocator in a different state each time — measurable as spread in the
+/// thing being measured.
+BenchStore& prefix_store(int keys) {
+    if (keys == 100000) {
+        static BenchStore small(100000);
+        return small;
+    }
+    static BenchStore large(1000000);
+    return large;
+}
+
 void BM_PrefixScan(benchmark::State& state) {
     const int keys = static_cast<int>(state.range(0));
-    BenchStore store(keys);
+    BenchStore& store = prefix_store(keys);
 
     const std::string prefix = "cluster:000007:";
     int64_t scanned = 0;

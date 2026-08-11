@@ -26,6 +26,15 @@ import sys
 
 THRESHOLD = 0.10  # fail on a >10% regression
 
+# How noisy a measurement may be before a comparison against it means nothing.
+#
+# **A ratchet that cannot tell a regression from a bad afternoon on a shared runner is worse than no
+# ratchet**: it fails builds that changed nothing, and the response to a flaky gate is to stop
+# reading it. Google-benchmark reports the coefficient of variation across repetitions, so the run
+# says how well it measured itself. Above this the benchmark is reported and skipped rather than
+# judged — a third of the threshold, so the noise band cannot swallow the signal it is guarding.
+MAX_CV = THRESHOLD / 3
+
 
 def baseline_path(directory: str) -> str:
     name = f"{platform.system().lower()}-{platform.machine().lower()}.json"
@@ -46,6 +55,21 @@ def measurements(report: dict) -> dict:
     return out
 
 
+def dispersion(report: dict) -> dict:
+    """name -> coefficient of variation across repetitions, where the run reported one.
+
+    Absent for a single-repetition run, which is why a missing entry is treated as measured rather
+    than as noisy: an old report should still be comparable, and the flags that produce one are the
+    caller's choice.
+    """
+    out = {}
+    for entry in report.get("benchmarks", []):
+        if entry.get("aggregate_name") != "cv":
+            continue
+        out[entry["name"].removesuffix("_cv")] = entry["real_time"]
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("results", help="google-benchmark --benchmark_format=json output")
@@ -55,7 +79,8 @@ def main() -> int:
     args = parser.parse_args()
 
     with open(args.results) as f:
-        current = measurements(json.load(f))
+        report = json.load(f)
+    current = measurements(report)
     if not current:
         print("no benchmark results found", file=sys.stderr)
         return 1
@@ -74,13 +99,20 @@ def main() -> int:
     with open(path) as f:
         baseline = json.load(f)
 
-    regressions, improvements, missing = [], [], []
+    spread = dispersion(report)
+    regressions, improvements, missing, noisy = [], [], [], []
     for name, time_ns in sorted(current.items()):
         if name not in baseline:
             missing.append(name)
             continue
         reference = baseline[name]
         change = (time_ns - reference) / reference
+        cv = spread.get(name)
+        if cv is not None and cv > MAX_CV:
+            # Reported either way, because a benchmark that has become *unstable* is itself worth
+            # knowing about — it is how a new source of variance announces itself.
+            noisy.append((name, cv, change))
+            continue
         if change > THRESHOLD:
             regressions.append((name, reference, time_ns, change))
         elif change < -THRESHOLD:
@@ -91,6 +123,9 @@ def main() -> int:
               f"— rerun with --update to ratchet the baseline down")
     for name in missing:
         print(f"NEW       {name}: no baseline yet — rerun with --update")
+    for name, cv, change in noisy:
+        print(f"UNSTABLE  {name}: cv {cv:.1%} exceeds {MAX_CV:.1%}, so the {change:+.1%} change "
+              f"cannot be told from noise — not judged")
     for name, reference, time_ns, change in regressions:
         print(f"REGRESSED {name}: {reference:.1f}ns -> {time_ns:.1f}ns ({change:+.1%})",
               file=sys.stderr)
@@ -100,7 +135,13 @@ def main() -> int:
               f"{THRESHOLD:.0%}.", file=sys.stderr)
         return 1
 
-    print(f"{len(current)} benchmarks within {THRESHOLD:.0%} of baseline")
+    judged = len(current) - len(noisy) - len(missing)
+    summary = f"{judged} benchmark(s) within {THRESHOLD:.0%} of baseline"
+    if noisy:
+        summary += f", {len(noisy)} too noisy to judge"
+    if missing:
+        summary += f", {len(missing)} new"
+    print(summary)
     return 0
 
 

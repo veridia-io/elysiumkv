@@ -640,8 +640,7 @@ Status DbImpl::freeze_and_flush_inline(bool force) {
         if (imm_ == nullptr) {
             if (!memtable_flush_due(force)) return Status::Ok;
             if (mem_->empty()) return Status::Ok;
-            imm_ = std::move(mem_);
-            mem_ = new_memtable();
+            seal_memtable();
         }
         // A frozen memtable left over from a failed flush is retried here: Io
         // means "ask again later", and inline mode has nowhere else to ask.
@@ -656,6 +655,15 @@ Status DbImpl::freeze_and_flush_inline(bool force) {
     // Inline mode: the writer is also the compactor, so the flush is not done
     // until the compaction it just caused is done too.
     return compact_until_quiet();
+}
+
+void DbImpl::seal_memtable() {
+    // Stamped at the freeze rather than at the flush, because this is the moment writes stop
+    // arriving — a flush that queues behind another would otherwise record a newest-write time
+    // later than any write in the file, and delay its expiry by however long the queue was.
+    imm_ = std::move(mem_);
+    imm_->set_sealed_time_ms(now_ms());
+    mem_ = new_memtable();
 }
 
 Status DbImpl::maybe_freeze_memtable(bool force) {
@@ -692,8 +700,7 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
     }
     if (mem_->empty()) return Status::Ok;
 
-    imm_ = std::move(mem_);
-    mem_ = new_memtable();
+    seal_memtable();
     lock.unlock();
     flush_scheduled_.notify_one();
     return Status::Ok;
@@ -876,8 +883,7 @@ void DbImpl::reconcile(bool force_full) {
         // it, and waiting for it here would be the coordinator doing long-running work.
         if (!shutting_down_ && imm_ == nullptr && bg_error_ == Status::Ok && mem_ != nullptr &&
             mem_->num_entries() > 0 && memtable_flush_due(false)) {
-            imm_ = std::move(mem_);
-            mem_ = new_memtable();
+            seal_memtable();
             rotated = true;
         }
     }
@@ -978,6 +984,9 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     // A flushed L0 file inherits its memtable's creation time (ARCHITECTURE.md "The manifest is snapshots plus edits"); this is
     // the only place the value originates.
     file.min_write_time_ms = memtable->creation_time_ms();
+    // The seal time: an exact upper bound on the writes in this memtable, and what an age-based
+    // expiry measures against.
+    file.max_write_time_ms = memtable->sealed_time_ms();
     // **The sealed memtable's interval, not the interval current when the file is written.** The
     // dangerous variant is the latter: a watermark set after this memtable was sealed covers
     // writes still sitting in the live one, so reporting it would tell the embedder to skip
