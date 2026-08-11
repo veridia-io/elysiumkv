@@ -206,6 +206,7 @@ class AbiCoverageTest {
             exercise("batchCreate");
             exercise("batchPut");
             exercise("batchDelete");
+            exercise("batchDeleteRange");
             exercise("batchSize");
             exercise("batchDestroy");
             exercise("write");
@@ -213,8 +214,15 @@ class AbiCoverageTest {
                 batch.put(TestSupport.bytes("batch-a"), TestSupport.bytes("1"));
                 batch.put(TestSupport.bytes("batch-b"), TestSupport.bytes("2"));
                 batch.delete(TestSupport.bytes("batch-a"));
-                assertEquals(3, batch.size());
+                // A range, then a put landing on top of it: order within the batch is what decides.
+                batch.deleteRange(TestSupport.bytes("batch-"), TestSupport.bytes("batch."));
+                batch.put(TestSupport.bytes("batch-c"), TestSupport.bytes("3"));
+                assertEquals(5, batch.size());
                 db.write(batch);
+            }
+            assertNull(db.get(TestSupport.bytes("batch-b")), "covered by the batched range");
+            try (Pinned after = db.get(TestSupport.bytes("batch-c"))) {
+                assertNotNull(after, "written after the range in the same batch");
             }
 
             exercise("iterPrefix");

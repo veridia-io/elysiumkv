@@ -73,7 +73,7 @@ useful rather than to be novel.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (60 functions, C99) and a Java binding over JNI
+- **Bindings**: a stable C ABI (61 functions, C99) and a Java binding over JNI
   needing only Java 11, plus Kafka Streams state stores in
   `bindings/kafka-streams-v3` — key-value, window and session stores in both plain
   and timestamped form, and a versioned store (KIP-889). The windowed kinds keep

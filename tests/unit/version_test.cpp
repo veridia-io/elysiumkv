@@ -60,9 +60,10 @@ TEST(Version, AFileCoveredWholeByANewerRangeIsReclaimable) {
     cover.largest_range_key = "z";
 
     Version version({{cover}, {data}}, 10, {}, "");
-    const std::vector<FileMetadata> dead = version.files_entirely_range_deleted();
-    ASSERT_EQ(dead.size(), 1u);
-    EXPECT_EQ(dead[0].file_number, 5u);
+    const auto candidates = version.range_drop_candidates();
+    ASSERT_EQ(candidates.size(), 1u);
+    EXPECT_EQ(candidates[0].file.file_number, 5u);
+    EXPECT_TRUE(candidates[0].exact) << "one range, so the recorded span is that range";
 }
 
 TEST(Version, APartlyCoveredFileIsNotReclaimable) {
@@ -74,7 +75,7 @@ TEST(Version, APartlyCoveredFileIsNotReclaimable) {
     cover.largest_range_key = "m";   // stops short of the file's largest key
 
     Version version({{cover}, {data}}, 10, {}, "");
-    EXPECT_TRUE(version.files_entirely_range_deleted().empty())
+    EXPECT_TRUE(version.range_drop_candidates().empty())
         << "a file straddling the range keeps its live half and is narrowed by compaction";
 }
 
@@ -88,7 +89,7 @@ TEST(Version, AnOlderRangeDoesNotReclaimANewerFile) {
     cover.largest_range_key = "z";
 
     Version version({{data}, {cover}}, 10, {}, "");
-    EXPECT_TRUE(version.files_entirely_range_deleted().empty());
+    EXPECT_TRUE(version.range_drop_candidates().empty());
 }
 
 /// A file carrying tombstones of its own is left alone: dropping it would drop those too, and they
@@ -105,15 +106,15 @@ TEST(Version, AFileWithItsOwnRangesIsNeverReclaimedThisWay) {
     cover.largest_range_key = "z";
 
     Version version({{cover}, {data}}, 10, {}, "");
-    EXPECT_TRUE(version.files_entirely_range_deleted().empty());
+    EXPECT_TRUE(version.range_drop_candidates().empty());
 }
 
-/* **Two or more tombstones in one file cannot be used from here**, and that is a limit rather than
- * an oversight. The manifest records their span, which for two is a hull with a gap in it — and a
- * hull can say where tombstones are *not*, never that a particular key is covered. Reading the block
- * would settle it; a `Version` is a data structure and does no I/O.
+/* **A hull of several ranges shortlists but does not decide.** The manifest records the span of a
+ * file's ranges, which for two is a bounding interval with a gap in it — and a hull can show a file
+ * is *not* covered, never that it is. So the candidate comes back marked inexact, for a caller with
+ * store access to settle by reading the block; a `Version` is a data structure and does no I/O.
  */
-TEST(Version, AHullOfSeveralRangesIsNotTreatedAsCoverage) {
+TEST(Version, AHullOfSeveralRangesShortlistsWithoutDeciding) {
     FileMetadata data = file(1, 5, "b", "y");
     FileMetadata cover = file(0, 9, "", "");
     cover.num_entries = 0;
@@ -122,7 +123,9 @@ TEST(Version, AHullOfSeveralRangesIsNotTreatedAsCoverage) {
     cover.largest_range_key = "z";
 
     Version version({{cover}, {data}}, 10, {}, "");
-    EXPECT_TRUE(version.files_entirely_range_deleted().empty())
+    const auto candidates = version.range_drop_candidates();
+    ASSERT_EQ(candidates.size(), 1u) << "the hull admits it, so it is worth a look";
+    EXPECT_FALSE(candidates[0].exact)
         << "the hull covers the file, but the tombstones inside it may not";
 }
 

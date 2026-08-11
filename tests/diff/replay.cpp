@@ -241,12 +241,17 @@ private:
             case DiffOp::Kind::Batch: {
                 WriteBatch batch;
                 bool any_below = false;
-                for (const auto& [is_delete, key, value] : op.batch) {
-                    if (below_floor(key)) any_below = true;
-                    if (is_delete) {
-                        batch.remove(Slice::from(key));
-                    } else {
-                        batch.put(Slice::from(key), Slice::from(value));
+                for (const auto& [kind, key, value] : op.batch) {
+                    // **Only a put or a remove under the floor refuses the batch.** A range
+                    // reaching below it is clamped and applies, so counting it here would make the
+                    // replay expect a refusal the engine is right not to give.
+                    if (kind != DiffOp::Kind::DeleteRange && below_floor(key)) any_below = true;
+                    switch (kind) {
+                        case DiffOp::Kind::Remove: batch.remove(Slice::from(key)); break;
+                        case DiffOp::Kind::DeleteRange:
+                            batch.delete_range(Slice::from(key), Slice::from(value));
+                            break;
+                        default: batch.put(Slice::from(key), Slice::from(value)); break;
                     }
                 }
                 const Status status = db_->write(batch);
@@ -256,11 +261,13 @@ private:
                 if (status != Status::Ok) {
                     return std::string("write: ") + std::string(status_name(status));
                 }
-                for (const auto& [is_delete, key, value] : op.batch) {
-                    if (is_delete) {
-                        oracle_.remove(key);
-                    } else {
-                        oracle_.put(key, value);
+                // In batch order, which is the whole property under test: a put before a range is
+                // covered by it and one after it is not.
+                for (const auto& [kind, key, value] : op.batch) {
+                    switch (kind) {
+                        case DiffOp::Kind::Remove: oracle_.remove(key); break;
+                        case DiffOp::Kind::DeleteRange: oracle_.delete_range(key, value); break;
+                        default: oracle_.put(key, value); break;
                     }
                 }
                 return std::nullopt;

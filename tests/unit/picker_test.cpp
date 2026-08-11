@@ -114,6 +114,46 @@ TEST(PickerTest, TrivialMoveIsNotGatedOnStorage) {
     EXPECT_TRUE(compaction->trivial_move) << "the file stays on whatever tier it already occupies";
 }
 
+/* The same rule for range tombstones, which need it more: a file can carry them and no point
+ * tombstones at all — a flush whose memtable saw only a `delete_range` is exactly that shape — so a
+ * check that counted only point tombstones would let the commonest case move straight past the level
+ * that reclaims it, with nothing afterwards forcing the rewrite.
+ */
+TEST(PickerTest, TrivialMoveIsRefusedForRangeTombstonesAtTheBottommost) {
+    FileMetadata ranges = file(1, 1, "a", "b", 8192, /*tombstones=*/0);
+    ranges.num_range_tombstones = 1;
+    ranges.smallest_range_key = "a";
+    ranges.largest_range_key = "c";
+
+    auto version = version_of({ranges});
+    auto refused = pick_compaction(*version, config(4, 4096), 1u << 30);
+    ASSERT_TRUE(refused.has_value());
+    EXPECT_TRUE(refused->output_is_bottommost);
+    EXPECT_FALSE(refused->trivial_move) << "fall back to a rewrite, which drops them";
+}
+
+/* A file whose *only* content is a range tombstone has no data span, and the picker used to seed its
+ * search from exactly that — leaving the overlap search matching nothing, not even the seed itself,
+ * and a compaction with no inputs that the code below dereferenced. The kill-point fuzzer found it
+ * as a segfault.
+ */
+TEST(PickerTest, ASeedWithNoDataSpanStillProducesInputs) {
+    // At level 0, where overlapping files are gathered transitively — that search is what came
+    // back empty. A deeper level takes the seed as its own input and never noticed.
+    FileMetadata only_ranges = file(0, 2, "", "", 8192, /*tombstones=*/0);
+    only_ranges.num_entries = 0;
+    only_ranges.num_range_tombstones = 1;
+    only_ranges.smallest_range_key = "m";
+    only_ranges.largest_range_key = "p";
+
+    // A second L0 file so the level is over its budget and a compaction is offered at all. The
+    // tombstone-only file takes the higher number, which makes it the newest and so the seed.
+    auto version = version_of({file(0, 1, "a", "b", 8192), only_ranges});
+    auto compaction = pick_compaction(*version, config(/*max_files=*/1, 4096), 1u << 30);
+    ASSERT_TRUE(compaction.has_value());
+    EXPECT_FALSE(compaction->inputs.empty()) << "the seed must be among its own inputs";
+}
+
 // ARCHITECTURE.md "Compaction" — a move does not rewrite, so moving a tombstone-bearing file to where it is
 // bottommost would carry them past the only point that reclaims them.
 TEST(PickerTest, TrivialMoveIsRefusedForTombstonesAtTheBottommost) {

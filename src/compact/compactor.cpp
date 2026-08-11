@@ -19,6 +19,7 @@
 #include "sst/sst_writer.hpp"
 
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <chrono>
 #include <cstdio>
@@ -112,9 +113,40 @@ bool DbImpl::reclaim_truncated_files(Status& status) {
     std::vector<FileMetadata> dead = version->files_entirely_truncated();
     // Files a newer range tombstone covers whole go the same way and for the same reason: the bytes
     // are already unreadable, so rewriting them in a compaction would be work done to produce
-    // nothing. One edit, no I/O.
-    const std::vector<FileMetadata> covered = version->files_entirely_range_deleted();
-    dead.insert(dead.end(), covered.begin(), covered.end());
+    // nothing. One edit, and at most one block read to authorise it.
+    //
+    // **The manifest shortlists; the tombstones decide.** What it records per file is the *hull* of
+    // that file's ranges, which is the range itself when there is one and a bounding interval with
+    // unknown gaps when there are more — so a hull can show a file is not covered but never that it
+    // is. Rather than give up on the second case, which is what a file whose tombstones have been
+    // compacted together looks like, the candidates the hull admits are settled by reading the
+    // cover's range block. Reads are per cover rather than per candidate, and only for covers the
+    // hull already made plausible.
+    std::map<uint64_t, std::vector<RangeTombstone>> read_covers;
+    for (const Version::RangeDropCandidate& candidate : version->range_drop_candidates()) {
+        if (candidate.exact) {
+            dead.push_back(candidate.file);
+            continue;
+        }
+        auto found = read_covers.find(candidate.cover.file_number);
+        if (found == read_covers.end()) {
+            auto reader = reader_for(candidate.cover);
+            if (!reader) continue;   // unreadable is not evidence; leave the file alone
+            auto ranges = (*reader)->range_tombstones();
+            if (!ranges) continue;
+            found = read_covers.emplace(candidate.cover.file_number, std::move(*ranges)).first;
+        }
+        // Disjoint and non-adjacent after merging, so a union of several can never span a gap: one
+        // range containing the file's whole span is both necessary and sufficient.
+        const Slice smallest = Slice::from(candidate.file.smallest_key);
+        const Slice largest = Slice::from(candidate.file.largest_key);
+        for (const RangeTombstone& range : found->second) {
+            if (Slice::from(range.lower) <= smallest && largest < Slice::from(range.upper)) {
+                dead.push_back(candidate.file);
+                break;
+            }
+        }
+    }
     if (dead.empty()) return false;
 
     VersionEdit edit;

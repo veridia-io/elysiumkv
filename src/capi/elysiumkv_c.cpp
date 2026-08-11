@@ -1030,6 +1030,15 @@ void elysiumkv_batch_delete(elysiumkv_batch* batch, const uint8_t* key, size_t k
     });
 }
 
+void elysiumkv_batch_delete_range(elysiumkv_batch* batch, const uint8_t* lower, size_t lower_len,
+                                  const uint8_t* upper, size_t upper_len) {
+    if (batch == nullptr) return;
+    (void)guard([&]() -> elysiumkv_status {
+        batch->batch.delete_range(as_slice(lower, lower_len), as_slice(upper, upper_len));
+        return ELYSIUMKV_OK;
+    });
+}
+
 size_t elysiumkv_batch_size(const elysiumkv_batch* batch) {
     return batch == nullptr ? 0 : batch->batch.size();
 }

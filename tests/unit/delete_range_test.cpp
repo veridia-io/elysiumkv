@@ -495,5 +495,275 @@ TEST_F(DeleteRange, ARangeDeleteIsNotMistakenForATruncatedFile) {
         << "the tombstone-only file was reclaimed as if it were below the floor";
 }
 
+// --- inside a batch ------------------------------------------------------------
+
+/* **Order within the batch decides what survives**, and that is the whole reason to want this: a
+ * put after the range lands on top of it, a put before it is covered. Two separate calls cannot
+ * express that without the range being visibly empty in between.
+ */
+TEST_F(DeleteRange, OrderWithinABatchDecidesWhatSurvives) {
+    for (int i = 0; i < 10; ++i) put(key_at(i), "old");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    WriteBatch batch;
+    batch.put(Slice::from(key_at(3)), Slice::from(std::string("covered")));                          // before the range
+    batch.delete_range(Slice::from(key_at(2)), Slice::from(key_at(8)));
+    batch.put(Slice::from(key_at(5)), Slice::from(std::string("survives")));                         // after it
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+
+    EXPECT_EQ(db_->get(Slice::from(key_at(3))).error(), Status::NotFound)
+        << "written before the range in the same batch, so the range covers it";
+    auto kept = db_->get_copy(Slice::from(key_at(5)));
+    ASSERT_TRUE(kept.has_value());
+    EXPECT_EQ(std::string(kept->begin(), kept->end()), "survives");
+    EXPECT_TRUE(db_->get(Slice::from(key_at(1))).has_value()) << "outside the range";
+    EXPECT_TRUE(db_->get(Slice::from(key_at(8))).has_value()) << "upper is excluded";
+}
+
+/// The range reaches older files too, exactly as the standalone call does.
+TEST_F(DeleteRange, ABatchedRangeShadowsOlderFiles) {
+    for (int i = 0; i < 10; ++i) put(key_at(i), "old");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    WriteBatch batch;
+    batch.delete_range(Slice::from(key_at(2)), Slice::from(key_at(8)));
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    for (int i = 0; i < 10; ++i) {
+        const bool deleted = i >= 2 && i < 8;
+        EXPECT_EQ(db_->get(Slice::from(key_at(i))).has_value(), !deleted) << i;
+    }
+}
+
+/* **One batch, two rules about the floor.** A `put` below the truncation point is refused and takes
+ * the whole batch with it; a `delete_range` reaching below it is clamped and applies. The batch
+ * validates per operation rather than per batch, which is the only way it can hold both.
+ */
+TEST_F(DeleteRange, ABatchAppliesTheFloorRulePerOperation) {
+    for (int i = 0; i < 20; ++i) put(key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->truncate_below(Slice::from(key_at(10))), Status::Ok);
+
+    WriteBatch refused;
+    refused.put(Slice::from(key_at(5)), Slice::from(std::string("below the floor")));
+    EXPECT_EQ(db_->write(refused), Status::Config) << "a write below the floor is still refused";
+
+    WriteBatch clamped;
+    clamped.delete_range(Slice::from(key_at(0)), Slice::from(key_at(12)));
+    clamped.put(Slice::from(key_at(15)), Slice::from(std::string("fine")));
+    EXPECT_EQ(db_->write(clamped), Status::Ok) << "the range is clamped, not refused";
+
+    for (int i = 10; i < 12; ++i) {
+        EXPECT_EQ(db_->get(Slice::from(key_at(i))).error(), Status::NotFound) << i;
+    }
+    EXPECT_TRUE(db_->get(Slice::from(key_at(12))).has_value());
+    EXPECT_TRUE(db_->get(Slice::from(key_at(15))).has_value());
+}
+
+/// An empty or inverted range in a batch deletes nothing and leaves the rest of the batch intact —
+/// it must not knock the apply loop out of step with the bounds resolved for it.
+TEST_F(DeleteRange, AnEmptyRangeInABatchLeavesTheRestOfItAlone) {
+    for (int i = 0; i < 10; ++i) put(key_at(i), "v");
+
+    WriteBatch batch;
+    batch.delete_range(Slice::from(key_at(4)), Slice::from(key_at(4)));   // empty
+    batch.put(Slice::from(key_at(1)), Slice::from(std::string("one")));
+    batch.delete_range(Slice::from(key_at(9)), Slice::from(key_at(2)));   // inverted
+    batch.delete_range(Slice::from(key_at(6)), Slice::from(key_at(8)));   // real
+    batch.put(Slice::from(key_at(2)), Slice::from(std::string("two")));
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+
+    auto one = db_->get_copy(Slice::from(key_at(1)));
+    ASSERT_TRUE(one.has_value());
+    EXPECT_EQ(std::string(one->begin(), one->end()), "one");
+    auto two = db_->get_copy(Slice::from(key_at(2)));
+    ASSERT_TRUE(two.has_value());
+    EXPECT_EQ(std::string(two->begin(), two->end()), "two");
+    EXPECT_EQ(db_->get(Slice::from(key_at(6))).error(), Status::NotFound)
+        << "the real range must still have been the one applied";
+    EXPECT_TRUE(db_->get(Slice::from(key_at(4))).has_value());
+}
+
+/// The batch lands whole: a range and the writes around it reach one memtable, so no flush can
+/// split them and no reader sees the range empty.
+TEST_F(DeleteRange, ABatchedRangeAndItsWritesLandTogether) {
+    for (int i = 0; i < 10; ++i) put(key_at(i), "old");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    WriteBatch batch;
+    batch.delete_range(Slice::from(key_at(0)), Slice::from(key_at(10)));
+    for (int i = 0; i < 3; ++i) batch.put(Slice::from(key_at(i)), Slice::from(std::string("reseeded")));
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    std::vector<std::string> seen;
+    for (auto it = db_->iterator(); it->next();) seen.push_back(it->key().to_string());
+    EXPECT_EQ(seen, (std::vector<std::string>{key_at(0), key_at(1), key_at(2)}))
+        << "evict and re-seed is one step";
+}
+
+/* **A file carrying range tombstones is rewritten rather than trivially moved.** A move does not
+ * rewrite, so moving one to the level that reclaims tombstones would carry them past the only point
+ * that drops them, and nothing afterwards forces the rewrite. The rule already existed for point
+ * tombstones; a file can carry range tombstones and no point tombstones at all — a flush whose
+ * memtable saw only a `delete_range` is exactly that — so testing one and not the other lets the
+ * commonest shape straight through.
+ */
+TEST_F(DeleteRange, ARangeTombstoneFileIsRewrittenRatherThanMovedToTheBottom) {
+    for (int i = 0; i < 10; ++i) put(key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+    ASSERT_EQ(db_->compact_level(1), Status::Ok);   // data at the bottom
+
+    // A memtable holding nothing but a range over keys the bottom level does not hold, so the file
+    // it flushes to overlaps nothing and would otherwise be a trivial move all the way down.
+    ASSERT_EQ(db_->delete_range(Slice::from(std::string("zzz:0")),
+                                Slice::from(std::string("zzz:9"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+    ASSERT_EQ(db_->compact_level(1), Status::Ok);
+
+    for (const FileMetadata& file : files()) {
+        EXPECT_EQ(file.num_range_tombstones, 0u)
+            << "a tombstone reached the bottommost level without being reclaimed";
+    }
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_TRUE(db_->get(Slice::from(key_at(i))).has_value()) << i;
+    }
+}
+
+/* **A file covered by one of several disjoint ranges is dropped whole too**, which needs the
+ * tombstones themselves rather than what the manifest records about them.
+ *
+ * The manifest keeps the *hull* of a file's ranges — the range itself when there is one, a bounding
+ * interval with unknown gaps when there are more. A hull can show a file is not covered and never
+ * that it is, so acting on it alone means giving up the moment two deletes land in one file, which
+ * is what a compaction merging tombstones produces routinely. The cover's block is read instead,
+ * once, and only for candidates the hull already made plausible.
+ */
+TEST_F(DeleteRange, AFileCoveredByOneOfSeveralRangesIsStillDroppedWhole) {
+    for (int i = 0; i < 10; ++i) put("aaa:" + key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    for (int i = 0; i < 10; ++i) put("mmm:" + key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(files().size(), 2u);
+
+    // Two deletes far enough apart that merging cannot join them: one file, two ranges, a hull that
+    // spans both and the gap between.
+    ASSERT_EQ(db_->delete_range(Slice::from(std::string("aaa:")),
+                                Slice::from(std::string("aaa;"))), Status::Ok);
+    ASSERT_EQ(db_->delete_range(Slice::from(std::string("zzz:")),
+                                Slice::from(std::string("zzz;"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    for (const FileMetadata& file : files()) {
+        if (file.num_range_tombstones != 0) {
+            ASSERT_EQ(file.num_range_tombstones, 2u) << "the two ranges must not have merged";
+        }
+    }
+
+    // Not asserted on the return value: the reclaim runs on its own during the flush above, so by
+    // the time this asks there is usually nothing left to do. What the exact path buys is asserted
+    // by the outcome — with the manifest hull alone, a cover carrying two ranges authorises nothing
+    // and the file below is still here.
+    Status status = Status::Ok;
+    engine().reclaim_truncated_files_for_test(status);
+    ASSERT_EQ(status, Status::Ok);
+
+    for (const FileMetadata& file : files()) {
+        EXPECT_NE(file.smallest_key.rfind("aaa:", 0), 0u) << "the covered file is still here";
+    }
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_EQ(db_->get(Slice::from("aaa:" + key_at(i))).error(), Status::NotFound) << i;
+        EXPECT_TRUE(db_->get(Slice::from("mmm:" + key_at(i))).has_value()) << i;
+    }
+}
+
+/// The gap in the hull is not coverage: a file sitting in it survives.
+TEST_F(DeleteRange, AFileInTheGapBetweenTwoRangesIsNotDropped) {
+    for (int i = 0; i < 10; ++i) put("mmm:" + key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    ASSERT_EQ(db_->delete_range(Slice::from(std::string("aaa:")),
+                                Slice::from(std::string("aaa;"))), Status::Ok);
+    ASSERT_EQ(db_->delete_range(Slice::from(std::string("zzz:")),
+                                Slice::from(std::string("zzz;"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    Status status = Status::Ok;
+    engine().reclaim_truncated_files_for_test(status);
+    ASSERT_EQ(status, Status::Ok);
+
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_TRUE(db_->get(Slice::from("mmm:" + key_at(i))).has_value())
+            << i << " sat in the gap between the two ranges and was dropped anyway";
+    }
+}
+
+/* **Several real ranges in one batch, each with its own bounds.** The resolved bounds are held one
+ * entry per operation and read back by the same index, so two ranges cannot land on each other's
+ * bounds however many no-ops sit between them.
+ */
+TEST_F(DeleteRange, SeveralRangesInOneBatchEachApplyToTheirOwnBounds) {
+    for (int i = 0; i < 20; ++i) put(key_at(i), "old");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    WriteBatch batch;
+    batch.delete_range(Slice::from(key_at(2)), Slice::from(key_at(5)));
+    batch.delete_range(Slice::from(key_at(8)), Slice::from(key_at(8)));    // empty, between them
+    batch.delete_range(Slice::from(key_at(12)), Slice::from(key_at(15)));
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+
+    for (int i = 0; i < 20; ++i) {
+        const bool deleted = (i >= 2 && i < 5) || (i >= 12 && i < 15);
+        EXPECT_EQ(db_->get(Slice::from(key_at(i))).has_value(), !deleted) << i;
+    }
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    for (int i = 0; i < 20; ++i) {
+        const bool deleted = (i >= 2 && i < 5) || (i >= 12 && i < 15);
+        EXPECT_EQ(db_->get(Slice::from(key_at(i))).has_value(), !deleted) << i << " after flush";
+    }
+}
+
+/// Ranges and writes interleaved: each range covers what came before it and not what comes after.
+TEST_F(DeleteRange, RangesAndWritesInterleaveInOneBatch) {
+    WriteBatch batch;
+    batch.put(Slice::from(key_at(1)), Slice::from(std::string("first")));
+    batch.delete_range(Slice::from(key_at(0)), Slice::from(key_at(5)));    // covers key 1
+    batch.put(Slice::from(key_at(2)), Slice::from(std::string("second")));
+    batch.delete_range(Slice::from(key_at(2)), Slice::from(key_at(3)));    // covers key 2
+    batch.put(Slice::from(key_at(3)), Slice::from(std::string("third")));  // after both
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+
+    EXPECT_EQ(db_->get(Slice::from(key_at(1))).error(), Status::NotFound);
+    EXPECT_EQ(db_->get(Slice::from(key_at(2))).error(), Status::NotFound);
+    auto third = db_->get_copy(Slice::from(key_at(3)));
+    ASSERT_TRUE(third.has_value());
+    EXPECT_EQ(std::string(third->begin(), third->end()), "third");
+}
+
+/// Overlapping ranges in one batch are just their union once they reach a file.
+TEST_F(DeleteRange, OverlappingRangesInOneBatchMergeAtTheFile) {
+    for (int i = 0; i < 20; ++i) put(key_at(i), "old");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    WriteBatch batch;
+    batch.delete_range(Slice::from(key_at(2)), Slice::from(key_at(8)));
+    batch.delete_range(Slice::from(key_at(6)), Slice::from(key_at(12)));
+    ASSERT_EQ(db_->write(batch), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    for (const FileMetadata& file : files()) {
+        if (file.num_range_tombstones == 0) continue;
+        EXPECT_EQ(file.num_range_tombstones, 1u) << "the two overlap, so the file carries one";
+        EXPECT_EQ(file.smallest_range_key, key_at(2));
+        EXPECT_EQ(file.largest_range_key, key_at(12));
+    }
+    for (int i = 0; i < 20; ++i) {
+        const bool deleted = i >= 2 && i < 12;
+        EXPECT_EQ(db_->get(Slice::from(key_at(i))).has_value(), !deleted) << i;
+    }
+}
+
 }  // namespace
 }  // namespace elysiumkv::test

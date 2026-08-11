@@ -694,6 +694,18 @@ void JNICALL batch_delete(JNIEnv* env, jclass, jlong batch, jbyteArray key, jint
     });
 }
 
+void JNICALL batch_delete_range(JNIEnv* env, jclass, jlong batch, jbyteArray lower,
+                                jbyteArray upper) {
+    guard_void(env, [&] {
+        ByteArrayCopy lower_bytes(env, lower, env->GetArrayLength(lower));
+        if (env->ExceptionCheck()) return;
+        ByteArrayCopy upper_bytes(env, upper, env->GetArrayLength(upper));
+        if (env->ExceptionCheck()) return;
+        elysiumkv_batch_delete_range(as_batch(batch), lower_bytes.data(), lower_bytes.size(),
+                                     upper_bytes.data(), upper_bytes.size());
+    });
+}
+
 jlong JNICALL batch_size(JNIEnv*, jclass, jlong batch) {
     return static_cast<jlong>(elysiumkv_batch_size(as_batch(batch)));
 }
@@ -1053,6 +1065,8 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(batch_put)},
     {const_cast<char*>("batchDelete"), const_cast<char*>("(J[BI)V"),
      reinterpret_cast<void*>(batch_delete)},
+    {const_cast<char*>("batchDeleteRange"), const_cast<char*>("(J[B[B)V"),
+     reinterpret_cast<void*>(batch_delete_range)},
     {const_cast<char*>("batchSize"), const_cast<char*>("(J)J"),
      reinterpret_cast<void*>(batch_size)},
     {const_cast<char*>("write"), const_cast<char*>("(JJ)V"),

@@ -110,32 +110,19 @@ std::vector<FileMetadata> Version::files_entirely_truncated() const {
     return dead;
 }
 
-std::vector<FileMetadata> Version::files_entirely_range_deleted() const {
-    std::vector<FileMetadata> dead;
+std::vector<Version::RangeDropCandidate> Version::range_drop_candidates() const {
+    std::vector<RangeDropCandidate> candidates;
 
-    // Candidates first: files whose *whole* covered span is a single tombstone.
-    //
-    // **Only a file carrying exactly one is usable from here.** The manifest records the span of a
-    // file's tombstones, which for two or more is a hull with gaps in it — and a hull says only
-    // where the tombstones are not, never that a particular key is covered. Reading the block would
-    // settle it, but a `Version` is a data structure and does no I/O. One tombstone is the case this
-    // exists for anyway: one `delete_range` evicting one tenant.
-    struct Cover {
-        int level;
-        uint64_t file_number;
-        Slice lower;
-        Slice upper;
-    };
-    std::vector<Cover> covers;
+    // Covers first: any file carrying range tombstones at all. The span the manifest records is the
+    // hull of them — exactly the tombstone when there is one, a bounding interval with unknown gaps
+    // when there are more. Used here only to *reject*, which a hull can always do soundly.
+    std::vector<const FileMetadata*> covers;
     for (const auto& files : levels_) {
         for (const FileMetadata& file : files) {
-            if (file.num_range_tombstones != 1) continue;
-            covers.push_back(Cover{file.level, file.file_number,
-                                   Slice::from(file.smallest_range_key),
-                                   Slice::from(file.largest_range_key)});
+            if (file.num_range_tombstones != 0) covers.push_back(&file);
         }
     }
-    if (covers.empty()) return dead;
+    if (covers.empty()) return candidates;
 
     for (const auto& files : levels_) {
         for (const FileMetadata& file : files) {
@@ -143,25 +130,26 @@ std::vector<FileMetadata> Version::files_entirely_range_deleted() const {
             // too, and they shadow files this cover says nothing about.
             if (file.num_range_tombstones != 0) continue;
             if (file.num_entries == 0) continue;
-            for (const Cover& cover : covers) {
+            for (const FileMetadata* cover : covers) {
                 // Strictly newer, in the one order this engine has: a lower level, or the same
                 // level and a higher file number. Equal is not newer — a tombstone shadows nothing
                 // in the file that carries it, and here that file *is* the candidate.
-                const bool newer = cover.level < file.level ||
-                                   (cover.level == file.level &&
-                                    cover.file_number > file.file_number);
+                const bool newer = cover->level < file.level ||
+                                   (cover->level == file.level &&
+                                    cover->file_number > file.file_number);
                 if (!newer) continue;
                 // Every key in the file, inclusive of its largest, must fall inside the half-open
                 // range — so the upper bound has to sit strictly above the largest key.
-                if (cover.lower <= Slice::from(file.smallest_key) &&
-                    Slice::from(file.largest_key) < cover.upper) {
-                    dead.push_back(file);
+                if (Slice::from(cover->smallest_range_key) <= Slice::from(file.smallest_key) &&
+                    Slice::from(file.largest_key) < Slice::from(cover->largest_range_key)) {
+                    candidates.push_back(RangeDropCandidate{
+                        file, *cover, cover->num_range_tombstones == 1});
                     break;
                 }
             }
         }
     }
-    return dead;
+    return candidates;
 }
 
 std::shared_ptr<const Version> Version::apply(const Version& base, const VersionEdit& edit) {
