@@ -359,6 +359,11 @@ public final class ElysiumKV implements ReadOnlyStore {
      * outstanding throws: a leaked pin is a block-cache entry that can never be
      * evicted, which is a bug worth failing a test over rather than a tidiness
      * complaint. Without it, closing simply cleans up.
+     *
+     * <p><b>Closing also attempts a flush.</b> There is no write-ahead log, so a memtable dropped
+     * on a clean shutdown is lost for no reason at all. The attempt is best-effort and a failure is
+     * not reported here — {@link #flush()} is still the only way to know — and
+     * {@link #closeWithoutFlush()} skips it.
      */
     @Override
     public void close() {
@@ -370,8 +375,28 @@ public final class ElysiumKV implements ReadOnlyStore {
         }
     }
 
+    /**
+     * Closes without the flush {@link #close} attempts, discarding whatever the memtable still
+     * holds.
+     *
+     * <p>That is what a crash leaves behind. Two callers want it: a test that means to lose the
+     * writes, and an embedder that has decided they are not worth the shutdown latency.
+     */
+    public void closeWithoutFlush() {
+        long outstanding = closeReportingOutstanding(false);
+        if (checked && outstanding != 0) {
+            throw new IllegalStateException(
+                    outstanding + " pins or iterators were outstanding at close; a leaked pin "
+                            + "holds a block-cache entry indefinitely (ARCHITECTURE.md - The ABI boundary)");
+        }
+    }
+
     /** Closes and returns what was left outstanding. Zero is clean. */
     public long closeReportingOutstanding() {
+        return closeReportingOutstanding(true);
+    }
+
+    private long closeReportingOutstanding(boolean flushFirst) {
         if (handle == 0) return 0;
         long h = handle;
         handle = 0;
@@ -381,7 +406,7 @@ public final class ElysiumKV implements ReadOnlyStore {
         // number this method exists to report. The C ABI detaches live iterators
         // rather than freeing them, so destroying the wrappers afterwards is
         // safe by contract.
-        long outstanding = Native.close(h);
+        long outstanding = flushFirst ? Native.close(h) : Native.closeWithoutFlush(h);
         synchronized (iterators) {
             for (ElysiumKVIterator iterator : new ArrayList<>(iterators)) iterator.close();
             iterators.clear();

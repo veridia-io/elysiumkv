@@ -512,14 +512,29 @@ public class ElysiumKVSessionStore implements SessionStore<Bytes, byte[]> {
         if (open) db.flush();
     }
 
+    /**
+     * Closes the store, flushing first.
+     *
+     * <p>The engine attempts a flush of its own when the handle closes, so this is not the only
+     * thing standing between a caller and a lost memtable. It is the only thing that can
+     * <em>report</em> one: the engine's attempt happens in a destructor and cannot raise, whereas a
+     * failure here propagates and tells the caller their writes are not durable.
+     *
+     * <p>Costs nothing where Streams already flushed — an empty memtable is not written — and the
+     * store and its options are released whether the flush succeeds or not.
+     */
     @Override
     public void close() {
         if (!open) return;
         open = false;
         try {
-            db.close();
+            db.flush();
         } finally {
-            if (options != null) options.close();
+            try {
+                db.close();
+            } finally {
+                if (options != null) options.close();
+            }
         }
     }
 

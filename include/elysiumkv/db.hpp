@@ -238,6 +238,19 @@ public:
     /// Forces memtable -> L0 and waits for it.
     virtual Status flush() = 0;
 
+    /// Drops whatever is unflushed instead of trying to save it at destruction.
+    ///
+    /// **Destruction attempts a flush by default**, because there is no write-ahead log and a
+    /// memtable thrown away on a clean shutdown is lost for no reason — the process had every
+    /// opportunity to write it. The attempt is best-effort and its failure is not reported: a
+    /// destructor has nowhere to report to, and promising durability from one would be worse than
+    /// promising nothing. `flush()` is still the only way to *know*.
+    ///
+    /// This turns the attempt off, which is what a crash looks like from the store's side. Two
+    /// callers want it: a test that means to lose the memtable, and an embedder that has decided
+    /// the writes are not worth the shutdown latency.
+    virtual void abandon_unflushed() = 0;
+
     /// Rewrites every file at `level` under current compression and placement.
     /// At the last level this rewrites in place; elsewhere it compacts into the
     /// level below. One pass over the level's files, so it terminates

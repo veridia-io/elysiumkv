@@ -193,4 +193,27 @@ class ElysiumKVSessionStoreTest {
         assertEquals(1, drain(store.findSessions(0L, Long.MAX_VALUE)).size());
         store.close();
     }
+
+    /**
+     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * write-ahead log, so a {@code close()} that does not flush discards everything still in the
+     * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
+     * closes, so no test that goes through a topology can see this; only closing the store directly
+     * can, which is exactly what a caller outside Streams does.
+     */
+    @Test
+    void closingWithoutAFlushKeepsTheWrites(@TempDir Path dir) {
+        SessionStore<Bytes, byte[]> store = open(dir);
+        store.put(session("a", 1_000L, 2_000L), value("v"));
+        store.close();                       // deliberately no flush()
+
+        SessionStore<Bytes, byte[]> reopened = open(dir);
+        int seen = 0;
+        try (KeyValueIterator<Windowed<Bytes>, byte[]> it = reopened.fetch(key("a"))) {
+            while (it.hasNext()) { it.next(); ++seen; }
+        }
+        assertEquals(1, seen);
+        reopened.close();
+    }
+
 }

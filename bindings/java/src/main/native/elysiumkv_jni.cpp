@@ -527,6 +527,10 @@ jlong JNICALL close_db(JNIEnv*, jclass, jlong db) {
     return static_cast<jlong>(elysiumkv_close(as_db(db)));
 }
 
+jlong JNICALL close_db_without_flush(JNIEnv*, jclass, jlong db) {
+    return static_cast<jlong>(elysiumkv_close_without_flush(as_db(db)));
+}
+
 // --- reads -------------------------------------------------------------------
 
 /* Zero-copy: NewDirectByteBuffer wraps the pinned block itself, so the value
@@ -1013,6 +1017,8 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char*>("openWithResult"), const_cast<char*>("(J[J[J[Z)[Ljava/lang/String;"),
      reinterpret_cast<void*>(open_with_result)},
     {const_cast<char*>("close"), const_cast<char*>("(J)J"), reinterpret_cast<void*>(close_db)},
+    {const_cast<char*>("closeWithoutFlush"), const_cast<char*>("(J)J"),
+     reinterpret_cast<void*>(close_db_without_flush)},
 
     {const_cast<char*>("get"), const_cast<char*>("(J[BI[J)Ljava/nio/ByteBuffer;"),
      reinterpret_cast<void*>(get)},

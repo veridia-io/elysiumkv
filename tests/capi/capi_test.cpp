@@ -208,6 +208,41 @@ TEST_F(CApiTest, ACleanCloseReportsNothing) {
     EXPECT_EQ(elysiumkv_close(db), 0u);
 }
 
+// **A clean close attempts a flush**, because there is no write-ahead log and a memtable dropped on
+// the way out is lost for no reason. The C ABI inherits this from the engine's destructor.
+TEST_F(CApiTest, CloseAttemptsAFlush) {
+    elysiumkv_db* db = open();
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+
+    db = open();
+    const uint8_t* value = nullptr;
+    size_t len = 0;
+    uint64_t pin = 0;
+    EXPECT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>("k"), 1, &value, &len, &pin),
+              ELYSIUMKV_OK)
+        << "a clean close discarded the memtable";
+    elysiumkv_unpin(db, pin);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+// The control, and the reason the case above is not vacuous: told not to flush, the same sequence
+// loses the write exactly as a crash would.
+TEST_F(CApiTest, CloseWithoutFlushDiscardsTheMemtable) {
+    elysiumkv_db* db = open();
+    ASSERT_EQ(put(db, "k", "v"), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_close_without_flush(db), 0u);
+
+    db = open();
+    const uint8_t* value = nullptr;
+    size_t len = 0;
+    uint64_t pin = 0;
+    EXPECT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>("k"), 1, &value, &len, &pin),
+              ELYSIUMKV_NOT_FOUND);
+    EXPECT_EQ(elysiumkv_close(db), 0u);
+}
+
+
 // The pinned bytes must stay readable while the pin is held, whatever the cache
 // does in the meantime — that is the whole point of the protocol.
 TEST_F(CApiTest, PinnedBytesSurviveCachePressure) {

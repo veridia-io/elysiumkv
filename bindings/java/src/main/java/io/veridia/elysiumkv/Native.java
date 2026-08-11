@@ -152,6 +152,9 @@ final class Native {
     /** Returns the number of pins and iterators left outstanding. Zero is clean. */
     static native long close(long db);
 
+    /** Closes without the flush {@link #close} attempts; whatever the memtable held is dropped. */
+    static native long closeWithoutFlush(long db);
+
     // --- reads ---------------------------------------------------------------
 
     /**

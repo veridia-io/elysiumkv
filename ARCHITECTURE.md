@@ -473,6 +473,13 @@ unflushed memtable is still lost; the watermark tells you where to resume, it do
 you lost. `flush_interval` is what bounds the lag on a quiet store, and `flush()` promotes it
 immediately.
 
+A *clean* close is the one case where nothing needs to be lost, and closing therefore **attempts** a
+flush: the process is still running and the memtable is still there, so discarding it would be a
+loss for no reason. The attempt promises nothing — a destructor has nowhere to report a failure to,
+and a durability guarantee no caller can check would be worse than none — so `flush()` remains the
+only way to know. `DB::abandon_unflushed` turns the attempt off, which is what a crash looks like
+and what the tests that model one use.
+
 Each file carries **two** values, not one:
 
 - `low` — the last watermark established when the source memtable was *created*. Because every write

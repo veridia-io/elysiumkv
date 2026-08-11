@@ -86,6 +86,66 @@ protected:
     uint64_t discarded_files_ = 0;
 };
 
+// --- what a clean shutdown saves, and what it does not ------------------------
+
+/* **A clean shutdown flushes.** There is no write-ahead log, so a memtable dropped at destruction
+ * is lost — and on a *clean* close that is a loss for no reason at all, since the process had every
+ * opportunity to write it. RocksDB, which Kafka Streams runs with its WAL disabled, does the same
+ * thing for the same reason: `avoid_flush_during_shutdown` defaults to false.
+ *
+ * **The attempt promises nothing**, which is why this asserts the outcome rather than a status: a
+ * destructor has nowhere to report a failed flush to, and a durability guarantee nobody can check
+ * would be worse than no guarantee. `flush()` remains the only way to know.
+ */
+TEST_F(DurabilityTest, AStoreClosedWithoutAFlushKeepsItsWrites) {
+    Options options = durable_options();
+    {
+        auto db = open_reporting(options);
+        ASSERT_NE(db, nullptr);
+        ASSERT_EQ(db->put(Slice::from(key_at(1)), Slice::from("v1")), Status::Ok);
+    }
+    auto reopened = open_reporting(options);
+    ASSERT_NE(reopened, nullptr);
+    auto value = reopened->get_copy(Slice::from(key_at(1)));
+    ASSERT_TRUE(value.has_value()) << "a clean close threw the memtable away";
+    EXPECT_EQ(std::string(value->begin(), value->end()), "v1");
+}
+
+// The control, and the thing that makes the case above mean something: told to abandon, the store
+// drops the memtable exactly as a crash would. Without this there would be no way left to write a
+// test about losing unflushed state.
+TEST_F(DurabilityTest, AnAbandonedStoreLosesWhatWasNeverFlushed) {
+    Options options = durable_options();
+    {
+        auto db = open_reporting(options);
+        ASSERT_NE(db, nullptr);
+        ASSERT_EQ(db->put(Slice::from(key_at(1)), Slice::from("v1")), Status::Ok);
+        db->abandon_unflushed();
+    }
+    auto reopened = open_reporting(options);
+    ASSERT_NE(reopened, nullptr);
+    EXPECT_EQ(reopened->get_copy(Slice::from(key_at(1))).error(), Status::NotFound);
+}
+
+// Flushed writes are unaffected by abandoning, which only ever concerns the memtable.
+TEST_F(DurabilityTest, AbandoningDropsOnlyTheUnflushedPart) {
+    Options options = durable_options();
+    {
+        auto db = open_reporting(options);
+        ASSERT_NE(db, nullptr);
+        ASSERT_EQ(db->put(Slice::from(key_at(1)), Slice::from("durable")), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->put(Slice::from(key_at(2)), Slice::from("transient")), Status::Ok);
+        db->abandon_unflushed();
+    }
+    auto reopened = open_reporting(options);
+    ASSERT_NE(reopened, nullptr);
+    auto kept = reopened->get_copy(Slice::from(key_at(1)));
+    ASSERT_TRUE(kept.has_value());
+    EXPECT_EQ(std::string(kept->begin(), kept->end()), "durable");
+    EXPECT_EQ(reopened->get_copy(Slice::from(key_at(2))).error(), Status::NotFound);
+}
+
 // ARCHITECTURE.md "Open and recovery" — missing from a Durable store is corruption, and the failure names the
 // file.
 TEST_F(DurabilityTest, AMissingFileOnADurableStoreIsCorruption) {

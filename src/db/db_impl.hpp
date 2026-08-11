@@ -89,6 +89,7 @@ public:
     std::unique_ptr<Iterator> reverse_prefix_iterator(Slice prefix) override;
 
     Status flush() override;
+    void abandon_unflushed() override { abandoned_.store(true, std::memory_order_relaxed); }
     Status compact_level(int level) override;
     Status refresh() override;
 
@@ -495,6 +496,8 @@ private:
     std::atomic<bool> unusable_{false};
     /// **No manifest write of any kind**, no background threads, no reclamation, no CAS.
     bool read_only_ = false;
+    /// Set by `abandon_unflushed`; suppresses the destructor's best-effort flush.
+    std::atomic<bool> abandoned_{false};
 };
 
 }  // namespace elysiumkv

@@ -834,40 +834,51 @@ elysiumkv_status elysiumkv_open_with_result(const elysiumkv_options* options, el
     });
 }
 
+namespace {
+
+uint64_t close_db(elysiumkv_db* db, bool flush_first) {
+    if (db == nullptr) return 0;
+    // Before the handle bookkeeping, because it is the engine that owns the decision and the
+    // destructor is where the attempt happens. See `DB::abandon_unflushed`.
+    if (!flush_first && db->db != nullptr) db->db->abandon_unflushed();
+
+    uint64_t outstanding = 0;
+    {
+        std::lock_guard<std::mutex> lock(db->pins_mutex);
+        outstanding = db->pins.size();
+    }
+    {
+        std::lock_guard<std::mutex> lock(db->iters_mutex);
+        outstanding += db->iters.size();
+        // Detach rather than free: the handle belongs to the caller, and
+        // a destroy after close must not be a use-after-free.
+        for (elysiumkv_iter* iter : db->iters) {
+            iter->iterator.reset();
+            iter->owner = nullptr;
+        }
+        db->iters.clear();
+    }
+
+    // ARCHITECTURE.md "The ABI boundary" — a leaked pin holds a block-cache entry forever, so this is a
+    // first-class invariant rather than a diagnostic. The pins are
+    // released here regardless — leaking the memory too would help
+    // nobody — but the count is reported so a binding's tests can fail.
+    if (outstanding != 0) {
+        set_last_error("close: " + std::to_string(outstanding) +
+                       " pin(s) or iterator(s) still outstanding at close");
+    }
+    delete db;
+    return outstanding;
+}
+
+}  // namespace
+
 uint64_t elysiumkv_close(elysiumkv_db* db) {
-    return guard_value(
-        [&]() -> uint64_t {
-            if (db == nullptr) return 0;
+    return guard_value([&]() -> uint64_t { return close_db(db, /*flush_first=*/true); }, 0);
+}
 
-            uint64_t outstanding = 0;
-            {
-                std::lock_guard<std::mutex> lock(db->pins_mutex);
-                outstanding = db->pins.size();
-            }
-            {
-                std::lock_guard<std::mutex> lock(db->iters_mutex);
-                outstanding += db->iters.size();
-                // Detach rather than free: the handle belongs to the caller, and
-                // a destroy after close must not be a use-after-free.
-                for (elysiumkv_iter* iter : db->iters) {
-                    iter->iterator.reset();
-                    iter->owner = nullptr;
-                }
-                db->iters.clear();
-            }
-
-            // ARCHITECTURE.md "The ABI boundary" — a leaked pin holds a block-cache entry forever, so this is a
-            // first-class invariant rather than a diagnostic. The pins are
-            // released here regardless — leaking the memory too would help
-            // nobody — but the count is reported so a binding's tests can fail.
-            if (outstanding != 0) {
-                set_last_error("elysiumkv_close: " + std::to_string(outstanding) +
-                               " pin(s) or iterator(s) still outstanding at close");
-            }
-            delete db;
-            return outstanding;
-        },
-        0);
+uint64_t elysiumkv_close_without_flush(elysiumkv_db* db) {
+    return guard_value([&]() -> uint64_t { return close_db(db, /*flush_first=*/false); }, 0);
 }
 
 // --- reads --------------------------------------------------------------------

@@ -196,6 +196,15 @@ private:
         db_.reset();
     }
 
+    /// A kill, as distinct from a close. **The two stopped being the same operation** once
+    /// destruction began attempting a flush: a clean close now saves the memtable, so a kill has to
+    /// say that it does not want that, or `Kind::Kill` would preserve exactly the writes the oracle
+    /// is about to declare lost.
+    void kill_db() {
+        if (db_ != nullptr) db_->abandon_unflushed();
+        close_db();
+    }
+
     std::optional<DiffFailure> open() {
         // open_with_result, not open: a transient configuration is refused by the
         // guarded form by design (ARCHITECTURE.md "A tier is not a level").
@@ -329,7 +338,7 @@ private:
                 // ARCHITECTURE.md "Positional recency" — everything since the last successful flush is lost, and
                 // restoring it is the embedder's business. Everything before it
                 // must come back exactly.
-                close_db();
+                kill_db();
                 oracle_ = flushed_;
                 if (auto failure = open()) return failure->message;
                 return check_scan(Slice(), Slice(), false, oracle_entries(oracle_));
