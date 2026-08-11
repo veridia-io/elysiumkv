@@ -149,6 +149,14 @@ public:
     /// optimisation, an invalidation is not. Suppressing both would assert a guarantee this
     /// design does not make, and would leave the test ambiguous about which one it claimed.
     void suppress_maintenance_wakes_for_test(bool on) { suppress_maintenance_wakes_.store(on); }
+    /// Compactions the tombstone-density trigger won, rather than a size ratio.
+    ///
+    /// A test hook rather than a `Stats` field: it exists so a configuration claiming to exercise
+    /// the trigger can show that it did, and adding it to the stats buffer would change a
+    /// compatibility contract for the benefit of a test.
+    uint64_t density_compactions_for_test() const {
+        return density_compactions_.load(std::memory_order_relaxed);
+    }
     /// ARCHITECTURE.md "Negative controls" — freezes the epoch, which is what a predicate whose
     /// invalidating transitions were never wired up looks like from the gate's side. The periodic
     /// bypass is then the only thing that can find the work, which is the bound this exists to
@@ -433,6 +441,7 @@ private:
     uint64_t reconcile_ticks_ = 0;
     std::atomic<bool> transient_stalled_{false};
     std::atomic<bool> suppress_maintenance_wakes_{false};
+    std::atomic<uint64_t> density_compactions_{0};
     /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
     std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};

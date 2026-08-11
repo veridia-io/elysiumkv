@@ -148,7 +148,40 @@ INSTANTIATE_TEST_SUITE_P(
                      .compression = Compression::Zstd,
                      .memtable_bytes = 64u << 10,
                      .cached = true,
-                     .budget_bytes = 48u << 10}),
+                     .budget_bytes = 48u << 10},
+        // The cache reading past what it was asked for. A chunk overruns the request at both
+        // ends and the object at the last one, so the slicing that trims it back is where this
+        // goes wrong — and it goes wrong as a wrong value or a short read, which is what an
+        // oracle catches and a request-count test cannot. Deliberately not a multiple of the
+        // 1 KiB block size: an aligned granularity would make every boundary case land on a
+        // block edge and hide exactly the off-by-one worth looking for.
+        ReplayConfig{.name = "ChunkedCache",
+                     .compression = Compression::Zstd,
+                     .cached = true,
+                     .cache_fetch_granularity = 3000},
+        // And with tiers and a small memtable, so chunked reads happen against files that
+        // migration is moving between stores underneath them.
+        ReplayConfig{.name = "ChunkedCacheTiered",
+                     .compression = Compression::Zstd,
+                     .split_stores = true,
+                     .memtable_bytes = 64u << 10,
+                     .cached = true,
+                     .cache_fetch_granularity = 3000},
+        // Compaction driven by tombstone density rather than by size. The op stream deletes
+        // often enough to arm it, and every answer must match the same stream without it: the
+        // trigger decides *when* to compact, never *what* survives. A picker unit test cannot
+        // reach this, because it never replays the compaction it asked for.
+        ReplayConfig{.name = "DenseTombstones",
+                     .compression = Compression::Zstd,
+                     .memtable_bytes = 64u << 10,
+                     .tombstone_density_trigger = 0.2},
+        // The same trigger where tombstones are hardest to reclaim: several tiers, so a
+        // compaction that would drop them has to be bottommost for its key range first.
+        ReplayConfig{.name = "DenseTombstonesTiered",
+                     .compression = Compression::Zstd,
+                     .split_stores = true,
+                     .memtable_bytes = 64u << 10,
+                     .tombstone_density_trigger = 0.2}),
     [](const auto& scenario) { return scenario.param.name; });  // not `info`: gtest shadows it
 
 /// ARCHITECTURE.md "The differential oracle" — the nightly randomized pass. Same op streams, same oracle, but the

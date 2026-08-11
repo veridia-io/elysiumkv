@@ -31,6 +31,13 @@ struct Compaction {
     /// re-pointed instead of rewritten. A move changes no bytes and no tier.
     bool trivial_move = false;
     double score = 0.0;
+    /// Whether the winning score came from tombstone density rather than from a size ratio.
+    ///
+    /// Carried because the two are indistinguishable afterwards — both are just a number above
+    /// one — and a configuration claiming to exercise the density trigger has no other way to
+    /// show that it did. Without it a suite can hold a case that never arms the trigger and looks
+    /// like coverage.
+    bool triggered_by_density = false;
 
     /// Every input and overlap, oldest-source-last: the order the merging
     /// iterator needs, since recency is positional (ARCHITECTURE.md "Positional recency").

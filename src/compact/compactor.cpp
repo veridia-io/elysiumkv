@@ -471,6 +471,9 @@ bool DbImpl::run_one_compaction(Status& status) {
                                       options_.tombstone_density_min_entries});
     }
     if (!compaction.has_value()) return false;
+    if (compaction->triggered_by_density) {
+        density_compactions_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     status = run_compaction(*compaction);
     compaction_finished_.notify_all();

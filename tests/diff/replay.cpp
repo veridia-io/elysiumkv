@@ -113,7 +113,13 @@ public:
 
         // Built once, before the first open, so the chain survives the reopen this
         // replay performs at the end: the reopen then reads through a *warm* cache.
-        if (config.cached) cache_every_tier(options_, store_.path() / "cache");
+        if (config.cached) {
+            cache_every_tier(options_, store_.path() / "cache", config.cache_fetch_granularity);
+        }
+        options_.tombstone_density_trigger = config.tombstone_density_trigger;
+        // Low, because the streams are short: the engine default of 1024 entries would keep the
+        // trigger from ever arming and the config would test nothing.
+        options_.tombstone_density_min_entries = 16;
 
         // ARCHITECTURE.md "The differential oracle" — in the gating pass background work runs inline, so the op
         // stream fully determines the execution and a failing seed reproduces.
@@ -160,6 +166,16 @@ public:
         // ARCHITECTURE.md "Negative controls" — a configuration that claims to exercise shedding and never sheds
         // exercises nothing, and would sit in the suite looking like coverage. The
         // harness checks its own premise.
+        // The same premise check for the density trigger. Every answer is identical whether it
+        // fires or not — that is the property under test — so a configuration where it never
+        // armed would pass while exercising nothing new.
+        if (config_.tombstone_density_trigger > 0.0 &&
+            density_compactions_seen_ + engine().density_compactions_for_test() == 0) {
+            return DiffFailure{ops.size(),
+                               "the tombstone-density trigger never fired, so this configuration "
+                               "tested nothing: raise the delete rate or lower the trigger"};
+        }
+
         if (budget_ != nullptr && sheds_seen_ + db_->stats().budget_sheds == 0) {
             return DiffFailure{ops.size(),
                                "the memory budget was never exceeded, so this configuration "
@@ -173,7 +189,10 @@ private:
     /// once more at the end. Reading it off the final instance answered zero however much
     /// shedding had happened, which is how the vacuity check below first lied.
     void close_db() {
-        if (db_ != nullptr) sheds_seen_ += db_->stats().budget_sheds;
+        if (db_ != nullptr) {
+            sheds_seen_ += db_->stats().budget_sheds;
+            density_compactions_seen_ += engine().density_compactions_for_test();
+        }
         db_.reset();
     }
 
@@ -525,6 +544,7 @@ private:
     Options options_;
     std::shared_ptr<MemoryBudget> budget_;
     uint64_t sheds_seen_ = 0;
+    uint64_t density_compactions_seen_ = 0;
     std::unique_ptr<DB> db_;
     Oracle oracle_;
     Oracle flushed_;

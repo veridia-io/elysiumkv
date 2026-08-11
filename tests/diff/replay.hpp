@@ -33,6 +33,20 @@ struct ReplayConfig {
     /// reads through a *warm* cache — which is where an entry that should have been
     /// invalidated would surface.
     bool cached = false;
+    /// Rounds every cache miss out to a chunk of this size. Only meaningful with `cached`.
+    ///
+    /// **A cache that reads more than it was asked for must still answer exactly what it was
+    /// asked for.** The chunk runs past the requested range at both ends and past the end of the
+    /// object at the last one, so an off-by-one in the slicing shows up as a wrong value or a
+    /// short read — which the oracle catches and a request-count test cannot.
+    size_t cache_fetch_granularity = 0;
+    /// Compacts a file once this fraction of its entries are tombstones; zero leaves it off.
+    ///
+    /// **Changes when compaction happens, and nothing else.** Every answer must be identical to
+    /// the same stream without it — a trigger that fired on the wrong file, or dropped a live key
+    /// while reclaiming a tombstone, is a difference the oracle sees and a picker unit test does
+    /// not, because the unit test never replays the compaction it asked for.
+    double tombstone_density_trigger = 0.0;
     /// ARCHITECTURE.md "A process-wide memory budget" — a shared `MemoryBudget` of this size, or none when zero.
     ///
     /// **Shedding forces a flush at an arbitrary point in the op stream**, which is
