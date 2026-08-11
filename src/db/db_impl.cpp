@@ -844,8 +844,9 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
 }
 
 void DbImpl::publish_transient_stall(const Version& version, uint64_t now) {
-    if (pinned_transient_stall_.load() >= 0) return;   // negative control; see the header
-
+    // Computed unconditionally, pin or no pin: `transient_stalled()` is where the override is
+    // applied, so this keeps the real value fresh and unpinning is correct immediately rather than
+    // at the next tick.
     bool stalled = false;
     for (const Tier& tier : tiers_.tiers) {
         if (tier.durability != Durability::Transient || !tier.stall_age.has_value()) continue;
@@ -1739,7 +1740,7 @@ Status DbImpl::throttle_writes() {
             // evaluates it itself — the same asymmetry `flush_interval` already documents.
             publish_transient_stall(*version, now);
         }
-        if (transient_stalled_.load()) stop = true;
+        if (transient_stalled()) stop = true;
 
         // 3. Still over after evicting and flushing: the memory is genuinely in use, so
         // the last lever is the caller's rate. Treated exactly like level pressure, so
