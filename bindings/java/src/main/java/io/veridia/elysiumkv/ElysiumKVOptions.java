@@ -1,8 +1,5 @@
 package io.veridia.elysiumkv;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * Configuration, built fluently and applied at {@link ElysiumKV#open}.
  *
@@ -18,7 +15,6 @@ import java.util.List;
  */
 public final class ElysiumKVOptions implements AutoCloseable {
     private long handle;
-    private final List<Runnable> pending = new ArrayList<>();
 
     private long memtableBytes;
     private long flushIntervalMs;
