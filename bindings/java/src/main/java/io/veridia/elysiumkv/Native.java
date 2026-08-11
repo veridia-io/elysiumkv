@@ -208,6 +208,9 @@ final class Native {
 
     static native void truncateBelow(long db, byte[] key, int keyLength);
 
+
+    static native void deleteRange(long db, byte[] lower, byte[] upper);
+
     static native void optionsConfigureCompaction(long options, double tombstoneDensityTrigger,
                                                   long tombstoneDensityMinEntries);
 

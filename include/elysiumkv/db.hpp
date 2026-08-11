@@ -235,6 +235,24 @@ public:
     /// operation with a different cost.
     virtual Status truncate_below(Slice key) = 0;
 
+    /// ARCHITECTURE.md "A range delete is a record, not a rewrite" — deletes every key in
+    /// `[lower, upper)`.
+    ///
+    /// **The counterpart to `truncate_below`, for a range that is not a prefix of the keyspace.**
+    /// A floor can only ever drop the lowest-sorting band and is permanent; this deletes a band from
+    /// anywhere, leaves the range writable afterwards, and costs one record rather than one per key.
+    /// A tenant sitting in the middle of a keyspace is the case that needs it.
+    ///
+    /// Bounds keep their meaning rather than their role: `lower` is included, `upper` is not — the
+    /// same convention an iterator's bounds use. An empty or inverted range deletes nothing and is
+    /// not an error, matching an iterator over the same bounds, which yields nothing.
+    ///
+    /// **Not free the way `truncate_below` is.** A floor moves one value in the manifest; this
+    /// writes a tombstone that every read in the range consults until compaction resolves it, and
+    /// the space comes back only when the covered files are rewritten or dropped whole. It is
+    /// cheaper than a delete per key by a wide margin, and dearer than a floor.
+    virtual Status delete_range(Slice lower, Slice upper) = 0;
+
     /// Forces memtable -> L0 and waits for it.
     virtual Status flush() = 0;
 

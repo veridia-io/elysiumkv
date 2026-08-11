@@ -43,6 +43,89 @@ TEST(Version, TheTruncationPointOnlyEverMovesForward) {
             << "an edit that says nothing about truncation leaves it where it was";
 }
 
+/* **A file a newer range tombstone covers whole can be unlinked without being read** — one manifest
+ * edit, no I/O. It is `files_entirely_truncated` generalised from a floor to a range, and it is what
+ * makes evicting a tenant cheap rather than merely expressible: otherwise the bytes come back only
+ * when some later compaction happens to rewrite them, which for a bottom-level file may be never.
+ *
+ * Asserted here rather than through the engine because a compaction usually reaches those files
+ * first, so an engine-level test would pass whether this existed or not.
+ */
+TEST(Version, AFileCoveredWholeByANewerRangeIsReclaimable) {
+    FileMetadata data = file(1, 5, "b", "y");
+    FileMetadata cover = file(0, 9, "", "");
+    cover.num_entries = 0;
+    cover.num_range_tombstones = 1;
+    cover.smallest_range_key = "a";
+    cover.largest_range_key = "z";
+
+    Version version({{cover}, {data}}, 10, {}, "");
+    const std::vector<FileMetadata> dead = version.files_entirely_range_deleted();
+    ASSERT_EQ(dead.size(), 1u);
+    EXPECT_EQ(dead[0].file_number, 5u);
+}
+
+TEST(Version, APartlyCoveredFileIsNotReclaimable) {
+    FileMetadata data = file(1, 5, "b", "y");
+    FileMetadata cover = file(0, 9, "", "");
+    cover.num_entries = 0;
+    cover.num_range_tombstones = 1;
+    cover.smallest_range_key = "a";
+    cover.largest_range_key = "m";   // stops short of the file's largest key
+
+    Version version({{cover}, {data}}, 10, {}, "");
+    EXPECT_TRUE(version.files_entirely_range_deleted().empty())
+        << "a file straddling the range keeps its live half and is narrowed by compaction";
+}
+
+/// The cover has to be *newer*. An older tombstone says nothing about what was written after it.
+TEST(Version, AnOlderRangeDoesNotReclaimANewerFile) {
+    FileMetadata data = file(0, 9, "b", "y");
+    FileMetadata cover = file(1, 5, "", "");
+    cover.num_entries = 0;
+    cover.num_range_tombstones = 1;
+    cover.smallest_range_key = "a";
+    cover.largest_range_key = "z";
+
+    Version version({{data}, {cover}}, 10, {}, "");
+    EXPECT_TRUE(version.files_entirely_range_deleted().empty());
+}
+
+/// A file carrying tombstones of its own is left alone: dropping it would drop those too, and they
+/// shadow files the cover says nothing about.
+TEST(Version, AFileWithItsOwnRangesIsNeverReclaimedThisWay) {
+    FileMetadata data = file(1, 5, "b", "y");
+    data.num_range_tombstones = 1;
+    data.smallest_range_key = "aaa";
+    data.largest_range_key = "bbb";
+    FileMetadata cover = file(0, 9, "", "");
+    cover.num_entries = 0;
+    cover.num_range_tombstones = 1;
+    cover.smallest_range_key = "a";
+    cover.largest_range_key = "z";
+
+    Version version({{cover}, {data}}, 10, {}, "");
+    EXPECT_TRUE(version.files_entirely_range_deleted().empty());
+}
+
+/* **Two or more tombstones in one file cannot be used from here**, and that is a limit rather than
+ * an oversight. The manifest records their span, which for two is a hull with a gap in it — and a
+ * hull can say where tombstones are *not*, never that a particular key is covered. Reading the block
+ * would settle it; a `Version` is a data structure and does no I/O.
+ */
+TEST(Version, AHullOfSeveralRangesIsNotTreatedAsCoverage) {
+    FileMetadata data = file(1, 5, "b", "y");
+    FileMetadata cover = file(0, 9, "", "");
+    cover.num_entries = 0;
+    cover.num_range_tombstones = 2;   // "a".."c" and "w".."z", say — the gap is invisible here
+    cover.smallest_range_key = "a";
+    cover.largest_range_key = "z";
+
+    Version version({{cover}, {data}}, 10, {}, "");
+    EXPECT_TRUE(version.files_entirely_range_deleted().empty())
+        << "the hull covers the file, but the tombstones inside it may not";
+}
+
 TEST(VersionEdit, RoundTrips) {
     VersionEdit edit;
     edit.next_file_number = 42;

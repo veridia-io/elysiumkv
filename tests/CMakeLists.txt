@@ -32,6 +32,7 @@ add_executable(elysiumkv_tests
     unit/key_edges_test.cpp
     unit/reverse_iteration_test.cpp
     unit/truncate_test.cpp
+    unit/delete_range_test.cpp
     unit/cache_fetch_test.cpp
     unit/version_test.cpp
     unit/version_set_test.cpp

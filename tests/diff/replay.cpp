@@ -289,6 +289,21 @@ private:
                 flushed_.truncate_below(op.key);
                 return std::nullopt;
             }
+            case DiffOp::Kind::DeleteRange: {
+                const Status status =
+                    db_->delete_range(Slice::from(op.key), Slice::from(op.upper));
+                if (status != Status::Ok) {
+                    return std::string("delete_range: ") + std::string(status_name(status));
+                }
+                // The engine clamps a range reaching below the truncation floor rather than
+                // refusing it, and the oracle has already erased everything down there, so the
+                // clamp needs no counterpart here.
+                oracle_.delete_range(op.key, op.upper);
+                // **Not applied to `flushed_`**, unlike a truncation. A truncation is a manifest
+                // edit and durable when it returns; this is a record in the memtable, so a kill
+                // before the next flush loses it and every key it covered comes back.
+                return std::nullopt;
+            }
             case DiffOp::Kind::ReverseScanAll:
                 return check_reverse_scan(Slice(), Slice(), false,
                                           reversed(oracle_entries(oracle_)));

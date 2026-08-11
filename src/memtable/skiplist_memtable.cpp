@@ -182,6 +182,51 @@ void SkiplistMemtable::put(Slice key, Slice value) { insert(key, ValueType::Put,
 
 void SkiplistMemtable::remove(Slice key) { insert(key, ValueType::Delete, Slice()); }
 
+void SkiplistMemtable::delete_range(Slice lower, Slice upper) {
+    if (!(lower < upper)) return;   // an empty range deletes nothing
+
+    // Every key already here is turned into a point delete, because the range this call records
+    // will shadow only *older* files and these keys are about to be flushed into the very file that
+    // carries it. Replacing an existing key swaps one value pointer and adds no node, so walking
+    // the list while doing it does not disturb the walk.
+    for (auto it = ascending_from(lower); it->valid(); it->next()) {
+        if (!(it->key() < upper)) break;
+        if (it->type() == ValueType::Delete) continue;   // already a tombstone; leave the count alone
+        insert(it->key(), ValueType::Delete, Slice());
+    }
+
+    auto* node = reinterpret_cast<RangeNode*>(arena_.allocate_aligned(sizeof(RangeNode)));
+    uint8_t* lower_copy = arena_.allocate(lower.size());
+    std::memcpy(lower_copy, lower.data(), lower.size());
+    uint8_t* upper_copy = arena_.allocate(upper.size());
+    std::memcpy(upper_copy, upper.data(), upper.size());
+    node->lower = Slice(lower_copy, lower.size());
+    node->upper = Slice(upper_copy, upper.size());
+    node->next = ranges_.load(std::memory_order_relaxed);
+    // Release: a reader that sees this head sees a fully written node behind it.
+    ranges_.store(node, std::memory_order_release);
+    range_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool SkiplistMemtable::range_deletes(Slice key) const {
+    for (const RangeNode* node = ranges_.load(std::memory_order_acquire); node != nullptr;
+         node = node->next) {
+        if (node->lower <= key && key < node->upper) return true;
+    }
+    return false;
+}
+
+std::vector<RangeTombstone> SkiplistMemtable::range_tombstones() const {
+    std::vector<RangeTombstone> out;
+    for (const RangeNode* node = ranges_.load(std::memory_order_acquire); node != nullptr;
+         node = node->next) {
+        out.push_back(RangeTombstone{
+            std::string(node->lower.data(), node->lower.data() + node->lower.size()),
+            std::string(node->upper.data(), node->upper.data() + node->upper.size())});
+    }
+    return merge_ranges(std::move(out));
+}
+
 std::optional<Entry> SkiplistMemtable::get(Slice key) const {
     Node* node = find_greater_or_equal(key, nullptr);
     if (node == nullptr || node->key() != key) return std::nullopt;

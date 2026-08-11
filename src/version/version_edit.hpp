@@ -7,6 +7,7 @@
 #include "version/watermark.hpp"
 
 #include <cstdint>
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +32,46 @@ struct FileMetadata {
     /// nothing (ARCHITECTURE.md "Compaction"), instead of either accumulating garbage at the level holding
     /// most of the bytes or giving the optimisation up.
     uint64_t num_tombstones = 0;
+    /// How many range tombstones the file carries, and the span they cover.
+    ///
+    /// **The covered span is not bounded by `smallest_key` and `largest_key`.** A file can delete a
+    /// range it holds no keys in at all — a flush whose memtable saw only a `delete_range` produces
+    /// exactly that — so a read path that consulted the data span alone would walk straight past
+    /// the tombstone that answers its query. Recorded here so the decision to open the file's
+    /// tombstone block costs no I/O.
+    uint64_t num_range_tombstones = 0;
+    std::string smallest_range_key;
+    std::string largest_range_key;
+
+    /// ARCHITECTURE.md "A range delete is a record, not a rewrite" — the span this file
+    /// **affects**, data and deletions together.
+    ///
+    /// **Not the data span, and the difference is a correctness matter rather than an efficiency
+    /// one.** A file can delete a range it holds no keys in — a flush whose memtable saw only a
+    /// `delete_range` produces exactly that, with an empty data span. Choosing compaction inputs by
+    /// the data span alone moves such a file past the very files it exists to shadow and drops it
+    /// into a level where they sit *beside* it, and between two files at one level there is no
+    /// recency to appeal to. The deleted keys come back.
+    ///
+    /// `largest_range_key` is a tombstone's exclusive upper bound used here as an inclusive one,
+    /// which over-selects by at most one key. Over-selecting costs a file in a compaction; the
+    /// other direction costs data.
+    std::string effective_smallest() const {
+        if (num_range_tombstones == 0) return smallest_key;
+        if (num_entries == 0) return smallest_range_key;
+        return std::min(smallest_key, smallest_range_key);
+    }
+    std::string effective_largest() const {
+        if (num_range_tombstones == 0) return largest_key;
+        if (num_entries == 0) return largest_range_key;
+        return std::max(largest_key, largest_range_key);
+    }
+
+    /// Whether one of this file's range tombstones could cover `key`. Cheap: manifest data only.
+    bool range_may_cover(Slice key) const {
+        return num_range_tombstones != 0 && Slice::from(smallest_range_key) <= key &&
+               key < Slice::from(largest_range_key);
+    }
     /// The codec the file was *written under* — the level's configured
     /// compression at the time. Not in the list, but the
     /// `files_stale_codec` cannot be computed without it: the per-block type

@@ -3,9 +3,11 @@
 
 #include "elysiumkv/slice.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace elysiumkv {
 
@@ -16,6 +18,67 @@ enum class ValueType : uint8_t {
     Delete = 0x00,
     Put = 0x01,
 };
+
+/// ARCHITECTURE.md "A range delete is a record, not a rewrite" — a half-open range delete, `[lower, upper)`.
+///
+/// **Bounds keep their meaning rather than their role**, as everywhere else here: `lower` is
+/// included and `upper` is not, which is the same convention an iterator's bounds use and the same
+/// set in either direction of travel.
+struct RangeTombstone {
+    std::string lower;
+    std::string upper;
+
+    bool covers(Slice key) const {
+        return Slice::from(lower) <= key && key < Slice::from(upper);
+    }
+};
+
+/// ARCHITECTURE.md "A range delete is a record, not a rewrite" — the union of a set of range
+/// tombstones: sorted by lower bound, disjoint, empties dropped.
+///
+/// **Union is the whole of what fragmentation means here**, and that follows from having no
+/// sequence numbers. Every range tombstone in one file shadows exactly the same thing — everything
+/// strictly older in `(level, file_number)` order — so two overlapping ranges in one file are
+/// indistinguishable from the single range covering both. An engine that stamps each tombstone with
+/// a sequence number has to keep the pieces apart because they shadow different sets; here there is
+/// nothing to keep apart.
+inline std::vector<RangeTombstone> merge_ranges(std::vector<RangeTombstone> ranges) {
+    std::sort(ranges.begin(), ranges.end(), [](const RangeTombstone& a, const RangeTombstone& b) {
+        return a.lower != b.lower ? a.lower < b.lower : a.upper < b.upper;
+    });
+    std::vector<RangeTombstone> merged;
+    for (RangeTombstone& range : ranges) {
+        if (range.lower >= range.upper) continue;   // an empty range deletes nothing
+        // `<=` rather than `<`: [a,b) and [b,c) are contiguous, and leaving them apart would write
+        // two entries that answer every query exactly as one would.
+        if (!merged.empty() && range.lower <= merged.back().upper) {
+            if (range.upper > merged.back().upper) merged.back().upper = std::move(range.upper);
+        } else {
+            merged.push_back(std::move(range));
+        }
+    }
+    return merged;
+}
+
+/// The part of each range lying inside `[lower, upper)`. A null bound is unbounded on that side.
+///
+/// **Compaction outputs must not overlap in what they cover, tombstones included.** Two files at one
+/// level are ordered by key, not by recency — deeper levels rely on never overlapping, and there is
+/// no tie-break to fall back on. Handing every output the whole tombstone set, or handing it all to
+/// one of them, makes an earlier-keyed sibling shadow a later-keyed one and deletes live data.
+/// Clipping at the cut points tiles the range instead: each output carries exactly the part of each
+/// tombstone that belongs to its own slice, and no part is lost between them.
+inline std::vector<RangeTombstone> clip_ranges(const std::vector<RangeTombstone>& ranges,
+                                               const std::string* lower,
+                                               const std::string* upper) {
+    std::vector<RangeTombstone> clipped;
+    for (const RangeTombstone& range : ranges) {
+        std::string low = lower != nullptr && *lower > range.lower ? *lower : range.lower;
+        std::string high = upper != nullptr && *upper < range.upper ? *upper : range.upper;
+        if (low < high) clipped.push_back(RangeTombstone{std::move(low), std::move(high)});
+    }
+    return clipped;
+}
 
 inline bool is_known_value_type(uint8_t raw) {
     return raw == static_cast<uint8_t>(ValueType::Delete) ||

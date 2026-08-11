@@ -21,6 +21,7 @@ SstWriter::SstWriter(SstOptions options)
     : options_(options),
       data_block_(options.restart_interval),
       index_block_(options.restart_interval),
+      range_del_block_(options.restart_interval),
       bloom_(options.bloom_bits_per_key, options.bloom_probes) {}
 
 void SstWriter::add(Slice key, ValueType type, Slice value) {
@@ -63,6 +64,23 @@ Status SstWriter::flush_data_block() {
     return Status::Ok;
 }
 
+void SstWriter::add_range_tombstone(Slice lower, Slice upper) {
+    assert(!finished_);
+    assert(lower < upper);   // an empty range deletes nothing and has no business in the file
+    // Stored as an ordinary block entry — start as the key, end as the value — so the range
+    // tombstones get the same framing, checksum, compression and prefix compression as everything
+    // else, and `seek_for_prev` answers "which tombstone covers this key" without a scan.
+    //
+    // **`Put`, not `Delete`**, even though every entry here is a deletion: the type byte says
+    // whether the entry carries a value, and `BlockBuilder` drops the value of a `Delete` on the
+    // floor. The upper bound *is* the value, so a tombstone written as a `Delete` would lose the
+    // half of itself that says where it ends. What makes these deletions is the block they are in.
+    range_del_block_.add(lower, ValueType::Put, upper);
+    if (num_range_tombstones_ == 0) smallest_range_key_.assign(lower.data(), lower.data() + lower.size());
+    largest_range_key_.assign(upper.data(), upper.data() + upper.size());
+    ++num_range_tombstones_;
+}
+
 Result<SstBuildResult> SstWriter::finish() {
     assert(!finished_);
     finished_ = true;
@@ -91,6 +109,20 @@ Result<SstBuildResult> SstWriter::finish() {
     }
     footer.index.length = static_cast<uint32_t>(file_.size() - footer.index.offset);
 
+    // Only a file that carries one is written as v2: the version is per file, so a reader that
+    // predates range tombstones keeps reading every file that has none, and refuses exactly the
+    // files whose contents it would otherwise misreport.
+    if (num_range_tombstones_ != 0) {
+        const Slice range_content = range_del_block_.finish();
+        footer.range_del.offset = file_.size();
+        if (Status status = frame_block(range_content, options_.compression, file_);
+            status != Status::Ok) {
+            return std::unexpected(status);
+        }
+        footer.range_del.length = static_cast<uint32_t>(file_.size() - footer.range_del.offset);
+        footer.format_version = Footer::kFormatVersion2;
+    }
+
     footer.num_entries = num_entries_;
     file_.append(footer.encode());
 
@@ -100,12 +132,19 @@ Result<SstBuildResult> SstWriter::finish() {
     result.num_tombstones = num_tombstones_;
     result.smallest_key = std::move(smallest_key_);
     result.largest_key = std::move(largest_key_);
+    result.num_range_tombstones = num_range_tombstones_;
+    result.smallest_range_key = std::move(smallest_range_key_);
+    result.largest_range_key = std::move(largest_range_key_);
     return result;
 }
 
 Result<SstBuildResult> build_sst(InternalIterator& source, const SstOptions& options,
-                                 bool drop_tombstones) {
+                                 bool drop_tombstones,
+                                 const std::vector<RangeTombstone>& range_tombstones) {
     SstWriter writer(options);
+    for (const RangeTombstone& range : range_tombstones) {
+        writer.add_range_tombstone(Slice::from(range.lower), Slice::from(range.upper));
+    }
     for (; source.valid(); source.next()) {
         if (drop_tombstones && source.type() == ValueType::Delete) continue;
         writer.add(source.key(), source.type(), source.value());

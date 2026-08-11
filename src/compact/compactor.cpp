@@ -19,6 +19,7 @@
 #include "sst/sst_writer.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -108,7 +109,12 @@ void DbImpl::note_maintenance_state_changed() { invalidate_maintenance(); }
 /// obsolete-object path, which is what keeps an open reader safe from them.
 bool DbImpl::reclaim_truncated_files(Status& status) {
     auto version = versions_->current();
-    const std::vector<FileMetadata> dead = version->files_entirely_truncated();
+    std::vector<FileMetadata> dead = version->files_entirely_truncated();
+    // Files a newer range tombstone covers whole go the same way and for the same reason: the bytes
+    // are already unreadable, so rewriting them in a compaction would be work done to produce
+    // nothing. One edit, no I/O.
+    const std::vector<FileMetadata> covered = version->files_entirely_range_deleted();
+    dead.insert(dead.end(), covered.begin(), covered.end());
     if (dead.empty()) return false;
 
     VersionEdit edit;
@@ -261,20 +267,22 @@ Status DbImpl::compact_level(int level) {
                 continue;
             }
 
+            // The *effective* span, so a file carrying range tombstones is merged against what it
+            // shadows rather than moved past it. See `FileMetadata::effective_smallest`.
+            const std::string span_low = file.effective_smallest();
+            const std::string span_high = file.effective_largest();
             if (!bottom) {
                 compaction.overlaps =
-                    version->overlapping_inclusive(output_level, Slice::from(file.smallest_key),
-                                                   Slice::from(file.largest_key));
+                    version->overlapping_inclusive(output_level, Slice::from(span_low),
+                                                   Slice::from(span_high));
                 if (output_level + 1 <= config_.last()) {
                     compaction.grandparents = version->overlapping_inclusive(
-                        output_level + 1, Slice::from(file.smallest_key),
-                        Slice::from(file.largest_key));
+                        output_level + 1, Slice::from(span_low), Slice::from(span_high));
                 }
             }
             compaction.output_is_bottommost =
                 is_bottommost_for_range(*version, output_level, config_.last(),
-                                        Slice::from(file.smallest_key),
-                                        Slice::from(file.largest_key));
+                                        Slice::from(span_low), Slice::from(span_high));
         }
 
         if (Status status = run_compaction(compaction); status != Status::Ok) return status;
@@ -325,7 +333,8 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         if (seed == nullptr) return false;
 
         for (const FileMetadata& other : version->overlapping_inclusive(
-                 0, Slice::from(seed->smallest_key), Slice::from(seed->largest_key))) {
+                 0, Slice::from(seed->effective_smallest()),
+                 Slice::from(seed->effective_largest()))) {
             // An older L0 file covering any of this range would shadow the data once it
             // moves below. Leave it for now.
             if (other.file_number < seed->file_number) return false;
@@ -335,16 +344,17 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         compaction.output_level = 1;
         compaction.inputs = {*seed};
         compaction.trivial_move = false;  // a move would leave it on the same tier
-        compaction.overlaps = version->overlapping_inclusive(1, Slice::from(seed->smallest_key),
-                                                   Slice::from(seed->largest_key));
+        compaction.overlaps = version->overlapping_inclusive(
+            1, Slice::from(seed->effective_smallest()), Slice::from(seed->effective_largest()));
         if (config_.last() >= 2) {
             compaction.grandparents = version->overlapping_inclusive(
-                2, Slice::from(seed->smallest_key),
-                                                           Slice::from(seed->largest_key));
+                2, Slice::from(seed->effective_smallest()),
+                                                           Slice::from(seed->effective_largest()));
         }
         compaction.output_is_bottommost =
-            is_bottommost_for_range(*version, 1, config_.last(), Slice::from(seed->smallest_key),
-                                    Slice::from(seed->largest_key));
+            is_bottommost_for_range(*version, 1, config_.last(),
+                                    Slice::from(seed->effective_smallest()),
+                                    Slice::from(seed->effective_largest()));
     }
 
     status = run_compaction(compaction);
@@ -560,13 +570,22 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // descending file number), then the output level. Recency is positional (ARCHITECTURE.md "Positional recency").
     std::vector<std::shared_ptr<SstReader>> readers;
     std::vector<std::unique_ptr<InternalIterator>> children;
+    std::vector<std::vector<RangeTombstone>> child_ranges;
+    std::vector<RangeTombstone> all_ranges;
     for (const FileMetadata& file : compaction.all_inputs()) {
         auto reader = reader_for(file);
         if (!reader) return reader.error();
         readers.push_back(*reader);
         children.push_back((*reader)->iterator());
+        auto ranges = (*reader)->range_tombstones();
+        if (!ranges) return ranges.error();
+        all_ranges.insert(all_ranges.end(), ranges->begin(), ranges->end());
+        child_ranges.push_back(std::move(*ranges));
     }
-    auto merged = make_merging_iterator(std::move(children));
+    // **Handed to the merge, so the covered entries never reach the output.** Without this the
+    // compaction would copy them forward into the same file as the tombstone that covers them — and
+    // a tombstone shadows nothing in its own file, so every key the range deleted would come back.
+    auto merged = make_merging_iterator(std::move(children), std::move(child_ranges));
 
     // ARCHITECTURE.md "Compaction" — tombstones are dropped only when the output lands in the bottommost
     // level that could contain the key. There is nothing else to consider
@@ -575,6 +594,24 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // range — no deeper level holds an overlapping file. Dynamic, not the last
     // configured level.
     const bool drop_tombstones = compaction.output_is_bottommost;
+
+    // **The range tombstones have to be carried down too, and for the same reason point tombstones
+    // are.** Files older than this compaction were not read and are still there; a tombstone that
+    // stopped here would stop shadowing them and the keys would come back at the next read. At the
+    // bottommost level there is nothing older left, which is exactly when it can be let go.
+    //
+    // Each output carries the part of them that falls in **its own** slice of the keyspace, clipped
+    // at the cut points. Files at one level are ordered by key rather than by recency, so an output
+    // whose tombstone reached into a sibling's range would shadow that sibling — and the sibling
+    // holds entries this compaction just decided to keep. Clipping tiles the range: no overlap
+    // between outputs, and no gap between them either, which a clip to actual keys would leave.
+    const std::vector<RangeTombstone> carried =
+        drop_tombstones ? std::vector<RangeTombstone>{} : merge_ranges(std::move(all_ranges));
+    // The key that opens the current output, and the one that will open the next. Null means
+    // unbounded, which is right for the first output's lower edge and the last one's upper.
+    std::optional<std::string> output_lower;
+    std::optional<std::string> output_upper;
+    bool cut_pending = false;
     // Truncated keys are dropped wherever the compaction lands, not only at the bottom. A tombstone
     // has to survive to the bottommost level because a deeper file may still hold the key it
     // shadows; a truncation point shadows every level at once, so there is nothing left to shadow
@@ -600,10 +637,15 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
 
     auto finish_output = [&]() -> Status {
         if (writer == nullptr) return Status::Ok;
+        for (const RangeTombstone& range :
+             clip_ranges(carried, output_lower ? &*output_lower : nullptr,
+                         output_upper ? &*output_upper : nullptr)) {
+            writer->add_range_tombstone(Slice::from(range.lower), Slice::from(range.upper));
+        }
         auto built = writer->finish();
         writer.reset();
         if (!built) return built.error();
-        if (built->num_entries == 0) return Status::Ok;
+        if (built->num_entries == 0 && built->num_range_tombstones == 0) return Status::Ok;
 
         // Output made from old data *is* old, so it lands directly on a cold
         // tier rather than being written hot and migrated straight back out.
@@ -622,6 +664,9 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         file.file_bytes = built->bytes.size();
         file.num_entries = built->num_entries;
         file.num_tombstones = built->num_tombstones;
+        file.num_range_tombstones = built->num_range_tombstones;
+        file.smallest_range_key = built->smallest_range_key;
+        file.largest_range_key = built->largest_range_key;
         file.compression = target.compression;
         // A compaction output takes the min() over its inputs (ARCHITECTURE.md "The manifest is snapshots plus edits"): the file
         // still holds those writes, so its exposure is unchanged by the move.
@@ -636,6 +681,16 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     for (merged->seek_to_first(); merged->valid(); merged->next()) {
         if (drop_tombstones && merged->type() == ValueType::Delete) continue;
         if (!truncation_point.empty() && merged->key() < Slice::from(truncation_point)) continue;
+        // The cut is taken here rather than at the moment the output filled, because the boundary
+        // is this key: everything below it belongs to the output just closed and everything from it
+        // upwards to the next one. Deciding earlier would mean guessing where the next key lands.
+        if (cut_pending) {
+            output_upper = merged->key().to_string();
+            if (Status status = finish_output(); status != Status::Ok) return status;
+            output_lower = std::move(output_upper);
+            output_upper.reset();
+            cut_pending = false;
+        }
         if (writer == nullptr) writer = std::make_unique<SstWriter>(sst_options);
         writer->add(merged->key(), merged->type(), merged->value());
 
@@ -652,11 +707,14 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         const bool full = writer->estimated_bytes() >= target.target_file_bytes;
         const bool grandparent_heavy = grandparent_bytes > grandparent_limit;
         if (full || grandparent_heavy) {
-            if (Status status = finish_output(); status != Status::Ok) return status;
+            cut_pending = true;
             grandparent_bytes = 0;
         }
     }
     if (merged->status() != Status::Ok) return merged->status();
+    // Everything the compaction held may have been covered, leaving the tombstones with no entry to
+    // ride along with. They still have older files to shadow, so they get a file of their own.
+    if (!carried.empty() && writer == nullptr) writer = std::make_unique<SstWriter>(sst_options);
     return finish_output();
 }
 

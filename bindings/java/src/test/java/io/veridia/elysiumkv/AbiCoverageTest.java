@@ -299,6 +299,14 @@ class AbiCoverageTest {
             assertTrue(db.recoveredWatermark().isEmpty(),
                        "nothing was flushed under a watermark in this fixture");
 
+            // Both remove keys, so they come after every count asserted over the fixture as built.
+            exercise("deleteRange");
+            db.deleteRange(TestSupport.key(80), TestSupport.key(90));
+            assertNull(db.get(TestSupport.key(85)), "the range was deleted");
+            try (Pinned present = db.get(TestSupport.key(90))) {
+                assertNotNull(present, "the upper bound is excluded");
+            }
+
             // Last on purpose: it removes keys, and every count asserted above is over the fixture
             // as it was built.
             exercise("truncateBelow");

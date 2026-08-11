@@ -12,8 +12,8 @@ Current versions:
 | Format | Version | Constant |
 | --- | --- | --- |
 | SST file | 1 | `Footer::kFormatVersion1` |
-| Manifest edit | 3 | `kEditFormatVersion` |
-| Manifest snapshot | 3 | `kSnapshotFormatVersion` |
+| Manifest edit | 4 | `kEditFormatVersion` |
+| Manifest snapshot | 4 | `kSnapshotFormatVersion` |
 | Stats buffer | 1 | `kStatsFormatVersion` |
 
 Conventions throughout: **little-endian** fixed-width integers; `varint32`/`varint64` are
@@ -132,10 +132,11 @@ performance structure, never an authority on absence.
 data block*         framed (§2), keys ascending across blocks
 filter block        framed, compression_type = 0
 index block         framed
-footer              44 bytes, exactly at end of file
+range delete block  framed, present only in format_version 2
+footer              44 bytes (v1) or 56 bytes (v2), exactly at end of file
 ```
 
-The footer, `kFooterLengthV1 = 44` bytes, at file offset `file_len - 44`:
+The footer, at file offset `file_len - footer_length`:
 
 | Offset | Field | Type | Notes |
 | --- | --- | --- | --- |
@@ -144,8 +145,33 @@ The footer, `kFooterLengthV1 = 44` bytes, at file offset `file_len - 44`:
 | 12 | `index_handle.offset` | uint64 | |
 | 20 | `index_handle.length` | uint32 | framed length |
 | 24 | `num_entries` | uint64 | |
-| 32 | `format_version` | uint32 | 1 |
-| 36 | `magic` | uint64 | `0x454C595349554D31` |
+| 32 | `range_del_handle.offset` | uint64 | **v2 only** |
+| 40 | `range_del_handle.length` | uint32 | **v2 only**, framed length |
+| 32 / 44 | `format_version` | uint32 | 1 or 2 |
+| 36 / 48 | `magic` | uint64 | `0x454C595349554D31` |
+
+`kFooterLengthV1 = 44`, `kFooterLengthV2 = 56`. The v2 field is inserted *before* the invariant
+trailer, which is what keeps that trailer invariant.
+
+### Range delete block
+
+Present only when the file carries range tombstones, and its presence is exactly what makes the file
+`format_version = 2`. **The version is per file, not per writer**: a file nobody range-deleted from
+is still written as v1, so adding this feature reformats nothing, and a reader that predates range
+tombstones keeps reading every such file while refusing exactly the files whose keys it would
+otherwise report as present.
+
+The block is an ordinary §3 block. Each entry is one half-open range `[lower, upper)`: the **key is
+`lower`**, the **value is `upper`**, and `value_type` is `1` (`Put`) — not `Delete`, because the type
+byte says whether an entry carries a value and here the value is load-bearing. What makes these
+deletions is the block they are in.
+
+Entries are sorted by `lower` and are disjoint, so the tombstone covering a key — if any — is the
+last entry whose `lower` is at or before it, found with one seek rather than a scan.
+
+A range tombstone shadows every entry strictly older than the file that carries it, in
+`(level, file_number)` order, and **nothing in that file**. Within a single file there is no
+ordering to appeal to, so none is defined.
 
 **The last 12 bytes are the invariant trailer** (`kTrailerLength = 12`): `format_version` then
 `magic`. Those 12 bytes must stay fixed across every future format version.
@@ -172,12 +198,20 @@ largest_key        string
 file_bytes         varint64
 num_entries        varint64
 num_tombstones     varint64
+num_range_tombstones varint64
+smallest_range_key string
+largest_range_key  string
 compression        varint64   0 = none, 1 = lz4, 2 = zstd
 min_write_time_ms  varint64
 watermark_flags    varint64   bit 0 = low present, bit 1 = high present; other values invalid
 watermark_low      varint64   zero when bit 0 is clear
 watermark_high     varint64   zero when bit 1 is clear
 ```
+
+The **range tombstone span** is the interval this file's range deletes cover, and it is deliberately
+not bounded by `smallest_key` and `largest_key`: a file can delete a range it holds no keys in, so a
+reader that consulted only the data span would walk past the tombstone answering its query.
+`num_range_tombstones` is zero exactly when the file's SST is `format_version = 1`.
 
 `store_id` is persisted rather than derived: tier and level are independent, so a file's store cannot
 be computed from its level. `min_write_time_ms` is carried over unchanged by migration, so placement
@@ -197,7 +231,7 @@ and a migration carries it unchanged.
 Framed with `compression_type = 0`.
 
 ```
-format_version     varint32   3
+format_version     varint32   4
 next_file_number   varint64
 added_count        varint64
 added              file entry × added_count
@@ -212,7 +246,7 @@ truncation_point   string
 Framed with **zstd**, because a snapshot is always read whole.
 
 ```
-format_version     varint32   3
+format_version     varint32   4
 next_file_number   varint64
 file_count         varint64
 files              file entry × file_count

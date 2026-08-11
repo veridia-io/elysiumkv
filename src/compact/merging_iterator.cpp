@@ -1,5 +1,6 @@
 #include "compact/merging_iterator.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace elysiumkv {
@@ -10,8 +11,15 @@ namespace {
 /// the tie-break — lowest child index wins — obvious.
 class MergingIterator final : public InternalIterator {
 public:
-    explicit MergingIterator(std::vector<std::unique_ptr<InternalIterator>> children)
-        : children_(std::move(children)) {}
+    MergingIterator(std::vector<std::unique_ptr<InternalIterator>> children,
+                    std::vector<std::vector<RangeTombstone>> child_ranges)
+        : children_(std::move(children)) {
+        // Only the children that actually carry tombstones are kept, so a merge with none pays one
+        // branch per entry rather than a walk over every child.
+        for (size_t i = 0; i < child_ranges.size(); ++i) {
+            if (!child_ranges[i].empty()) carriers_.push_back({i, std::move(child_ranges[i])});
+        }
+    }
 
     bool valid() const override { return current_ >= 0; }
 
@@ -47,31 +55,13 @@ public:
 
     void prev() override {
         if (current_ < 0) return;
-        const size_t current = static_cast<size_t>(current_);
-        const Slice key = children_[current]->key();
-        for (size_t i = 0; i < children_.size(); ++i) {
-            if (i == current) continue;
-            if (children_[i]->valid() && children_[i]->key() == key) children_[i]->prev();
-        }
-        children_[current]->prev();
+        step_backward();
         pick_largest();
     }
 
     void next() override {
         if (current_ < 0) return;
-
-        // Advance every *other* child sitting on the emitted key first, so a
-        // shadowed entry from an older source is never seen — then advance the
-        // current one last. Doing it in that order means the emitted key can be
-        // borrowed from the current child instead of copied, which is the
-        // difference between one allocation per entry and none (ARCHITECTURE.md "Benchmarks").
-        const size_t current = static_cast<size_t>(current_);
-        const Slice key = children_[current]->key();
-        for (size_t i = 0; i < children_.size(); ++i) {
-            if (i == current) continue;
-            if (children_[i]->valid() && children_[i]->key() == key) children_[i]->next();
-        }
-        children_[current]->next();
+        step_forward();
         pick_smallest();
     }
 
@@ -80,7 +70,62 @@ public:
     ValueType type() const override { return children_[static_cast<size_t>(current_)]->type(); }
 
 private:
+    /// Advance every *other* child sitting on the emitted key first, so a shadowed entry from an
+    /// older source is never seen — then advance the current one last. Doing it in that order means
+    /// the emitted key can be borrowed from the current child instead of copied, which is the
+    /// difference between one allocation per entry and none (ARCHITECTURE.md "Benchmarks").
+    void step_forward() {
+        const size_t current = static_cast<size_t>(current_);
+        const Slice key = children_[current]->key();
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (i == current) continue;
+            if (children_[i]->valid() && children_[i]->key() == key) children_[i]->next();
+        }
+        children_[current]->next();
+    }
+
+    void step_backward() {
+        const size_t current = static_cast<size_t>(current_);
+        const Slice key = children_[current]->key();
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (i == current) continue;
+            if (children_[i]->valid() && children_[i]->key() == key) children_[i]->prev();
+        }
+        children_[current]->prev();
+    }
+
+    /// Whether a newer child's range tombstone covers what the pick landed on.
+    bool shadowed() const {
+        if (carriers_.empty()) return false;
+        const size_t current = static_cast<size_t>(current_);
+        const Slice key = children_[current]->key();
+        for (const Carrier& carrier : carriers_) {
+            // Sorted by child index, and a tombstone shadows only children *after* the one carrying
+            // it — so once the carriers reach the current child there is nothing left that can
+            // shadow it, including the current child's own tombstones.
+            if (carrier.child >= current) break;
+            const auto& ranges = carrier.ranges;
+            auto at = std::upper_bound(
+                ranges.begin(), ranges.end(), key,
+                [](Slice probe, const RangeTombstone& range) {
+                    return probe < Slice::from(range.lower);
+                });
+            if (at == ranges.begin()) continue;
+            --at;
+            if (key < Slice::from(at->upper)) return true;
+        }
+        return false;
+    }
+
     void pick_largest() {
+        pick_largest_raw();
+        while (current_ >= 0 && shadowed()) {
+            step_backward();
+            pick_largest_raw();
+        }
+    }
+
+    void pick_largest_raw() {
         current_ = -1;
         for (size_t i = 0; i < children_.size(); ++i) {
             if (!children_[i]->valid()) continue;
@@ -93,6 +138,14 @@ private:
     }
 
     void pick_smallest() {
+        pick_smallest_raw();
+        while (current_ >= 0 && shadowed()) {
+            step_forward();
+            pick_smallest_raw();
+        }
+    }
+
+    void pick_smallest_raw() {
         current_ = -1;
         for (size_t i = 0; i < children_.size(); ++i) {
             if (!children_[i]->valid()) continue;
@@ -106,7 +159,13 @@ private:
         }
     }
 
+    struct Carrier {
+        size_t child;
+        std::vector<RangeTombstone> ranges;
+    };
+
     std::vector<std::unique_ptr<InternalIterator>> children_;
+    std::vector<Carrier> carriers_;
     int current_ = -1;
     Status status_ = Status::Ok;
 };
@@ -114,8 +173,9 @@ private:
 }  // namespace
 
 std::unique_ptr<InternalIterator> make_merging_iterator(
-    std::vector<std::unique_ptr<InternalIterator>> children) {
-    return std::make_unique<MergingIterator>(std::move(children));
+    std::vector<std::unique_ptr<InternalIterator>> children,
+    std::vector<std::vector<RangeTombstone>> child_ranges) {
+    return std::make_unique<MergingIterator>(std::move(children), std::move(child_ranges));
 }
 
 }  // namespace elysiumkv

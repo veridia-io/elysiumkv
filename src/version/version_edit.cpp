@@ -6,8 +6,8 @@
 namespace elysiumkv {
 namespace {
 
-constexpr uint32_t kEditFormatVersion = 3;
-constexpr uint32_t kSnapshotFormatVersion = 3;
+constexpr uint32_t kEditFormatVersion = 4;
+constexpr uint32_t kSnapshotFormatVersion = 4;
 /// A manifest snapshot for a mature store is a few hundred KB; the bound only
 /// has to keep a corrupt length from becoming an allocation.
 constexpr size_t kMaxManifestBytes = 256u << 20;
@@ -66,6 +66,9 @@ void put_file(std::string& out, const FileMetadata& file) {
     put_varint64(out, file.file_bytes);
     put_varint64(out, file.num_entries);
     put_varint64(out, file.num_tombstones);
+    put_varint64(out, file.num_range_tombstones);
+    put_string(out, file.smallest_range_key);
+    put_string(out, file.largest_range_key);
     put_varint64(out, static_cast<uint64_t>(file.compression));
     put_varint64(out, file.min_write_time_ms);
     put_watermark(out, file.watermark);
@@ -82,6 +85,9 @@ bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
     if (!get_varint64(p, limit, file.file_bytes)) return false;
     if (!get_varint64(p, limit, file.num_entries)) return false;
     if (!get_varint64(p, limit, file.num_tombstones)) return false;
+    if (!get_varint64(p, limit, file.num_range_tombstones)) return false;
+    if (!get_string(p, limit, file.smallest_range_key)) return false;
+    if (!get_string(p, limit, file.largest_range_key)) return false;
     uint64_t codec = 0;
     if (!get_varint64(p, limit, codec)) return false;
     if (codec > static_cast<uint64_t>(Compression::Zstd)) return false;

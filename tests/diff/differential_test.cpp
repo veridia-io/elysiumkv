@@ -223,10 +223,15 @@ TEST(ThreadedDifferentialTest, MatchesTheOracleWithThreadsRunning) {
         // was one Java test, which hung on the first attempt at it; nothing ran it under
         // TSan, and it interacts with the background flusher and the frozen-memtable
         // handoff.
+        // The budget was 48 KiB until range deletes joined the op mix; they cut the live keyspace
+        // enough that the overage stopped happening at all, and the vacuity check below said so
+        // rather than letting the configuration quietly stop testing anything. Tightened rather
+        // than compensated for with more writes: the point here is the shedding loop, and a lower
+        // budget reaches it sooner.
         ReplayConfig{.name = "ThreadedTightBudget",
                      .compression = Compression::Zstd,
                      .memtable_bytes = 64u << 10,
-                     .budget_bytes = 48u << 10,
+                     .budget_bytes = 24u << 10,
                      .threaded = true},
     };
 
@@ -276,9 +281,16 @@ TEST(TombstoneSafetyTest, NoValueEverReappearsBeneathADroppedTombstone) {
         if (!failure.has_value()) continue;
 
         const std::vector<DiffOp> minimal = shrink(stream, config);
-        FAIL() << "\na deleted key came back\n  seed:    " << seed << "\n  failed:  operation "
-               << failure->op_index << "\n  message: " << failure->message << "\n\nshrunk to "
-               << minimal.size() << " operations\n\n"
+        // The *shrunk* stream's own failure, not the original one. They are rarely the same
+        // mismatch, and reading the original next to nine unrelated operations sends you looking
+        // for a bug the listed operations never touch.
+        const auto shrunk_failure = replay(minimal, config);
+        FAIL() << "\na deleted key came back\n  seed:    " << seed
+               << "\n  first failed at operation " << failure->op_index << ": " << failure->message
+               << "\n\nshrunk to " << minimal.size() << " operations, failing at "
+               << (shrunk_failure ? std::to_string(shrunk_failure->op_index) : std::string("<none>"))
+               << ": " << (shrunk_failure ? shrunk_failure->message : std::string("<none>"))
+               << "\n\n"
                << describe_ops(minimal);
     }
 }

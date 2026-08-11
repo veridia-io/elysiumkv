@@ -92,6 +92,103 @@ TEST(Memtable, DeleteReplacesAValueWithATombstone) {
     EXPECT_EQ(absent->type, ValueType::Delete);
 }
 
+// --- range deletes -------------------------------------------------------------
+
+/* **A range delete does two things, and the second is the interesting one.**
+ *
+ * It records the range, so the SST this memtable flushes into shadows every older file. And it
+ * turns the keys the memtable *already holds* into point deletes on the spot — because a range
+ * tombstone shadows nothing in the file that carries it, and those keys are about to be written
+ * into that very file.
+ */
+TEST(Memtable, DeleteRangeTurnsTheKeysItAlreadyHoldsIntoTombstones) {
+    SkiplistMemtable table;
+    for (int i = 0; i < 10; ++i) table.put(Slice::from(key_at(i)), Slice::from("v"));
+
+    table.delete_range(Slice::from(key_at(3)), Slice::from(key_at(7)));
+
+    for (int i = 0; i < 10; ++i) {
+        auto entry = table.get(Slice::from(key_at(i)));
+        ASSERT_TRUE(entry.has_value()) << i;
+        const bool inside = i >= 3 && i < 7;
+        EXPECT_EQ(entry->type, inside ? ValueType::Delete : ValueType::Put) << i;
+    }
+    EXPECT_EQ(table.num_entries(), 10u) << "a point delete replaces in place, it does not add a key";
+    EXPECT_EQ(table.num_tombstones(), 4u);
+}
+
+/* **The ordering-free file format rests on this case.** A write landing after a range delete must
+ * survive it, and the file that carries both cannot say which came first — so the memtable, which
+ * does know, resolves it at call time. The later put simply overwrites the point delete.
+ */
+TEST(Memtable, AWriteAfterARangeDeleteSurvivesIt) {
+    SkiplistMemtable table;
+    table.put(Slice::from(key_at(5)), Slice::from("before"));
+    table.delete_range(Slice::from(key_at(0)), Slice::from(key_at(9)));
+    table.put(Slice::from(key_at(5)), Slice::from("after"));
+
+    auto entry = table.get(Slice::from(key_at(5)));
+    ASSERT_TRUE(entry.has_value());
+    EXPECT_EQ(entry->type, ValueType::Put);
+    EXPECT_EQ(entry->value.to_string(), "after");
+
+    // …and the range is still recorded, because older files must still be shadowed.
+    EXPECT_TRUE(table.range_deletes(Slice::from(key_at(5))));
+}
+
+TEST(Memtable, ARecordedRangeIsHalfOpen) {
+    SkiplistMemtable table;
+    table.delete_range(Slice::from("b"), Slice::from("d"));
+
+    EXPECT_FALSE(table.range_deletes(Slice::from("a")));
+    EXPECT_TRUE(table.range_deletes(Slice::from("b"))) << "lower bound included";
+    EXPECT_TRUE(table.range_deletes(Slice::from("c")));
+    EXPECT_FALSE(table.range_deletes(Slice::from("d"))) << "upper bound excluded";
+}
+
+TEST(Memtable, AnEmptyOrInvertedRangeRecordsNothing) {
+    SkiplistMemtable table;
+    table.put(Slice::from("b"), Slice::from("v"));
+    table.delete_range(Slice::from("c"), Slice::from("c"));
+    table.delete_range(Slice::from("z"), Slice::from("a"));
+
+    EXPECT_TRUE(table.range_tombstones().empty());
+    EXPECT_EQ(table.get(Slice::from("b"))->type, ValueType::Put);
+}
+
+/* Overlapping ranges collapse to their union, which is all the fragmentation a file needs: every
+ * tombstone in one file shadows the same thing, so two overlapping ranges are indistinguishable
+ * from the one covering both.
+ */
+TEST(Memtable, OverlappingAndAdjacentRangesMergeIntoADisjointCover) {
+    SkiplistMemtable table;
+    table.delete_range(Slice::from("m"), Slice::from("p"));
+    table.delete_range(Slice::from("a"), Slice::from("c"));
+    table.delete_range(Slice::from("b"), Slice::from("d"));   // overlaps the one before
+    table.delete_range(Slice::from("d"), Slice::from("e"));   // adjacent to it
+    table.delete_range(Slice::from("n"), Slice::from("o"));   // wholly inside the first
+
+    const std::vector<RangeTombstone> merged = table.range_tombstones();
+    ASSERT_EQ(merged.size(), 2u);
+    EXPECT_EQ(merged[0].lower, "a");
+    EXPECT_EQ(merged[0].upper, "e") << "overlapping and adjacent both collapse";
+    EXPECT_EQ(merged[1].lower, "m");
+    EXPECT_EQ(merged[1].upper, "p") << "a range inside another adds nothing";
+}
+
+TEST(Memtable, SeveralRangesEachStillAnswer) {
+    SkiplistMemtable table;
+    table.delete_range(Slice::from("a"), Slice::from("c"));
+    table.delete_range(Slice::from("x"), Slice::from("z"));
+
+    for (const char* covered : {"a", "b", "x", "y"}) {
+        EXPECT_TRUE(table.range_deletes(Slice::from(std::string(covered)))) << covered;
+    }
+    for (const char* clear : {"", "c", "d", "z"}) {
+        EXPECT_FALSE(table.range_deletes(Slice::from(std::string(clear)))) << clear;
+    }
+}
+
 TEST(Memtable, IteratesInBytewiseOrderRegardlessOfInsertionOrder) {
     SkiplistMemtable table;
     std::vector<int> order(500);

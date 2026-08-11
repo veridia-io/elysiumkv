@@ -202,6 +202,51 @@ needs to key on a store/number pair), and level 0 files are never migrated at al
 number would move them in the recency order. An L0 file that has outgrown its tier leaves by being
 compacted instead.
 
+### A range delete is a record, not a rewrite
+
+`truncate_below` drops a prefix by moving one value in the manifest, which only works when the range
+is the bottom of the keyspace and the boundary only ever advances. `delete_range(lower, upper)`
+removes a band from anywhere, in one record rather than one per key — a tenant sitting in the middle
+of a keyspace is the case that needs it.
+
+One rule carries the whole design: **a range tombstone shadows every entry strictly older than the
+file carrying it, in `(level, file_number)` order, and nothing in that file.**
+
+The second half is what makes range deletes implementable here at all. Within a single file there is
+no ordering to appeal to — that is what having no sequence numbers means — so rather than inventing
+one, none is defined. What that leaves open is the write that lands *after* a delete covering it, and
+the memtable answers it: at the moment of the call it turns every key it already holds in the range
+into a point delete. A later write overwrites that point delete; an earlier one does not. The
+ordering is resolved where it is known, and the file never has to carry it.
+
+**Fragmentation is only union.** Every range tombstone in one file shadows exactly the same set, so
+two overlapping ranges there are indistinguishable from the single range covering both. An engine
+that stamps each tombstone with a sequence number must keep the pieces apart because they shadow
+different sets; here there is nothing to keep apart.
+
+**What it costs:** a file now affects more of the keyspace than its keys describe. A file can delete
+a range it holds no keys in — a flush whose memtable saw only a `delete_range` produces exactly that,
+with an empty data span — so every decision taken from a file's key range has to use the *effective*
+span, data and deletions together. Three such decisions are load-bearing and none of them announces
+itself when wrong, because each returns deleted data rather than failing: pruning a read by the data
+span walks past the file that answers it; choosing compaction inputs by the data span moves a
+tombstone-carrying file past the very files it exists to shadow, into a level where they sit beside
+it and no recency between them exists; and a file with no entries has an empty largest key, which
+sorts below every truncation point, so the reclaimer will unlink it as though the floor had passed
+over it.
+
+Compaction carries the tombstones into its output until the output is bottommost for the range —
+exactly as point tombstones are carried, and for the same reason: the files below took no part in the
+compaction and are still there. Each output carries only the part of each range belonging to its own
+slice, clipped at the cut points, because two files at one level are ordered by key rather than by
+recency; an output whose tombstone reached into a sibling's range would delete data that same
+compaction had just decided to keep.
+
+**And it is not as cheap as a truncation.** A floor is one value in the manifest and reads clamp
+against it; this is a record every read in the range consults until compaction resolves it. Space
+returns as the covered files are rewritten — or at once for a file the range covers entirely, which
+is unlinked without being read.
+
 ### A tier is not a level
 
 A *level* is structure: how much data, how much overlap, when to compact. A *tier* is storage: which

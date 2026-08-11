@@ -40,6 +40,12 @@ public:
     /// Files no surviving key can be read from: reclaimable whole, with no rewrite.
     std::vector<FileMetadata> files_entirely_truncated() const;
 
+    /// Files a **newer** file's range tombstone covers completely, and which can therefore be
+    /// unlinked whole — nothing read, nothing rewritten, one edit. This is what makes evicting a
+    /// tenant cheap rather than merely expressible, and it is `files_entirely_truncated` generalised
+    /// from a floor to a range.
+    std::vector<FileMetadata> files_entirely_range_deleted() const;
+
     uint64_t total_bytes(int level) const;
     size_t file_count(int level) const;
     /// Oldest write held anywhere at this level, or 0 when the level is empty.

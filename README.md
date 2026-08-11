@@ -55,6 +55,11 @@ useful rather than to be novel.
   rolled back to what a lost transient tier could not have held. This is the
   resume point for a changelog-backed store; see
   [ARCHITECTURE.md](ARCHITECTURE.md#the-watermark-is-an-interval-and-only-its-lower-bound-is-load-bearing).
+- **Range deletes**: `delete_range(lower, upper)` removes a band from anywhere in
+  the keyspace with one record rather than one per key — a tenant in the middle
+  of a keyspace is the case that needs it. Unlike a truncation the range stays
+  writable afterwards, and a later write wins. A file the range covers entirely
+  is unlinked whole; the rest comes back as the covered files are rewritten.
 - **Prefix truncation**: `truncate_below(key)` drops everything under a key by
   moving one value in the manifest, rather than writing a tombstone per key. A
   file entirely below the point is unlinked whole — nothing read, nothing
@@ -68,7 +73,7 @@ useful rather than to be novel.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (59 functions, C99) and a Java binding over JNI
+- **Bindings**: a stable C ABI (60 functions, C99) and a Java binding over JNI
   needing only Java 11, plus Kafka Streams state stores in
   `bindings/kafka-streams-v3` — key-value, window and session stores in both plain
   and timestamped form, and a versioned store (KIP-889). The windowed kinds keep
@@ -487,12 +492,6 @@ and a 1M-key store must cost about the same, or file pruning is not working.
 
 ## What is not implemented
 
-- **Range deletes.** `truncate_below` covers the case where the range is a prefix
-  of the keyspace and the boundary only ever advances, which is what an ageing
-  store needs; an arbitrary `[begin, end)` is not implemented. It is a larger
-  piece of work than it looks: with no sequence numbers, deciding which keys a
-  range tombstone shadows has to be answered positionally, and the tombstones
-  need a place in a frozen SST format.
 - **A write-ahead log.** Deliberate: the changelog you are already replaying is
   the log, so duplicating it would double every write. The watermark is what
   makes that trade workable — it tells you where to resume, and an unflushed

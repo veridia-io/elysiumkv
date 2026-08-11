@@ -25,7 +25,10 @@ struct BlockHandle {
 struct Footer {
     static constexpr int kTrailerLength = 12;    // never changes
     static constexpr int kFooterLengthV1 = 44;   // version-scoped
+    /// v2 appends one block handle: the range tombstones. 44 + 12.
+    static constexpr int kFooterLengthV2 = 56;
     static constexpr uint32_t kFormatVersion1 = 1;
+    static constexpr uint32_t kFormatVersion2 = 2;
     /// Spells "ELYSIUM1" in ASCII.
     ///
     /// **Frozen.** The magic sits in the invariant trailer above, so a reader
@@ -39,7 +42,15 @@ struct Footer {
     uint64_t num_entries = 0;
     uint32_t format_version = kFormatVersion1;
 
-    /// Exactly kFooterLengthV1 bytes.
+    /// The range tombstones, or a zero handle when the file carries none.
+    ///
+    /// **A file with no range tombstones is still written as v1**, which is the whole reason the
+    /// version is per file rather than per build. Only a file that actually needs the new block
+    /// becomes unreadable to a reader that predates it, and a reader that cannot honour a range
+    /// tombstone must refuse the file rather than return the keys it covers.
+    BlockHandle range_del;
+
+    /// kFooterLengthV1 or kFooterLengthV2 bytes, depending on `format_version`.
     std::string encode() const;
 
     /// `trailer` is the last kTrailerLength bytes of the file. Reports the
