@@ -69,8 +69,11 @@ useful rather than to be novel.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
 - **Bindings**: a stable C ABI (58 functions, C99) and a Java binding over JNI
-  needing only Java 11, plus a Kafka Streams state store in
-  `bindings/kafka-streams-v3`.
+  needing only Java 11, plus Kafka Streams state stores in
+  `bindings/kafka-streams-v3` — key-value, window and session stores in both plain
+  and timestamped form, and a versioned store (KIP-889). The windowed kinds keep
+  every window in one store rather than one store per segment, so retention is a
+  single `truncateBelow` rather than a segment directory to open and close.
 
 Keys are ordered as unsigned bytes. There are no column families, no snapshots and
 no sequence numbers — recency is positional, decided by which level and which file
