@@ -1,7 +1,7 @@
 #include "support/temp_dir.hpp"
 #include "elysiumkv/db.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <benchmark/benchmark.h>
 
@@ -33,11 +33,11 @@ class BenchStore {
 public:
     explicit BenchStore(int keys) {
         std::filesystem::create_directories(dir_.path() / "store");
-        auto store = std::make_shared<LocalFileBlobStore>(dir_.path() / "store", "bench");
+        auto store = std::make_shared<DiskBlobStore>(dir_.path() / "store", "bench");
         store->set_sync_writes(false);
 
         Options options;
-        options.manifest_catalog = std::make_shared<FileManifestCatalog>(dir_.path());
+        options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
         options.memtable_bytes = 32u << 20;
 
         LevelOptions l0;

@@ -224,13 +224,13 @@ private:
     const char* chars_ = nullptr;
 };
 
-jlong JNICALL local_blob_store_create(JNIEnv* env, jclass, jstring root, jstring store_id) {
+jlong JNICALL disk_blob_store_create(JNIEnv* env, jclass, jstring root, jstring store_id) {
     return guard(env,
                  [&]() -> jlong {
                      Utf8 root_utf8(env, root);
                      Utf8 id_utf8(env, store_id);
                      if (!root_utf8.valid() || !id_utf8.valid()) return 0;
-                     void* store = elysiumkv_local_blob_store_create(root_utf8.c_str(),
+                     void* store = elysiumkv_disk_blob_store_create(root_utf8.c_str(),
                                                                    id_utf8.c_str());
                      if (store == nullptr) throw_status(env, ELYSIUMKV_IO);
                      return as_handle(store);
@@ -242,12 +242,12 @@ void JNICALL blob_store_destroy(JNIEnv*, jclass, jlong store) {
     elysiumkv_blob_store_destroy(as_pointer(store));
 }
 
-jlong JNICALL file_manifest_catalog_create(JNIEnv* env, jclass, jstring directory) {
+jlong JNICALL disk_manifest_catalog_create(JNIEnv* env, jclass, jstring directory) {
     return guard(env,
                  [&]() -> jlong {
                      Utf8 directory_utf8(env, directory);
                      if (!directory_utf8.valid()) return 0;
-                     void* catalog = elysiumkv_file_manifest_catalog_create(directory_utf8.c_str());
+                     void* catalog = elysiumkv_disk_manifest_catalog_create(directory_utf8.c_str());
                      if (catalog == nullptr) throw_status(env, ELYSIUMKV_IO);
                      return as_handle(catalog);
                  },
@@ -969,13 +969,13 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJIIIJJJJJ)V"),
      reinterpret_cast<void*>(options_configure)},
 
-    {const_cast<char*>("localBlobStoreCreate"),
+    {const_cast<char*>("diskBlobStoreCreate"),
      const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)J"),
-     reinterpret_cast<void*>(local_blob_store_create)},
+     reinterpret_cast<void*>(disk_blob_store_create)},
     {const_cast<char*>("blobStoreDestroy"), const_cast<char*>("(J)V"),
      reinterpret_cast<void*>(blob_store_destroy)},
-    {const_cast<char*>("fileManifestCatalogCreate"), const_cast<char*>("(Ljava/lang/String;)J"),
-     reinterpret_cast<void*>(file_manifest_catalog_create)},
+    {const_cast<char*>("diskManifestCatalogCreate"), const_cast<char*>("(Ljava/lang/String;)J"),
+     reinterpret_cast<void*>(disk_manifest_catalog_create)},
     {const_cast<char*>("manifestCatalogDestroy"), const_cast<char*>("(J)V"),
      reinterpret_cast<void*>(manifest_catalog_destroy)},
 

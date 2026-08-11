@@ -33,9 +33,9 @@ protected:
         std::filesystem::create_directories(store_dir_);
         catalog_dir_ = dir_.path().string();
 
-        store_ = elysiumkv_local_blob_store_create(store_dir_.c_str(), "store-0");
+        store_ = elysiumkv_disk_blob_store_create(store_dir_.c_str(), "store-0");
         ASSERT_NE(store_, nullptr);
-        catalog_ = elysiumkv_file_manifest_catalog_create(catalog_dir_.c_str());
+        catalog_ = elysiumkv_disk_manifest_catalog_create(catalog_dir_.c_str());
         ASSERT_NE(catalog_, nullptr);
     }
 
@@ -63,7 +63,7 @@ protected:
         if (transient_tier) {
             const std::string cold = (dir_.path() / "cold").string();
             std::filesystem::create_directories(cold);
-            second_store_ = elysiumkv_local_blob_store_create(cold.c_str(), "store-1");
+            second_store_ = elysiumkv_disk_blob_store_create(cold.c_str(), "store-1");
             EXPECT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 120'000),
                       ELYSIUMKV_OK);
             EXPECT_EQ(elysiumkv_options_add_tier(options, second_store_, ELYSIUMKV_DURABLE, 0, 0, 0),
@@ -724,7 +724,7 @@ TEST_F(CApiTest, CompactionTuningCrossesTheAbi) {
 
 /// The chunked cache constructors, and that the plain ones still behave as they did.
 TEST_F(CApiTest, ChunkedCacheConstructorsCrossTheAbi) {
-    void* base = elysiumkv_local_blob_store_create(store_dir_.c_str(), "cache-delegate");
+    void* base = elysiumkv_disk_blob_store_create(store_dir_.c_str(), "cache-delegate");
     ASSERT_NE(base, nullptr);
 
     void* chunked = nullptr;

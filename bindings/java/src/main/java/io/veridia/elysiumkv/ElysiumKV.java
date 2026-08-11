@@ -12,8 +12,8 @@ import java.util.Set;
  * An embedded LSM key-value store, over a native core.
  *
  * <pre>{@code
- * try (LocalFileBlobStore store = new LocalFileBlobStore("/data/store", "hot");
- *      FileManifestCatalog catalog = new FileManifestCatalog("/data");
+ * try (DiskBlobStore store = new DiskBlobStore("/data/store", "hot");
+ *      DiskManifestCatalog catalog = new DiskManifestCatalog("/data");
  *      ElysiumKVOptions options = new ElysiumKVOptions()
  *          .manifestCatalog(catalog)
  *          .addTier(store, Durability.DURABLE, 0, 0, 0, 0)

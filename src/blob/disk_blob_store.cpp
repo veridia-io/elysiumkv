@@ -1,4 +1,4 @@
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include "blob/object_name.hpp"
 
@@ -62,7 +62,7 @@ bool fsync_directory(const fs::path& dir) {
 
 }  // namespace
 
-LocalFileBlobStore::LocalFileBlobStore(fs::path root, std::string id)
+DiskBlobStore::DiskBlobStore(fs::path root, std::string id)
     : root_(std::move(root)), id_(std::move(id)) {
     if (id_.empty()) {
         std::error_code ec;
@@ -71,29 +71,29 @@ LocalFileBlobStore::LocalFileBlobStore(fs::path root, std::string id)
     }
 }
 
-bool LocalFileBlobStore::root_is_directory() const {
+bool DiskBlobStore::root_is_directory() const {
     std::error_code ec;
     return fs::is_directory(root_, ec);
 }
 
-fs::path LocalFileBlobStore::path_for(std::string_view name) const {
+fs::path DiskBlobStore::path_for(std::string_view name) const {
     return root_ / std::string(name);
 }
 
-std::future<GetResult> LocalFileBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
+std::future<GetResult> DiskBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
     return make_ready_future(do_get(name, offset, len));
 }
-std::future<Status> LocalFileBlobStore::put(std::string_view name, Slice bytes) {
+std::future<Status> DiskBlobStore::put(std::string_view name, Slice bytes) {
     return make_ready_future(do_put(name, bytes));
 }
-std::future<Status> LocalFileBlobStore::remove(std::string_view name) {
+std::future<Status> DiskBlobStore::remove(std::string_view name) {
     return make_ready_future(do_remove(name));
 }
-std::future<ListResult> LocalFileBlobStore::list(std::string_view prefix) {
+std::future<ListResult> DiskBlobStore::list(std::string_view prefix) {
     return make_ready_future(do_list(prefix));
 }
 
-GetResult LocalFileBlobStore::do_get(std::string_view name, uint64_t offset, size_t len) {
+GetResult DiskBlobStore::do_get(std::string_view name, uint64_t offset, size_t len) {
     if (!is_valid_object_name(name)) return std::unexpected(Status::Config);
 
     FileDescriptor fd(::open(path_for(name).c_str(), O_RDONLY));
@@ -129,7 +129,7 @@ GetResult LocalFileBlobStore::do_get(std::string_view name, uint64_t offset, siz
     return out;
 }
 
-Status LocalFileBlobStore::do_put(std::string_view name, Slice bytes) {
+Status DiskBlobStore::do_put(std::string_view name, Slice bytes) {
     if (!is_valid_object_name(name)) return Status::Config;
     if (!root_is_directory()) return Status::Io;
 
@@ -168,7 +168,7 @@ Status LocalFileBlobStore::do_put(std::string_view name, Slice bytes) {
     return Status::Ok;
 }
 
-Status LocalFileBlobStore::do_remove(std::string_view name) {
+Status DiskBlobStore::do_remove(std::string_view name) {
     if (!is_valid_object_name(name)) return Status::Config;
     if (::unlink(path_for(name).c_str()) == 0) return Status::Ok;
     if (errno == ENOENT) {
@@ -178,7 +178,7 @@ Status LocalFileBlobStore::do_remove(std::string_view name) {
     return Status::Io;
 }
 
-ListResult LocalFileBlobStore::do_list(std::string_view prefix) {
+ListResult DiskBlobStore::do_list(std::string_view prefix) {
     std::error_code ec;
     fs::directory_iterator it(root_, ec);
     if (ec) return std::unexpected(Status::Io);  // includes a missing root

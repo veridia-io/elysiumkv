@@ -3,7 +3,7 @@ package io.veridia.elysiumkv;
 /**
  * The object-storage seam (ARCHITECTURE.md "Immutable named objects"): objects written once under a name and never
  * modified. This is the abstraction, so it carries the abstraction's name;
- * {@link LocalFileBlobStore} and {@link S3BlobStore} carry theirs.
+ * {@link DiskBlobStore} and {@link S3BlobStore} carry theirs.
  *
  * <p>The distinction matters because ARCHITECTURE.md "Immutable named objects" exists so that other implementations
  * can be substituted, and a concrete class holding the seam's name leaves the

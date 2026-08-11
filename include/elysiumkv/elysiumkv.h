@@ -198,15 +198,15 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_
 
 /* --- seams -----------------------------------------------------------------
  *
- * The built-in local-file implementations, plus function-pointer vtables so a
+ * The built-in on-disk implementations, plus function-pointer vtables so a
  * binding can supply a store or catalog written in its own language without
  * touching C++. Handles are owned by the caller and must outlive the DB.
  */
 
-ELYSIUMKV_API void* elysiumkv_local_blob_store_create(const char* root_directory, const char* store_id);
+ELYSIUMKV_API void* elysiumkv_disk_blob_store_create(const char* root_directory, const char* store_id);
 ELYSIUMKV_API void elysiumkv_blob_store_destroy(void*);
 
-ELYSIUMKV_API void* elysiumkv_file_manifest_catalog_create(const char* directory);
+ELYSIUMKV_API void* elysiumkv_disk_manifest_catalog_create(const char* directory);
 ELYSIUMKV_API void elysiumkv_manifest_catalog_destroy(void*);
 
 /* A store supplied by the binding. Every callback receives `context`.

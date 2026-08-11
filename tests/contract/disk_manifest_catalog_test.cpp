@@ -1,6 +1,6 @@
 #include "contract/manifest_catalog_contract.hpp"
 #include "support/temp_dir.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
 
 #include <gtest/gtest.h>
 
@@ -17,27 +17,27 @@ namespace {
 /// same store.
 ManifestCatalogFactory local_factory() {
     auto dir = std::make_shared<TempDir>();
-    return {"FileManifestCatalog", [dir] {
-                auto* catalog = new FileManifestCatalog(dir->path());
+    return {"DiskManifestCatalog", [dir] {
+                auto* catalog = new DiskManifestCatalog(dir->path());
                 return std::shared_ptr<ManifestCatalog>(
                     catalog, [dir](ManifestCatalog* p) { delete p; });
             }};
 }
 
-INSTANTIATE_TEST_SUITE_P(FileCatalog, ManifestCatalogContract,
+INSTANTIATE_TEST_SUITE_P(DiskCatalog, ManifestCatalogContract,
                          ::testing::Values(local_factory()), ManifestCatalogFactoryName());
 
-TEST(FileManifestCatalog, PointerSurvivesReopen) {
+TEST(DiskManifestCatalog, PointerSurvivesReopen) {
     TempDir dir;
     ManifestCatalog::Entry installed;
     {
-        FileManifestCatalog catalog(dir.path());
+        DiskManifestCatalog catalog(dir.path());
         auto entry = catalog.compare_and_set(std::nullopt, 1);
         ASSERT_TRUE(entry.has_value() && entry->has_value());
         installed = **entry;
     }
     {
-        FileManifestCatalog reopened(dir.path());
+        DiskManifestCatalog reopened(dir.path());
         auto pointer = reopened.read();
         ASSERT_TRUE(pointer.has_value() && pointer->has_value());
         EXPECT_EQ((*pointer)->generation, installed.generation);
@@ -45,9 +45,9 @@ TEST(FileManifestCatalog, PointerSurvivesReopen) {
     }
 }
 
-TEST(FileManifestCatalog, ADamagedPointerIsCorruptNotAbsent) {
+TEST(DiskManifestCatalog, ADamagedPointerIsCorruptNotAbsent) {
     TempDir dir;
-    FileManifestCatalog catalog(dir.path());
+    DiskManifestCatalog catalog(dir.path());
     ASSERT_TRUE(catalog.compare_and_set(std::nullopt, 1).has_value());
 
     std::ofstream(dir.path() / "manifest" / "CURRENT", std::ios::trunc) << "not a pointer";

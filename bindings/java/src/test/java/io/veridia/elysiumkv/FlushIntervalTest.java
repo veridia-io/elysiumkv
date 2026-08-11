@@ -28,7 +28,7 @@ class FlushIntervalTest {
             throws IOException {
         Files.createDirectories(dir);
         return support.own(new ElysiumKVOptions()
-                .manifestCatalog(support.own(new FileManifestCatalog(dir.toString())))
+                .manifestCatalog(support.own(new DiskManifestCatalog(dir.toString())))
                 .memtableBytes(BIG_MEMTABLE)
                 .flushIntervalMs(flushIntervalMs)
                 .paranoidChecks(true)

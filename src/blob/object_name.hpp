@@ -8,7 +8,7 @@ namespace elysiumkv {
 /// What names a `BlobStore` accepts (ARCHITECTURE.md "Immutable named objects"), in **one** place.
 ///
 /// It was in two, and they disagreed: `S3BlobStore` accepted a leading dot while
-/// `LocalFileBlobStore` rejected it, so `put(".hidden")` was a configuration error
+/// `DiskBlobStore` rejected it, so `put(".hidden")` was a configuration error
 /// on one store and a stored object on the other. The shared contract case
 /// (`MalformedNamesAreAConfigurationError`) pins the rule, and found the divergence
 /// the first time the remote store was run through it.

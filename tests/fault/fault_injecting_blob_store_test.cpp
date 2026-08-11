@@ -1,7 +1,7 @@
 #include "contract/blob_store_contract.hpp"
 #include "fault/fault_injecting_blob_store.hpp"
 #include "support/temp_dir.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -12,7 +12,7 @@ namespace {
 
 std::shared_ptr<BlobStore> make_fault_store() {
     auto dir = std::make_shared<TempDir>();
-    auto local = std::make_shared<LocalFileBlobStore>(dir->path());
+    auto local = std::make_shared<DiskBlobStore>(dir->path());
     auto* store = new FaultInjectingBlobStore(local);
     return std::shared_ptr<BlobStore>(store, [dir, local](BlobStore* p) { delete p; });
 }
@@ -33,7 +33,7 @@ protected:
     }
 
     TempDir dir_;
-    std::shared_ptr<LocalFileBlobStore> local_ = std::make_shared<LocalFileBlobStore>(dir_.path());
+    std::shared_ptr<DiskBlobStore> local_ = std::make_shared<DiskBlobStore>(dir_.path());
     FaultInjectingBlobStore store_{local_};
 };
 

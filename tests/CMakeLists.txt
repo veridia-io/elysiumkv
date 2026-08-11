@@ -46,9 +46,9 @@ add_executable(elysiumkv_tests
     invariant/invariant_test.cpp
     invariant/negative_control_test.cpp
     contract/manifest_catalog_contract.cpp
-    contract/file_manifest_catalog_test.cpp
+    contract/disk_manifest_catalog_test.cpp
     contract/blob_store_contract.cpp
-    contract/local_file_blob_store_test.cpp
+    contract/disk_blob_store_test.cpp
     contract/cache_blob_store_test.cpp
     fault/fault_injecting_blob_store.cpp
     fault/fault_injecting_blob_store_test.cpp

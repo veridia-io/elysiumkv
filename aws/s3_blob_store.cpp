@@ -364,7 +364,7 @@ std::future<Status> S3BlobStore::put(std::string_view name, Slice bytes) {
     // transient, so it must not look retryable.
     //
     // **`Unusable`, which is what the blob-store contract already requires** — this
-    // returned `Config` while `LocalFileBlobStore` returned `Unusable` for the
+    // returned `Config` while `DiskBlobStore` returned `Unusable` for the
     // identical condition. The contract suite pins it (`PutAtAnExistingName-
     // NeverOverwrites`), and this implementation was not being run through it,
     // which is exactly how the divergence survived being written down.

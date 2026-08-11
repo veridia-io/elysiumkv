@@ -21,7 +21,7 @@ import org.junit.jupiter.api.io.TempDir;
 class MemoryBudgetTest {
     private ElysiumKVOptions optionsFor(Path dir, MemoryBudget budget, TestSupport support) {
         return support.own(new ElysiumKVOptions()
-                                   .manifestCatalog(support.own(new FileManifestCatalog(
+                                   .manifestCatalog(support.own(new DiskManifestCatalog(
                                            dir.toString())))
                                    .memoryBudget(budget)
                                    .memtableBytes(1 << 20)

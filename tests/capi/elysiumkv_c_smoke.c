@@ -42,10 +42,10 @@ int elysiumkv_c_smoke(const char* store_directory, const char* catalog_directory
     char key[32];
     char expected[32];
 
-    store = elysiumkv_local_blob_store_create(store_directory, "store-0");
+    store = elysiumkv_disk_blob_store_create(store_directory, "store-0");
     CHECK(store != NULL, "local blob store");
-    catalog = elysiumkv_file_manifest_catalog_create(catalog_directory);
-    CHECK(catalog != NULL, "file manifest catalog");
+    catalog = elysiumkv_disk_manifest_catalog_create(catalog_directory);
+    CHECK(catalog != NULL, "disk manifest catalog");
 
     options = elysiumkv_options_create();
     CHECK(options != NULL, "options");

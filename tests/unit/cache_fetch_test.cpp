@@ -1,7 +1,7 @@
 #include "blob/range_cache.hpp"
 #include "support/temp_dir.hpp"
 #include "elysiumkv/blob_store.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 #include "elysiumkv/memory_cache_blob_store.hpp"
 
 #include <gtest/gtest.h>
@@ -78,7 +78,7 @@ struct Fixture {
     std::string object;
 
     explicit Fixture(size_t granularity, size_t object_bytes = 256 * 1024) {
-        auto local = std::make_shared<LocalFileBlobStore>(dir.path(), "store-0");
+        auto local = std::make_shared<DiskBlobStore>(dir.path(), "store-0");
         counter = std::make_shared<CountingStore>(local);
         cache = std::make_unique<MemoryCacheBlobStore>(counter, nullptr, 64ull << 20,
                                                        /*cache_on_write=*/false, granularity);
@@ -119,7 +119,7 @@ TEST(CacheFetch, ChunkingCollapsesASequentialReadIntoFarFewerRequests) {
 /// The bytes have to be the ones asked for, not the chunk they arrived in.
 TEST(CacheFetch, AChunkedReadReturnsExactlyTheWindowRequested) {
     TempDir dir;
-    auto local = std::make_shared<LocalFileBlobStore>(dir.path(), "store-0");
+    auto local = std::make_shared<DiskBlobStore>(dir.path(), "store-0");
     std::string object;
     for (int i = 0; i < 4096; ++i) object.push_back(static_cast<char>(i % 251));
     ASSERT_EQ(local->put("000000000001.sst", Slice::from(object)).get(), Status::Ok);
@@ -138,7 +138,7 @@ TEST(CacheFetch, AChunkedReadReturnsExactlyTheWindowRequested) {
 /// chunk it rounds out to runs past the object.
 TEST(CacheFetch, AReadOverlappingTheEndIsStillTruncatedRatherThanFailed) {
     TempDir dir;
-    auto local = std::make_shared<LocalFileBlobStore>(dir.path(), "store-0");
+    auto local = std::make_shared<DiskBlobStore>(dir.path(), "store-0");
     const std::string object(5000, 'y');
     ASSERT_EQ(local->put("000000000001.sst", Slice::from(object)).get(), Status::Ok);
 

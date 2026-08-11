@@ -13,8 +13,8 @@
 #include "support/temp_dir.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 #include "elysiumkv/memory_cache_blob_store.hpp"
 
 #include <gtest/gtest.h>
@@ -37,7 +37,7 @@ std::shared_ptr<BlobStore> keep_alive(T* store, std::shared_ptr<TempDir> dir) {
 
 std::shared_ptr<BlobStore> make_memory_cache() {
     auto dir = std::make_shared<TempDir>();
-    auto below = std::make_shared<LocalFileBlobStore>(dir->path());
+    auto below = std::make_shared<DiskBlobStore>(dir->path());
     return keep_alive(new MemoryCacheBlobStore(below, std::make_shared<MemoryBudget>(kGenerousCache),
                                               kGenerousCache, /*cache_on_write=*/true),
                       dir);
@@ -46,7 +46,7 @@ std::shared_ptr<BlobStore> make_memory_cache() {
 std::shared_ptr<BlobStore> make_disk_cache() {
     auto dir = std::make_shared<TempDir>();
     std::filesystem::create_directories(dir->path() / "store");
-    auto below = std::make_shared<LocalFileBlobStore>(dir->path() / "store");
+    auto below = std::make_shared<DiskBlobStore>(dir->path() / "store");
     return keep_alive(
         new DiskCacheBlobStore(below, dir->path() / "cache", kGenerousCache, true), dir);
 }
@@ -57,7 +57,7 @@ std::shared_ptr<BlobStore> make_disk_cache() {
 std::shared_ptr<BlobStore> make_chain() {
     auto dir = std::make_shared<TempDir>();
     std::filesystem::create_directories(dir->path() / "store");
-    auto below = std::make_shared<LocalFileBlobStore>(dir->path() / "store");
+    auto below = std::make_shared<DiskBlobStore>(dir->path() / "store");
     auto disk = std::make_shared<DiskCacheBlobStore>(below, dir->path() / "disk", kGenerousCache,
                                                      true);
     return keep_alive(new MemoryCacheBlobStore(disk, std::make_shared<MemoryBudget>(kGenerousCache),
@@ -80,7 +80,7 @@ class CacheTest : public ::testing::Test {
 protected:
     void SetUp() override {
         std::filesystem::create_directories(dir_.path() / "store");
-        local_ = std::make_shared<LocalFileBlobStore>(dir_.path() / "store");
+        local_ = std::make_shared<DiskBlobStore>(dir_.path() / "store");
         below_ = std::make_shared<FaultInjectingBlobStore>(local_);
     }
 
@@ -89,7 +89,7 @@ protected:
     }
 
     TempDir dir_;
-    std::shared_ptr<LocalFileBlobStore> local_;
+    std::shared_ptr<DiskBlobStore> local_;
     std::shared_ptr<FaultInjectingBlobStore> below_;
 };
 
@@ -328,7 +328,7 @@ TEST_F(CacheTest, LosingCachedBytesCostsLatencyAndNothingElse) {
 /// ARCHITECTURE.md "Caches chain" says `Version`, compaction and the manifest are unchanged by a cache in the
 /// chain, and the only way to believe that is to run a database over one.
 TEST_F(CacheTest, ADatabaseRunsOverACachedTierAndTheCacheIsUsed) {
-    auto catalog = std::make_shared<FileManifestCatalog>(dir_.path());
+    auto catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
     auto disk = std::make_shared<DiskCacheBlobStore>(below_, dir_.path() / "disk", 64u << 20,
                                                     /*cache_on_write=*/true);
     auto memory = std::make_shared<MemoryCacheBlobStore>(

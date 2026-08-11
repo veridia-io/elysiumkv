@@ -189,12 +189,12 @@ whose shape depends on how it was compiled cannot be checked by a binding;
 
 ```cpp
 #include "elysiumkv/db.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 elysiumkv::Options options;
-options.manifest_catalog = std::make_shared<elysiumkv::FileManifestCatalog>("/data");
-options.tiers = {{.store = std::make_shared<elysiumkv::LocalFileBlobStore>("/data/store", "hot"),
+options.manifest_catalog = std::make_shared<elysiumkv::DiskManifestCatalog>("/data");
+options.tiers = {{.store = std::make_shared<elysiumkv::DiskBlobStore>("/data/store", "hot"),
                   .durability = elysiumkv::Durability::Durable}};
 options.levels = {{0, {.compression = elysiumkv::Compression::None, .max_files = 4}},
                   {1, {.compression = elysiumkv::Compression::Zstd}}};
@@ -236,8 +236,8 @@ confuses the two turns an outage into apparent data loss.
 ## Quick start (Java)
 
 ```java
-try (LocalFileBlobStore store = new LocalFileBlobStore("/data/store", "hot");
-     FileManifestCatalog catalog = new FileManifestCatalog("/data");
+try (DiskBlobStore store = new DiskBlobStore("/data/store", "hot");
+     DiskManifestCatalog catalog = new DiskManifestCatalog("/data");
      ElysiumKVOptions options = new ElysiumKVOptions()
              .manifestCatalog(catalog)
              .addTier(store, Durability.DURABLE, 0, 0, 0, 0)

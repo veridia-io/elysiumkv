@@ -3,9 +3,9 @@
 
 #include "support/temp_dir.hpp"
 #include "elysiumkv/db.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 #include "elysiumkv/memory_cache_blob_store.hpp"
 
 #include <filesystem>
@@ -23,21 +23,21 @@ public:
         for (int i = 0; i < num_stores; ++i) {
             const std::filesystem::path path = dir_.path() / ("store-" + std::to_string(i));
             std::filesystem::create_directories(path);
-            auto store = std::make_shared<LocalFileBlobStore>(path, "store-" + std::to_string(i));
+            auto store = std::make_shared<DiskBlobStore>(path, "store-" + std::to_string(i));
             store->set_sync_writes(false);  // tests are not measuring fsync
             stores_.push_back(std::move(store));
         }
-        catalog_ = std::make_shared<FileManifestCatalog>(dir_.path());
+        catalog_ = std::make_shared<DiskManifestCatalog>(dir_.path());
     }
 
-    const std::shared_ptr<LocalFileBlobStore>& store(size_t i = 0) const { return stores_[i]; }
+    const std::shared_ptr<DiskBlobStore>& store(size_t i = 0) const { return stores_[i]; }
     const std::shared_ptr<ManifestCatalog>& catalog() const { return catalog_; }
     const std::filesystem::path& path() const { return dir_.path(); }
     size_t num_stores() const { return stores_.size(); }
 
 private:
     TempDir dir_;
-    std::vector<std::shared_ptr<LocalFileBlobStore>> stores_;
+    std::vector<std::shared_ptr<DiskBlobStore>> stores_;
     std::shared_ptr<ManifestCatalog> catalog_;
 };
 

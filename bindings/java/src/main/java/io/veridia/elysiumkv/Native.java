@@ -73,11 +73,11 @@ final class Native {
 
     // --- seams ---------------------------------------------------------------
 
-    static native long localBlobStoreCreate(String rootDirectory, String storeId);
+    static native long diskBlobStoreCreate(String rootDirectory, String storeId);
 
     static native void blobStoreDestroy(long store);
 
-    static native long fileManifestCatalogCreate(String directory);
+    static native long diskManifestCatalogCreate(String directory);
 
     static native void manifestCatalogDestroy(long catalog);
 

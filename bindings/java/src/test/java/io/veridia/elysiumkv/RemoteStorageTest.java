@@ -48,9 +48,9 @@ class RemoteStorageTest {
     /** LocalStack is fresh per run, so a counter is enough to keep runs isolated. */
     private static final AtomicInteger NAMESPACE = new AtomicInteger();
 
-    private enum StoreKind { LOCAL_FILE, S3 }
+    private enum StoreKind { DISK, S3 }
 
-    private enum CatalogKind { FILE, S3, DYNAMO }
+    private enum CatalogKind { DISK, S3, DYNAMO }
 
     /** Owns everything a case opened, closed in reverse. */
     private static final class Fixture implements AutoCloseable {
@@ -69,10 +69,10 @@ class RemoteStorageTest {
         }
 
         BlobStore store(StoreKind kind, String name) throws IOException {
-            if (kind == StoreKind.LOCAL_FILE) {
+            if (kind == StoreKind.DISK) {
                 Path root = dir.resolve(name);
                 Files.createDirectories(root);
-                return own(new LocalFileBlobStore(root.toString(), namespace + "-" + name));
+                return own(new DiskBlobStore(root.toString(), namespace + "-" + name));
             }
             return own(S3BlobStore.builder(RemoteEnvironment.BUCKET)
                                .prefix(namespace + "/" + name)
@@ -84,10 +84,10 @@ class RemoteStorageTest {
 
         ManifestCatalog catalog(CatalogKind kind) throws IOException {
             switch (kind) {
-                case FILE:
+                case DISK:
                     Path manifest = dir.resolve("manifest");
                     Files.createDirectories(manifest);
-                    return own(new FileManifestCatalog(manifest.toString()));
+                    return own(new DiskManifestCatalog(manifest.toString()));
                 case S3:
                     // A prefix of its own: sharing one with a blob store would put
                     // manifest objects and SSTs in the same namespace.
@@ -147,10 +147,10 @@ class RemoteStorageTest {
 
     @ParameterizedTest(name = "{0} store with a {1} catalog")
     @CsvSource({
-        "LOCAL_FILE, FILE",     // the control: proves the case describes the engine,
-        "LOCAL_FILE, S3",       // not one implementation's behaviour
-        "LOCAL_FILE, DYNAMO",
-        "S3, FILE",
+        "DISK, DISK",     // the control: proves the case describes the engine,
+        "DISK, S3",       // not one implementation's behaviour
+        "DISK, DYNAMO",
+        "S3, DISK",
         "S3, S3",
         "S3, DYNAMO",
     })
@@ -215,7 +215,7 @@ class RemoteStorageTest {
         RemoteEnvironment.requireEndpoint();
 
         try (Fixture fixture = new Fixture(dir)) {
-            BlobStore hot = fixture.store(StoreKind.LOCAL_FILE, "hot");
+            BlobStore hot = fixture.store(StoreKind.DISK, "hot");
             BlobStore cold = fixture.store(StoreKind.S3, "cold");
             ManifestCatalog catalog = fixture.catalog(CatalogKind.DYNAMO);
 

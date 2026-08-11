@@ -5,7 +5,7 @@
 
 #include "cache/sharded_lru.hpp"
 #include "support/temp_dir.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -60,7 +60,7 @@ protected:
     }
 
     TempDir dir_;
-    LocalFileBlobStore store_{dir_.path()};
+    DiskBlobStore store_{dir_.path()};
     ShardedLruBlockCache cache_{8u << 20};
     std::map<uint64_t, uint64_t> sizes_;
     uint64_t next_file_number_ = 1;

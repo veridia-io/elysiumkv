@@ -119,7 +119,7 @@ protected:
     }
 
     /// Wipes a store the way a replaced volume does: the directory is still there and empty.
-    void wipe(const std::shared_ptr<LocalFileBlobStore>& store) {
+    void wipe(const std::shared_ptr<DiskBlobStore>& store) {
         auto names = store->list("").get();
         ASSERT_TRUE(names.has_value());
         for (const std::string& name : *names) {
