@@ -461,9 +461,40 @@ Result<std::shared_ptr<BlobStore>> cache_delegate(void* delegate) {
 }  // namespace
 }  // extern "C++"
 
+elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_options* options,
+                                                double tombstone_density_trigger,
+                                                uint64_t tombstone_density_min_entries) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config, "elysiumkv_options_configure_compaction: null options");
+        }
+        // A negative or absurd fraction is a mistake rather than an intent: a trigger above one can
+        // never be reached, since a file cannot hold more tombstones than entries, so it would read
+        // as "off" while looking configured.
+        if (tombstone_density_trigger < 0.0 || tombstone_density_trigger > 1.0) {
+            return fail(Status::Config,
+                        "elysiumkv_options_configure_compaction: tombstone_density_trigger must be "
+                        "a fraction between 0 and 1");
+        }
+        options->options.tombstone_density_trigger = tombstone_density_trigger;
+        if (tombstone_density_min_entries > 0) {
+            options->options.tombstone_density_min_entries = tombstone_density_min_entries;
+        }
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_disk_cache_blob_store_create(void* delegate, const char* directory,
                                                     size_t max_cache_bytes, int cache_on_write,
                                                     void** out) {
+    return elysiumkv_disk_cache_blob_store_create_chunked(delegate, directory, max_cache_bytes,
+                                                      cache_on_write, /*fetch_granularity=*/0, out);
+}
+
+elysiumkv_status elysiumkv_disk_cache_blob_store_create_chunked(void* delegate,
+                                                        const char* directory,
+                                                        size_t max_cache_bytes, int cache_on_write,
+                                                        size_t fetch_granularity, void** out) {
     return guard([&]() -> elysiumkv_status {
         if (out == nullptr) {
             return fail(Status::Config, "elysiumkv_disk_cache_blob_store_create: out is null");
@@ -482,7 +513,7 @@ elysiumkv_status elysiumkv_disk_cache_blob_store_create(void* delegate, const ch
         }
 
         auto cache = std::make_shared<DiskCacheBlobStore>(*below, directory, max_cache_bytes,
-                                                          cache_on_write != 0);
+                                                          cache_on_write != 0, fetch_granularity);
         *out = new std::shared_ptr<BlobStore>(std::move(cache));
         return ELYSIUMKV_OK;
     });
@@ -491,6 +522,15 @@ elysiumkv_status elysiumkv_disk_cache_blob_store_create(void* delegate, const ch
 elysiumkv_status elysiumkv_memory_cache_blob_store_create(void* delegate, void* budget,
                                                      size_t max_cache_bytes, int cache_on_write,
                                                      void** out) {
+    return elysiumkv_memory_cache_blob_store_create_chunked(delegate, budget, max_cache_bytes,
+                                                        cache_on_write, /*fetch_granularity=*/0,
+                                                        out);
+}
+
+elysiumkv_status elysiumkv_memory_cache_blob_store_create_chunked(void* delegate, void* budget,
+                                                          size_t max_cache_bytes,
+                                                          int cache_on_write,
+                                                          size_t fetch_granularity, void** out) {
     return guard([&]() -> elysiumkv_status {
         if (out == nullptr) {
             return fail(Status::Config, "elysiumkv_memory_cache_blob_store_create: out is null");
@@ -510,7 +550,8 @@ elysiumkv_status elysiumkv_memory_cache_blob_store_create(void* delegate, void* 
         std::shared_ptr<MemoryBudget> shared;
         if (budget != nullptr) shared = *static_cast<std::shared_ptr<MemoryBudget>*>(budget);
         auto cache = std::make_shared<MemoryCacheBlobStore>(*below, std::move(shared),
-                                                            max_cache_bytes, cache_on_write != 0);
+                                                            max_cache_bytes, cache_on_write != 0,
+                                                            fetch_granularity);
         *out = new std::shared_ptr<BlobStore>(std::move(cache));
         return ELYSIUMKV_OK;
     });

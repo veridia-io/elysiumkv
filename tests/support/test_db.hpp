@@ -113,20 +113,24 @@ inline Options make_transient_options(const TestStore& store, Duration max_age,
 /// which is where a range-keyed cache goes wrong.
 inline std::shared_ptr<BlobStore> wrap_in_cache_chain(std::shared_ptr<BlobStore> below,
                                                       const std::filesystem::path& cache_root,
-                                                      const std::string& label) {
+                                                      const std::string& label,
+                                                      size_t fetch_granularity = 0) {
     auto disk = std::make_shared<DiskCacheBlobStore>(std::move(below), cache_root / (label + "-disk"),
-                                                     1u << 20, /*cache_on_write=*/true);
+                                                     1u << 20, /*cache_on_write=*/true,
+                                                     fetch_granularity);
     return std::make_shared<MemoryCacheBlobStore>(disk, nullptr, 64u << 10,
-                                                  /*cache_on_write=*/true);
+                                                  /*cache_on_write=*/true, fetch_granularity);
 }
 
 /// Wraps every tier's store in a chain, in place. The engine sees `BlobStore`s and
 /// nothing else, which is exactly the property under test.
-inline void cache_every_tier(Options& options, const std::filesystem::path& cache_root) {
+inline void cache_every_tier(Options& options, const std::filesystem::path& cache_root,
+                             size_t fetch_granularity = 0) {
     std::filesystem::create_directories(cache_root);
     for (size_t i = 0; i < options.tiers.size(); ++i) {
         options.tiers[i].store = wrap_in_cache_chain(options.tiers[i].store, cache_root,
-                                                     "tier-" + std::to_string(i));
+                                                     "tier-" + std::to_string(i),
+                                                     fetch_granularity);
     }
 }
 

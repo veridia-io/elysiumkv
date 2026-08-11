@@ -189,6 +189,32 @@ struct Options {
     int bloom_bits_per_key = 10;
     size_t max_compaction_bytes = 400ull << 20;
 
+    /// Compact a file once this fraction of its entries are tombstones. Zero — the default — is off.
+    ///
+    /// **The trigger the size ratios cannot express.** A tombstone is not an erasure: it shadows
+    /// older copies of its key and can only be dropped once it reaches the bottommost level for its
+    /// range. Until then every scan over a deleted region pays to skip it. A delete-heavy store
+    /// whose levels stay within their byte and file budgets therefore never trips a compaction, and
+    /// the tombstones accumulate — visible only as scans getting slower, which is the hardest kind
+    /// of regression to attribute.
+    ///
+    /// Expressed as a score against this threshold rather than as a separate trigger, so it
+    /// competes with the size ratios on one scale and ARCHITECTURE.md's "score is the only trigger"
+    /// stays true.
+    ///
+    /// Off by default because it is a workload judgement, not a safety property: a store that
+    /// deletes little pays for the check and gains nothing, and a store that deletes in bulk
+    /// usually wants `truncate_below` instead, which reclaims without rewriting anything.
+    double tombstone_density_trigger = 0.0;
+
+    /// Entries a file needs before its density is allowed to trigger anything.
+    ///
+    /// Without a floor a file holding two entries, one of them a tombstone, scores 0.5 and would
+    /// fire a compaction that rewrites almost nothing — repeatedly, since compacting it produces
+    /// another small file. The bound is on entries rather than bytes because the cost being
+    /// avoided is per-entry skipping during a scan.
+    uint64_t tombstone_density_min_entries = 1024;
+
     /// Bytes of open-`SstReader` state — each file's index block and bloom filter —
     /// kept resident, least-recently-used first. Zero means unbounded.
     ///

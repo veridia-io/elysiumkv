@@ -100,6 +100,14 @@ final class Native {
     static native long memoryCacheBlobStoreCreate(long delegate, long budget, long maxCacheBytes,
                                                   boolean cacheOnWrite);
 
+    static native long diskCacheBlobStoreCreateChunked(String directory, long delegate,
+                                                       long maxCacheBytes, boolean cacheOnWrite,
+                                                       long fetchGranularity);
+
+    static native long memoryCacheBlobStoreCreateChunked(long delegate, long budget,
+                                                         long maxCacheBytes, boolean cacheOnWrite,
+                                                         long fetchGranularity);
+
     // --- remote seams --------------------------------------------------------
     //
     // These report a status through an exception and return the handle, rather
@@ -196,6 +204,9 @@ final class Native {
     static native long iterPrefix(long db, byte[] prefix, int prefixLength);
 
     static native void truncateBelow(long db, byte[] key, int keyLength);
+
+    static native void optionsConfigureCompaction(long options, double tombstoneDensityTrigger,
+                                                  long tombstoneDensityMinEntries);
 
     static native long iterCreateReverse(long db, byte[] lo, int loLength, byte[] hi, int hiLength);
 

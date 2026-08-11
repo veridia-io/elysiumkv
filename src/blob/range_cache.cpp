@@ -5,6 +5,25 @@
 
 namespace elysiumkv {
 
+FetchPlan plan_fetch(uint64_t offset, size_t len, size_t granularity) {
+    if (granularity == 0) return {offset, len};
+
+    const uint64_t aligned = offset - (offset % granularity);
+    if (len == BlobStore::kReadToEnd) {
+        // Nothing to round up to: the read already runs to the end of the object. Aligning the
+        // start still helps, since the entry then begins on a boundary a later miss can share.
+        return {aligned, BlobStore::kReadToEnd};
+    }
+
+    // Round the far edge up to a boundary, and never return less than was asked for — a plan that
+    // shrank a request would turn a complete answer into a partial one, which the cache treats as
+    // wrong rather than as merely short.
+    const uint64_t end = offset + len;
+    uint64_t rounded_end = end % granularity == 0 ? end : end + (granularity - end % granularity);
+    if (rounded_end < end) rounded_end = end;  // overflow: fall back to exactly what was wanted
+    return {aligned, static_cast<size_t>(rounded_end - aligned)};
+}
+
 std::optional<Buffer> RangeCacheCore::lookup(std::string_view name, uint64_t offset, size_t len) {
     auto found = objects_.find(name);
     if (found == objects_.end()) return std::nullopt;

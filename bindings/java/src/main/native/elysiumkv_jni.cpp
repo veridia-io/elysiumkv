@@ -294,6 +294,45 @@ jlong JNICALL disk_cache_blob_store_create(JNIEnv* env, jclass, jstring director
                  jlong{0});
 }
 
+jlong JNICALL disk_cache_blob_store_create_chunked(JNIEnv* env, jclass, jstring directory,
+                                                   jlong delegate, jlong max_cache_bytes,
+                                                   jboolean cache_on_write,
+                                                   jlong fetch_granularity) {
+    return guard(env,
+                 [&]() -> jlong {
+                     Utf8 directory_utf8(env, directory);
+                     if (!directory_utf8.valid()) return 0;
+
+                     void* cache = nullptr;
+                     const elysiumkv_status status = elysiumkv_disk_cache_blob_store_create_chunked(
+                         as_pointer(delegate), directory_utf8.c_str(),
+                         static_cast<size_t>(max_cache_bytes),
+                         cache_on_write == JNI_TRUE ? 1 : 0,
+                         static_cast<size_t>(fetch_granularity), &cache);
+                     if (!check(env, status)) return 0;
+                     return as_handle(cache);
+                 },
+                 jlong{0});
+}
+
+jlong JNICALL memory_cache_blob_store_create_chunked(JNIEnv* env, jclass, jlong delegate,
+                                                     jlong budget, jlong max_cache_bytes,
+                                                     jboolean cache_on_write,
+                                                     jlong fetch_granularity) {
+    return guard(env,
+                 [&]() -> jlong {
+                     void* cache = nullptr;
+                     const elysiumkv_status status = elysiumkv_memory_cache_blob_store_create_chunked(
+                         as_pointer(delegate), as_pointer(budget),
+                         static_cast<size_t>(max_cache_bytes),
+                         cache_on_write == JNI_TRUE ? 1 : 0,
+                         static_cast<size_t>(fetch_granularity), &cache);
+                     if (!check(env, status)) return 0;
+                     return as_handle(cache);
+                 },
+                 jlong{0});
+}
+
 jlong JNICALL memory_cache_blob_store_create(JNIEnv* env, jclass, jlong delegate, jlong budget,
                                              jlong max_cache_bytes, jboolean cache_on_write) {
     return guard(env,
@@ -736,6 +775,14 @@ jlong JNICALL iter_prefix_reverse(JNIEnv* env, jclass, jlong db, jbyteArray pref
                  jlong{0});
 }
 
+void JNICALL options_configure_compaction(JNIEnv* env, jclass, jlong options, jdouble trigger,
+                                          jlong min_entries) {
+    guard_void(env, [&] {
+        check(env, elysiumkv_options_configure_compaction(as_options(options), trigger,
+                                                      static_cast<uint64_t>(min_entries)));
+    });
+}
+
 void JNICALL truncate_below(JNIEnv* env, jclass, jlong db, jbyteArray key, jint key_length) {
     guard_void(env, [&] {
         ByteArrayCopy key_bytes(env, key, key_length);
@@ -938,6 +985,11 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char*>("diskCacheBlobStoreCreate"),
      const_cast<char*>("(Ljava/lang/String;JJZ)J"),
      reinterpret_cast<void*>(disk_cache_blob_store_create)},
+    {const_cast<char*>("diskCacheBlobStoreCreateChunked"),
+     const_cast<char*>("(Ljava/lang/String;JJZJ)J"),
+     reinterpret_cast<void*>(disk_cache_blob_store_create_chunked)},
+    {const_cast<char*>("memoryCacheBlobStoreCreateChunked"), const_cast<char*>("(JJJZJ)J"),
+     reinterpret_cast<void*>(memory_cache_blob_store_create_chunked)},
     {const_cast<char*>("memoryCacheBlobStoreCreate"), const_cast<char*>("(JJJZ)J"),
      reinterpret_cast<void*>(memory_cache_blob_store_create)},
 
@@ -994,6 +1046,8 @@ const JNINativeMethod kMethods[] = {
 
     {const_cast<char*>("iterCreate"), const_cast<char*>("(J[BI[BI)J"),
      reinterpret_cast<void*>(iter_create)},
+    {const_cast<char*>("optionsConfigureCompaction"), const_cast<char*>("(JDJ)V"),
+     reinterpret_cast<void*>(options_configure_compaction)},
     {const_cast<char*>("truncateBelow"), const_cast<char*>("(J[BI)V"),
      reinterpret_cast<void*>(truncate_below)},
     {const_cast<char*>("iterCreateReverse"), const_cast<char*>("(J[BI[BI)J"),

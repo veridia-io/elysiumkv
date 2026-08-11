@@ -466,9 +466,14 @@ bool DbImpl::run_one_compaction(Status& status) {
         // like a live read, deferring the collection of what this compaction
         // replaces (ARCHITECTURE.md "Versions are immutable snapshots").
         auto version = versions_->current();
-        compaction = pick_compaction(*version, config_, options_.max_compaction_bytes);
+        compaction = pick_compaction(*version, config_, options_.max_compaction_bytes,
+                                     {options_.tombstone_density_trigger,
+                                      options_.tombstone_density_min_entries});
     }
     if (!compaction.has_value()) return false;
+    if (compaction->triggered_by_density) {
+        density_compactions_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     status = run_compaction(*compaction);
     compaction_finished_.notify_all();

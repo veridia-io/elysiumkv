@@ -32,6 +32,26 @@ namespace elysiumkv {
 /// `cache_on_write` worth anything: `put` caches the whole object, and every later
 /// read is a block inside it. Without containment the write-through population
 /// would never be read.
+/// What to actually read when a request misses.
+///
+/// **The cache is the right place to read more than was asked for**, because it is the only layer
+/// that keeps what it reads. A scan over a remote tier otherwise costs one round trip per block —
+/// the block cache makes the *second* pass free, and does nothing for the first. Rounding a miss out
+/// to a chunk turns that into one round trip per chunk, and unlike a readahead inside the iterator
+/// it needs no notion of a scan: a point lookup that later reads a neighbouring key benefits too.
+///
+/// **Bounded amplification is the whole design.** Fetching the entire object would make a 4 KiB
+/// lookup against a 64 MiB file pull the file, so the chunk is a fixed size and the read is aligned
+/// to it — one chunk per miss, whatever was asked for. A request larger than the chunk is not
+/// shrunk: it is rounded up to cover what was wanted.
+struct FetchPlan {
+    uint64_t offset;
+    size_t len;
+};
+
+/// `granularity` of zero fetches exactly what was asked, which is the behaviour without chunking.
+FetchPlan plan_fetch(uint64_t offset, size_t len, size_t granularity);
+
 class RangeCacheCore {
 public:
     /// Where cached bytes actually live.

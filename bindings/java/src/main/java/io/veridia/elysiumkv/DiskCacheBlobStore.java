@@ -44,10 +44,35 @@ public final class DiskCacheBlobStore extends BlobStore {
         super(create(directory, delegate, maxCacheBytes, cacheOnWrite));
     }
 
+
+    /**
+     * The same cache, rounding a miss out to a chunk of {@code fetchGranularity} bytes.
+     *
+     * <p>A sequential read then costs one request per chunk rather than one per block, which
+     * against a remote store is the difference between a round trip per block and one per chunk.
+     * Unlike a readahead inside an iterator it needs no notion of a scan, so a point lookup whose
+     * neighbour is read later is served from what the first one pulled.
+     *
+     * <p>Amplification is bounded by the chunk rather than by the object: a small read against a
+     * large file pulls one chunk, never the file. Zero fetches exactly what was asked, which is
+     * what the other constructor does.
+     */
+    public DiskCacheBlobStore(String directory, BlobStore delegate, long maxCacheBytes,
+                              boolean cacheOnWrite, long fetchGranularity) {
+        super(create(directory, delegate, maxCacheBytes, cacheOnWrite, fetchGranularity));
+    }
+
     private static long create(String directory, BlobStore delegate, long maxCacheBytes,
                                boolean cacheOnWrite) {
         Native.ensureLoaded();
         return Native.diskCacheBlobStoreCreate(directory, delegate.handle(), maxCacheBytes,
                                                cacheOnWrite);
+    }
+
+    private static long create(String directory, BlobStore delegate, long maxCacheBytes,
+                               boolean cacheOnWrite, long fetchGranularity) {
+        Native.ensureLoaded();
+        return Native.diskCacheBlobStoreCreateChunked(directory, delegate.handle(), maxCacheBytes,
+                                                      cacheOnWrite, fetchGranularity);
     }
 }

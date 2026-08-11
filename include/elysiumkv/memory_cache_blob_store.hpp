@@ -28,8 +28,12 @@ public:
     /// `budget` may be null, which means this cache is bounded only by
     /// `max_cache_bytes` — appropriate for a single-instance process and nothing
     /// else.
+    /// `fetch_granularity` rounds a miss out to a chunk of that size, so a scan costs one read per
+    /// chunk instead of one per block and a later read of a neighbouring range is already held.
+    /// Zero fetches exactly what was asked. Defaulted so existing call sites keep their behaviour.
     MemoryCacheBlobStore(std::shared_ptr<BlobStore> delegate, std::shared_ptr<MemoryBudget> budget,
-                         size_t max_cache_bytes, bool cache_on_write);
+                         size_t max_cache_bytes, bool cache_on_write,
+                         size_t fetch_granularity = 0);
     ~MemoryCacheBlobStore() override;
 
     MemoryCacheBlobStore(const MemoryCacheBlobStore&) = delete;

@@ -39,7 +39,12 @@ useful rather than to be novel.
 - **Ordered key-value storage** — put, delete, point lookup, range and prefix
   scans in either direction, atomic batches.
 - **Leveled compaction** with a background thread, write stalls and tombstone
-  reclamation.
+  reclamation. A level compacts when it passes its file or byte budget — and,
+  optionally, when a single file passes `tombstone_density_trigger`, which is the
+  case those budgets cannot express: a delete-heavy store that stays inside them
+  never compacts, so its tombstones accumulate and every scan across the deleted
+  region pays to skip them. Off by default; a store deleting in bulk usually wants
+  `truncate_below` instead, which reclaims without rewriting anything.
 - **Storage tiers**: several object stores per database, with files migrating
   between them by age (see below).
 - **Concurrent readers**: any number of processes may open a store read-only while
@@ -63,7 +68,7 @@ useful rather than to be novel.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (55 functions, C99) and a Java binding over JNI
+- **Bindings**: a stable C ABI (58 functions, C99) and a Java binding over JNI
   needing only Java 11, plus a Kafka Streams state store in
   `bindings/kafka-streams-v3`.
 
@@ -143,6 +148,17 @@ DiskCacheBlobStore cold = new DiskCacheBlobStore("/var/cache/elysiumkv", remote,
 `cache_on_write` populates on write — write-through, never write-back, so a cache is
 never authoritative even briefly. That matters most for L0, whose files are read almost
 immediately by the next L0→L1 compaction.
+
+**Give it a fetch granularity if the delegate is remote.** A cache stores the ranges
+it was asked for, so a cold scan costs one request per block however large the cache
+is. Passing a granularity rounds each miss out to a chunk and caches the whole chunk,
+which turned a 256 KiB sequential read from 64 requests into 4 in the test that pins
+it. Amplification is bounded by the chunk rather than the object — a small read
+against a large file pulls one chunk, never the file — and it needs no notion of a
+scan, so a point lookup whose neighbour is read later is served from what the first
+one pulled. It does nothing for data already cached by `cache_on_write`; the case it
+answers is a file this process did not write, which is a read-only replica or a cold
+start.
 
 Two things worth knowing before stacking more:
 

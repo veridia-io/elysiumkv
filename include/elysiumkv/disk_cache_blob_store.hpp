@@ -27,8 +27,12 @@ public:
     /// `directory` is created if missing and is assumed to be this cache's
     /// exclusive property — anything already in it is treated as cache content, so
     /// it must not be a store's directory or anything else that matters.
+    /// `fetch_granularity` rounds a miss out to a chunk of that size, so a scan costs one read per
+    /// chunk instead of one per block and a later read of a neighbouring range is already held.
+    /// Zero fetches exactly what was asked. Defaulted so existing call sites keep their behaviour.
     DiskCacheBlobStore(std::shared_ptr<BlobStore> delegate, std::filesystem::path directory,
-                       size_t max_cache_bytes, bool cache_on_write);
+                       size_t max_cache_bytes, bool cache_on_write,
+                       size_t fetch_granularity = 0);
     ~DiskCacheBlobStore() override;
 
     DiskCacheBlobStore(const DiskCacheBlobStore&) = delete;
