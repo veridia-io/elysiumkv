@@ -17,6 +17,7 @@ struct MemoryCacheBlobStore::Impl final : RangeCacheCore::Payload {
     std::shared_ptr<MemoryBudget> budget;
     size_t max_cache_bytes;
     bool cache_on_write;
+    size_t fetch_granularity = 0;
 
     mutable std::mutex mutex_;
     RangeCacheCore core;
@@ -95,9 +96,12 @@ private:
 
 MemoryCacheBlobStore::MemoryCacheBlobStore(std::shared_ptr<BlobStore> delegate,
                                            std::shared_ptr<MemoryBudget> budget,
-                                           size_t max_cache_bytes, bool cache_on_write)
+                                           size_t max_cache_bytes, bool cache_on_write,
+                                           size_t fetch_granularity)
     : impl_(std::make_unique<Impl>(std::move(delegate), std::move(budget), max_cache_bytes,
-                                   cache_on_write)) {}
+                                   cache_on_write)) {
+    impl_->fetch_granularity = fetch_granularity;
+}
 
 MemoryCacheBlobStore::~MemoryCacheBlobStore() = default;
 
@@ -140,7 +144,10 @@ std::future<GetResult> MemoryCacheBlobStore::get(std::string_view name, uint64_t
     // Fetched without the lock held: a miss against a remote delegate takes tens of
     // milliseconds, and holding the cache shut for that long would serialise every
     // other reader behind one network round trip.
-    auto fetched = impl_->delegate->get(name, offset, len).get();
+    // Rounded out to a chunk, so the next block of a scan is already held. The plan is a superset
+    // of the request, never a subset, so what comes back can always answer it.
+    const FetchPlan plan = plan_fetch(offset, len, impl_->fetch_granularity);
+    auto fetched = impl_->delegate->get(name, plan.offset, plan.len).get();
     if (!fetched) return make_ready_future(std::move(fetched));
 
     {
@@ -148,10 +155,19 @@ std::future<GetResult> MemoryCacheBlobStore::get(std::string_view name, uint64_t
         // A read the delegate truncated ran to the end of the object, so it is safe
         // to answer a later "read to the end" from it. A full-length answer to a
         // bounded read proves nothing about where the object ends.
-        const bool to_end = len == kReadToEnd || fetched->size() < len;
-        impl_->core.insert(name, offset, Slice(fetched->data(), fetched->size()), to_end);
+        const bool to_end = plan.len == kReadToEnd || fetched->size() < plan.len;
+        impl_->core.insert(name, plan.offset, Slice(fetched->data(), fetched->size()), to_end);
     }
-    return make_ready_future(std::move(fetched));
+
+    // The caller asked for a window inside the chunk. Truncating at what actually arrived keeps the
+    // contract for a read overlapping the end of the object: short is an answer, not an error.
+    const size_t skip = static_cast<size_t>(offset - plan.offset);
+    if (skip >= fetched->size()) return make_ready_future(GetResult(Buffer{}));
+    size_t available = fetched->size() - skip;
+    if (len != kReadToEnd) available = std::min(available, len);
+    return make_ready_future(
+        GetResult(Buffer(fetched->begin() + static_cast<std::ptrdiff_t>(skip),
+                         fetched->begin() + static_cast<std::ptrdiff_t>(skip + available))));
 }
 
 std::future<Status> MemoryCacheBlobStore::put(std::string_view name, Slice bytes) {

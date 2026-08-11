@@ -178,6 +178,24 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
                                                      uint64_t orphan_retention_ms,
                                                      uint64_t orphan_sweep_interval_ms);
 
+/* Compaction tuning that is a workload judgement rather than a capacity one.
+ *
+ * A separate call rather than two more positions on the fifteen-argument one above: appending to a
+ * shipped signature breaks every existing caller, and a new symbol breaks none.
+ *
+ * `tombstone_density_trigger` compacts a file once that fraction of its entries are tombstones.
+ * Zero, the default, leaves it off. It exists because the size ratios cannot express it: a
+ * delete-heavy store whose levels stay inside their byte and file budgets never trips a compaction,
+ * so the tombstones accumulate and every scan over the deleted region pays to skip them — visible
+ * only as scans getting slower.
+ *
+ * `tombstone_density_min_entries` is the floor a file must reach before its density counts. Zero
+ * leaves the default. Without it a file of two entries, one a tombstone, scores 0.5 and fires a
+ * compaction that rewrites nothing — then does it again on the output. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_options*,
+                                                     double tombstone_density_trigger,
+                                                     uint64_t tombstone_density_min_entries);
+
 /* --- seams -----------------------------------------------------------------
  *
  * The built-in local-file implementations, plus function-pointer vtables so a
@@ -279,6 +297,32 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_disk_cache_blob_store_create(void* dele
 ELYSIUMKV_API elysiumkv_status elysiumkv_memory_cache_blob_store_create(void* delegate, void* budget,
                                                                   size_t max_cache_bytes,
                                                                   int cache_on_write, void** out);
+
+/* The same two caches, with a fetch granularity.
+ *
+ * A miss is rounded out to a chunk of `fetch_granularity` bytes and the whole chunk is cached, so a
+ * sequential read costs one request per chunk rather than one per block. Against a remote store
+ * that is the difference between one round trip per block and one per chunk, and unlike a readahead
+ * inside the iterator it needs no notion of a scan: a point lookup whose neighbour is read later is
+ * served from what the first one pulled.
+ *
+ * Amplification is bounded by the chunk, not by the object: a small read against a large file pulls
+ * one chunk, never the file. Zero fetches exactly what was asked, which is what the constructors
+ * above do.
+ *
+ * Separate symbols rather than two more arguments, for the same reason as the compaction call. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_memory_cache_blob_store_create_chunked(void* delegate,
+                                                                  void* budget,
+                                                                  size_t max_cache_bytes,
+                                                                  int cache_on_write,
+                                                                  size_t fetch_granularity,
+                                                                  void** out);
+ELYSIUMKV_API elysiumkv_status elysiumkv_disk_cache_blob_store_create_chunked(void* delegate,
+                                                                const char* directory,
+                                                                size_t max_cache_bytes,
+                                                                int cache_on_write,
+                                                                size_t fetch_granularity,
+                                                                void** out);
 
 /* --- remote seams (ARCHITECTURE.md "The ABI boundary", ARCHITECTURE.md "Ownership is one compare-and-set") --------------------------------------------
  *

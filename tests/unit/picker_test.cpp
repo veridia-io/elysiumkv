@@ -11,14 +11,14 @@ namespace elysiumkv {
 namespace {
 
 FileMetadata file(int level, uint64_t number, std::string smallest, std::string largest,
-                  uint64_t bytes = 1000, uint64_t tombstones = 0) {
+                  uint64_t bytes = 1000, uint64_t tombstones = 0, uint64_t entries = 100) {
     return FileMetadata{.level = level,
                         .file_number = number,
                         .store_id = "store-0",
                         .smallest_key = std::move(smallest),
                         .largest_key = std::move(largest),
                         .file_bytes = bytes,
-                        .num_entries = 100,
+                        .num_entries = entries,
                         .num_tombstones = tombstones,
                         .compression = Compression::None,
                         .min_write_time_ms = 1000};
@@ -254,6 +254,89 @@ TEST(PickerTest, CompactionMetadataDescribesItsInputs) {
     // what places it on a tier (ARCHITECTURE.md "A tier is not a level").
     EXPECT_EQ(compaction->min_write_time_ms(), 300u);
     EXPECT_EQ(compaction->largest_key(), "f");
+}
+
+
+// --- tombstone density -------------------------------------------------------------------
+//
+// A level within its file and byte budgets never trips the size ratios, so a delete-heavy store
+// accumulates tombstones that only a compaction reaching the bottommost level can drop. These
+// cases are about the trigger that notices.
+
+/// A configuration deliberately inside every size budget, so nothing but density can fire.
+ResolvedLevels roomy() {
+    return config(/*max_files=*/64, /*l1_max_bytes=*/1ull << 30, /*level_count=*/3);
+}
+
+TEST(PickerTombstoneDensity, ADenseFileTriggersACompactionTheSizeRatiosWouldNotHaveFound) {
+    auto version = version_of({file(0, 1, "a", "z", 1000, /*tombstones=*/60, /*entries=*/100)});
+
+    EXPECT_FALSE(pick_compaction(*version, roomy(), 1u << 30).has_value())
+            << "no trigger configured: the level is well inside its budgets";
+
+    auto picked = pick_compaction(*version, roomy(), 1u << 30, {/*trigger=*/0.5, /*min=*/10});
+    ASSERT_TRUE(picked.has_value());
+    EXPECT_EQ(picked->level, 0);
+    EXPECT_GT(picked->score, 1.0) << "0.6 density against a 0.5 trigger scores 1.2";
+}
+
+TEST(PickerTombstoneDensity, BelowTheTriggerNothingFires) {
+    auto version = version_of({file(0, 1, "a", "z", 1000, /*tombstones=*/40, /*entries=*/100)});
+    EXPECT_FALSE(pick_compaction(*version, roomy(), 1u << 30, {0.5, 10}).has_value())
+            << "0.4 density is under the 0.5 trigger";
+}
+
+/// Without a floor, a file holding a handful of entries scores on one tombstone and fires a
+/// compaction that rewrites almost nothing — then does it again on the output.
+TEST(PickerTombstoneDensity, ATinyFileDoesNotFireHoweverDenseItIs) {
+    auto version = version_of({file(0, 1, "a", "z", 1000, /*tombstones=*/5, /*entries=*/5)});
+    EXPECT_FALSE(pick_compaction(*version, roomy(), 1u << 30, {0.5, /*min_entries=*/1024}).has_value())
+            << "entirely tombstones, but far too small to be worth rewriting";
+
+    EXPECT_TRUE(pick_compaction(*version, roomy(), 1u << 30, {0.5, /*min_entries=*/5}).has_value())
+            << "and it does fire once the floor admits it";
+}
+
+/// One dense table is enough: averaging it against its clean neighbours would hide the case.
+TEST(PickerTombstoneDensity, OneDenseFileAmongCleanOnesIsEnough) {
+    auto version = version_of({file(0, 1, "a", "c", 1000, 0, 1000),
+                               file(0, 2, "d", "f", 1000, 0, 1000),
+                               file(0, 3, "g", "i", 1000, /*tombstones=*/900, /*entries=*/1000),
+                               file(0, 4, "j", "z", 1000, 0, 1000)});
+
+    auto picked = pick_compaction(*version, roomy(), 1u << 30, {0.5, 10});
+    ASSERT_TRUE(picked.has_value()) << "the level averages 0.225 but one file is at 0.9";
+    EXPECT_EQ(picked->level, 0);
+}
+
+/// Density is a score on the same scale as the size ratios, not a trigger beside them — so the
+/// level that is furthest past *any* of its thresholds is the one picked.
+TEST(PickerTombstoneDensity, DensityCompetesWithTheSizeRatiosOnOneScale) {
+    // L0 is barely over its file budget; L1 is far past the density trigger.
+    std::map<int, LevelOptions> levels;
+    LevelOptions l0;
+    l0.max_files = 2;
+    l0.target_file_bytes = 4096;
+    levels[0] = l0;
+    LevelOptions l1;
+    l1.max_bytes = 1ull << 30;
+    l1.target_file_bytes = 4096;
+    levels[1] = l1;
+    LevelOptions l2;
+    l2.target_file_bytes = 4096;
+    levels[2] = l2;
+    auto resolved = resolve_levels(levels);
+    ASSERT_TRUE(resolved.has_value());
+
+    auto version = version_of({file(0, 1, "a", "b", 1000, 0, 1000),
+                               file(0, 2, "c", "d", 1000, 0, 1000),
+                               file(0, 3, "e", "f", 1000, 0, 1000),
+                               file(1, 4, "g", "z", 1000, /*tombstones=*/950, /*entries=*/1000)});
+
+    auto picked = pick_compaction(*version, *resolved, 1u << 30, {0.1, 10});
+    ASSERT_TRUE(picked.has_value());
+    EXPECT_EQ(picked->level, 1)
+            << "L0 scores 1.5 on file count; L1 scores 9.5 on density, so L1 wins";
 }
 
 }  // namespace

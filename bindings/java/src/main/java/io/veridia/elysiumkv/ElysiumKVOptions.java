@@ -26,6 +26,8 @@ public final class ElysiumKVOptions implements AutoCloseable {
     private long obsoleteRetentionMs;
     private long orphanRetentionMs;
     private long orphanSweepIntervalMs;
+    private double tombstoneDensityTrigger;
+    private long tombstoneDensityMinEntries;
     private long blockBytes;
     private long blockCacheBytes;
     private long readerCacheBytes;
@@ -228,6 +230,34 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return paranoidChecks > 0;
     }
 
+    /**
+     * Compacts a file once this fraction of its entries are tombstones. Zero, the default, is off.
+     *
+     * <p><b>The trigger the size ratios cannot express.</b> A tombstone shadows older copies of its
+     * key and can only be dropped once a compaction reaches the bottommost level for its range, so
+     * a delete-heavy store whose levels stay inside their byte and file budgets never trips one —
+     * and every scan over the deleted region goes on paying to skip them. That shows up as scans
+     * getting slower, which is the hardest kind of regression to attribute.
+     *
+     * <p>A store that deletes in bulk usually wants {@link ElysiumKV#truncateBelow} instead, which
+     * reclaims without rewriting anything.
+     */
+    public ElysiumKVOptions tombstoneDensityTrigger(double fraction) {
+        tombstoneDensityTrigger = fraction;
+        return this;
+    }
+
+    /**
+     * Entries a file needs before its density counts. Zero leaves the engine default of 1024.
+     *
+     * <p>Without a floor, a file of two entries with one tombstone scores 0.5 and fires a compaction
+     * that rewrites almost nothing — then fires again on its own output.
+     */
+    public ElysiumKVOptions tombstoneDensityMinEntries(long entries) {
+        tombstoneDensityMinEntries = entries;
+        return this;
+    }
+
     /** Flushes the scalars in one call and hands back the native handle. */
     long prepare() {
         Native.optionsConfigure(handle(), catalogHandle, budgetHandle, memtableBytes, blockBytes,
@@ -236,6 +266,10 @@ public final class ElysiumKVOptions implements AutoCloseable {
                                 manifestEditsPerGeneration, paranoidChecks, blockOnStall,
                                 flushIntervalMs, maintenanceIntervalMs, obsoleteRetentionMs,
                                 orphanRetentionMs, orphanSweepIntervalMs);
+        // A second call rather than more positions on the first: the C ABI keeps these apart so
+        // that adding a knob does not break every existing caller of the other.
+        Native.optionsConfigureCompaction(handle(), tombstoneDensityTrigger,
+                                          tombstoneDensityMinEntries);
         return handle();
     }
 

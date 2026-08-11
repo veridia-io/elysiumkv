@@ -665,6 +665,51 @@ TEST_F(CApiTest, EachIteratorBoundIsIndependentlyOptional) {
     EXPECT_EQ(elysiumkv_close(db), 0u);
 }
 
+/// The two tuning knobs that are a workload judgement rather than a capacity one, across the ABI.
+///
+/// A separate entry point from `elysiumkv_options_configure`, so this also pins that both exist and
+/// that the split did not leave the new one unreachable — the "C++ can reach it, the binding cannot"
+/// asymmetry this repository has had to remove three times.
+TEST_F(CApiTest, CompactionTuningCrossesTheAbi) {
+    elysiumkv_options* options = elysiumkv_options_create();
+    ASSERT_NE(options, nullptr);
+
+    EXPECT_EQ(elysiumkv_options_configure_compaction(options, 0.5, 2048), ELYSIUMKV_OK);
+    // Zero is a real value — it turns the trigger off — and must not be read as "leave unset".
+    EXPECT_EQ(elysiumkv_options_configure_compaction(options, 0.0, 0), ELYSIUMKV_OK);
+
+    // A fraction outside [0,1] can never be reached, so it would read as off while looking
+    // configured. Refused rather than clamped.
+    EXPECT_NE(elysiumkv_options_configure_compaction(options, 1.5, 0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_configure_compaction(options, -0.1, 0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_configure_compaction(nullptr, 0.5, 0), ELYSIUMKV_OK);
+
+    elysiumkv_options_destroy(options);
+}
+
+/// The chunked cache constructors, and that the plain ones still behave as they did.
+TEST_F(CApiTest, ChunkedCacheConstructorsCrossTheAbi) {
+    void* base = elysiumkv_local_blob_store_create(store_dir_.c_str(), "cache-delegate");
+    ASSERT_NE(base, nullptr);
+
+    void* chunked = nullptr;
+    EXPECT_EQ(elysiumkv_memory_cache_blob_store_create_chunked(base, nullptr, 1u << 20,
+                                                           /*cache_on_write=*/0,
+                                                           /*fetch_granularity=*/64u << 10,
+                                                           &chunked),
+              ELYSIUMKV_OK);
+    ASSERT_NE(chunked, nullptr);
+    elysiumkv_blob_store_destroy(chunked);
+
+    void* plain = nullptr;
+    EXPECT_EQ(elysiumkv_memory_cache_blob_store_create(base, nullptr, 1u << 20, 0, &plain),
+              ELYSIUMKV_OK);
+    ASSERT_NE(plain, nullptr);
+    elysiumkv_blob_store_destroy(plain);
+
+    elysiumkv_blob_store_destroy(base);
+}
+
 /// Truncation across the ABI, including that the floor then refuses a write below it — the part a
 /// caller is most likely to meet by accident.
 TEST_F(CApiTest, TruncateBelowCrossesTheAbi) {

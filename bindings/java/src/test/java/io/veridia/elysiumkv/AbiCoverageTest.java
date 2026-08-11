@@ -144,12 +144,29 @@ class AbiCoverageTest {
                  MemoryCacheBlobStore memory =
                          new MemoryCacheBlobStore(disk, budget, 1 << 20, false)) {
                 assertNotNull(memory);
+
+                // The chunked pair, which take a fetch granularity. Built over the same delegate:
+                // what is asserted here is that the JNI signatures are right, which nothing but a
+                // call establishes — behaviour belongs to the C++ cache tests.
+                exercise("diskCacheBlobStoreCreateChunked");
+                exercise("memoryCacheBlobStoreCreateChunked");
+                try (DiskCacheBlobStore chunkedDisk = new DiskCacheBlobStore(
+                             dir.resolve("disk-cache-chunked").toString(), support.hot, 1 << 20,
+                             false, 64 << 10);
+                     MemoryCacheBlobStore chunkedMemory =
+                             new MemoryCacheBlobStore(chunkedDisk, budget, 1 << 20, false,
+                                                      64 << 10)) {
+                    assertNotNull(chunkedMemory);
+                }
                 assertEquals(0L, budget.used(), "nothing has been cached yet");
             }
 
             exercise("optionsAddTier");
             exercise("optionsSetLevel");
             exercise("optionsConfigure");
+            // Called by prepare() on every open, so opening below covers it; the marker is what
+            // says so, since this test asserts on the declared surface rather than on behaviour.
+            exercise("optionsConfigureCompaction");
 
             ElysiumKV db = PinLeakExtension.watch(support.open());
             exercise("open");

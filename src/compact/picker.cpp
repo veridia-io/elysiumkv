@@ -57,6 +57,27 @@ const FileMetadata* seed_after_pointer(const std::vector<FileMetadata>& files,
     return files.empty() ? nullptr : &files.front();  // wrap
 }
 
+/// The densest file in the level, scored against the trigger.
+///
+/// Per file rather than per level, because the cost is per file: one table that is nine-tenths
+/// tombstones makes every scan crossing it expensive, and averaging it against a level of clean
+/// tables hides exactly the case worth acting on. TidesDB reaches the same conclusion — one dense
+/// table is enough to fire.
+double tombstone_density_score(const Version& version, const ResolvedLevel& config,
+                               const TombstoneDensity& density) {
+    if (density.trigger <= 0.0) return 0.0;
+
+    double worst = 0.0;
+    for (const FileMetadata& file : version.files_at(config.level)) {
+        if (file.num_entries < density.min_entries) continue;
+        if (file.num_tombstones == 0) continue;
+        const double ratio =
+            static_cast<double>(file.num_tombstones) / static_cast<double>(file.num_entries);
+        worst = std::max(worst, ratio / density.trigger);
+    }
+    return worst;
+}
+
 double level_score(const Version& version, const ResolvedLevel& config) {
     double score = 0.0;
     if (config.max_files.has_value() && *config.max_files > 0) {
@@ -124,7 +145,8 @@ bool is_bottommost_for_range(const Version& version, int output_level, int last_
 }
 
 std::optional<Compaction> pick_compaction(const Version& version, const ResolvedLevels& config,
-                                          size_t max_compaction_bytes) {
+                                          size_t max_compaction_bytes,
+                                          TombstoneDensity density) {
     const int last = config.last();
     if (last < 1) return std::nullopt;  // a single level has nowhere to compact to
 
@@ -136,7 +158,8 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
         const ResolvedLevel& level_config = config.levels[static_cast<size_t>(level)];
         if (version.file_count(level) == 0) continue;
 
-        const double score = level_score(version, level_config);
+        const double score = std::max(level_score(version, level_config),
+                                      tombstone_density_score(version, level_config, density));
         if (score <= 1.0) continue;
         if (chosen < 0 || score > chosen_score) {
             chosen = level;

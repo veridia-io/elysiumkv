@@ -50,14 +50,23 @@ struct Compaction {
 };
 
 /// ARCHITECTURE.md "Compaction" — **score is the only trigger.** Per level, the maximum of whichever
-/// ratios are configured, `file_count / max_files` and `total_bytes / max_bytes`;
-/// highest above 1.0 wins. The last level never triggers — it absorbs everything
+/// ratios are configured — `file_count / max_files`, `total_bytes / max_bytes`, and the tombstone
+/// density of the level's densest file against `tombstone_density_trigger`; highest above 1.0 wins.
+/// Density is a score rather than a trigger of its own precisely so this sentence stays true. The last level never triggers — it absorbs everything
 /// and has nowhere to spill to.
 ///
 /// There is no age trigger: age governs tier migration (ARCHITECTURE.md "Migration between tiers"), not compaction.
 /// One-time rewrites are `compact_level()` (ARCHITECTURE.md "Absence is an answer, not an error"), which terminates.
+struct TombstoneDensity {
+    /// Fraction of entries that must be tombstones before a file scores; zero disables it.
+    double trigger = 0.0;
+    /// Entries a file needs before its density counts at all.
+    uint64_t min_entries = 1024;
+};
+
 std::optional<Compaction> pick_compaction(const Version& version, const ResolvedLevels& config,
-                                          size_t max_compaction_bytes);
+                                          size_t max_compaction_bytes,
+                                          TombstoneDensity density = {});
 
 /// ARCHITECTURE.md "Compaction" — no level deeper than `output_level` holds a file overlapping
 /// `[lower, upper]`. One range-overlap check, not a per-key test.

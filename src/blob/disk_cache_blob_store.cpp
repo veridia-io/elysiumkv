@@ -67,6 +67,7 @@ struct DiskCacheBlobStore::Impl final : RangeCacheCore::Payload {
     fs::path root;
     size_t max_cache_bytes;
     bool cache_on_write;
+    size_t fetch_granularity = 0;
 
     mutable std::mutex mutex_;
     RangeCacheCore core;
@@ -129,9 +130,12 @@ struct DiskCacheBlobStore::Impl final : RangeCacheCore::Payload {
 };
 
 DiskCacheBlobStore::DiskCacheBlobStore(std::shared_ptr<BlobStore> delegate, fs::path directory,
-                                       size_t max_cache_bytes, bool cache_on_write)
+                                       size_t max_cache_bytes, bool cache_on_write,
+                                       size_t fetch_granularity)
     : impl_(std::make_unique<Impl>(std::move(delegate), std::move(directory), max_cache_bytes,
-                                   cache_on_write)) {}
+                                   cache_on_write)) {
+    impl_->fetch_granularity = fetch_granularity;
+}
 
 DiskCacheBlobStore::~DiskCacheBlobStore() = default;
 
@@ -170,15 +174,27 @@ std::future<GetResult> DiskCacheBlobStore::get(std::string_view name, uint64_t o
     }
     impl_->misses.fetch_add(1, std::memory_order_relaxed);
 
-    auto fetched = impl_->delegate->get(name, offset, len).get();
+    // Rounded out to a chunk, so the next block of a scan is already held. The plan is a superset
+    // of the request, never a subset, so what comes back can always answer it.
+    const FetchPlan plan = plan_fetch(offset, len, impl_->fetch_granularity);
+    auto fetched = impl_->delegate->get(name, plan.offset, plan.len).get();
     if (!fetched) return make_ready_future(std::move(fetched));
 
     {
         std::lock_guard<std::mutex> lock(impl_->mutex_);
-        const bool to_end = len == kReadToEnd || fetched->size() < len;
-        impl_->core.insert(name, offset, Slice(fetched->data(), fetched->size()), to_end);
+        const bool to_end = plan.len == kReadToEnd || fetched->size() < plan.len;
+        impl_->core.insert(name, plan.offset, Slice(fetched->data(), fetched->size()), to_end);
     }
-    return make_ready_future(std::move(fetched));
+
+    // The caller asked for a window inside the chunk. Truncating at what actually arrived keeps the
+    // contract for a read overlapping the end of the object: short is an answer, not an error.
+    const size_t skip = static_cast<size_t>(offset - plan.offset);
+    if (skip >= fetched->size()) return make_ready_future(GetResult(Buffer{}));
+    size_t available = fetched->size() - skip;
+    if (len != kReadToEnd) available = std::min(available, len);
+    return make_ready_future(
+        GetResult(Buffer(fetched->begin() + static_cast<std::ptrdiff_t>(skip),
+                         fetched->begin() + static_cast<std::ptrdiff_t>(skip + available))));
 }
 
 std::future<Status> DiskCacheBlobStore::put(std::string_view name, Slice bytes) {
