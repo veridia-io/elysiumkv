@@ -230,6 +230,21 @@ jobs:
       - name: Test the binding
         run: mvn -B -f bindings/java verify -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/release
 
+      # **The Kafka Streams adapter runs here, on every push and every pull request**, rather than
+      # only where it is published. An engine change that breaks the adapter is the case worth
+      # catching, and a job gated on `bindings/kafka-streams-v3/**` would sit out exactly that
+      # change — the adapter's suite would then run only on pull requests that touch the adapter,
+      # which is when it is least likely to be broken.
+      #
+      # Installed first rather than resolved: the adapter depends on the engine binding, and it must
+      # be the one just built from this checkout, not whatever a repository happens to hold. Tests
+      # are skipped on that install only because the step above just ran them.
+      - name: Test the Kafka Streams adapter
+        run: |
+          mvn -B -f bindings/java install -DskipTests \
+            -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/release
+          mvn -B -f bindings/kafka-streams-v3 verify
+
       # The suite above already exercises extraction — it runs without
       # -Delysiumkv.library.path, so NativeLibrary pulls the artifact out of
       # target/classes exactly as it would out of a jar. What it cannot prove is
