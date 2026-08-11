@@ -108,7 +108,9 @@ TEST_F(DbFaultTest, KillMidStreamLosesOnlyTheUnflushedMemtable) {
         // Written after the flush: the embedder restores these, not ElysiumKV.
         Oracle lost = flushed;
         fill(*db, lost, 50, "volatile");
-        // No flush, no close: the process simply stops existing.
+        // No flush, no close: the process simply stops existing — so destruction must not try to
+        // save the memtable on the way out, which a clean close now does.
+        db->abandon_unflushed();
         db.reset();
     }
 
@@ -157,6 +159,9 @@ TEST_F(DbFaultTest, ATornObjectNeverEntersAVersion) {
     EXPECT_NE(db->flush(), Status::Ok);
     faulty_->clear_rules();
 
+    // A kill rather than a close: with the rules cleared, destruction would otherwise retry the
+    // flush successfully and the v2 writes this case declares lost would be on disk.
+    db->abandon_unflushed();
     db.reset();
     auto reopened = open();
     ASSERT_NE(reopened, nullptr);

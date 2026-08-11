@@ -45,6 +45,10 @@ class WatermarkTest {
      * The control for the one above: without the flush the watermark is not durable. There is no
      * write-ahead log, so an unflushed memtable is lost — the watermark says where to resume, it
      * does not reduce what was lost.
+     *
+     * <p><b>{@link ElysiumKV#closeWithoutFlush()} is what keeps this a control.</b> A plain
+     * {@code close()} now attempts a flush, so it would save the very watermark this case asserts is
+     * not durable, and the test would pass while checking nothing.
      */
     @Test
     void aWatermarkThatWasNeverFlushedIsNotReported(@TempDir Path dir) throws Exception {
@@ -56,7 +60,7 @@ class WatermarkTest {
 
             db.put(TestSupport.key(2), TestSupport.bytes("v"));
             db.setWatermark(20L);   // deliberately not flushed
-            db.close();
+            db.closeWithoutFlush();  // ...and deliberately not saved on the way out
 
             ElysiumKV reopened = PinLeakExtension.watch(support.open());
             assertEquals(OptionalLong.of(10L), reopened.recoveredWatermark(),

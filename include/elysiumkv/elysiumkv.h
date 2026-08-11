@@ -394,8 +394,20 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_open_with_result(const elysiumkv_option
  * Closing releases every outstanding pin and detaches every live iterator: a
  * detached iterator yields nothing further, and destroying it afterwards is
  * safe. A pin handle, by contrast, is only meaningful together with its db, so
- * elysiumkv_unpin after close is a use-after-free like any other. */
+ * elysiumkv_unpin after close is a use-after-free like any other.
+ *
+ * Closing also *attempts* a flush, because there is no write-ahead log and a
+ * memtable dropped on a clean shutdown is lost for no reason. The attempt is
+ * best-effort and its failure is not reported here — elysiumkv_flush is still
+ * the only way to know. Use elysiumkv_close_without_flush to skip it. */
 ELYSIUMKV_API uint64_t elysiumkv_close(elysiumkv_db*);
+
+/* Closes without attempting the flush that elysiumkv_close performs, discarding
+ * whatever the memtable still holds. That is what a crash leaves behind, and the
+ * two callers who want it are a test that means to lose the writes and an
+ * embedder that has decided they are not worth the shutdown latency. Returns the
+ * outstanding pin and iterator count exactly as elysiumkv_close does. */
+ELYSIUMKV_API uint64_t elysiumkv_close_without_flush(elysiumkv_db*);
 
 /* --- reads ------------------------------------------------------------------ */
 

@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
@@ -319,6 +320,17 @@ class AbiCoverageTest {
 
             exercise("close");
             assertEquals(0, db.closeReportingOutstanding());
+        }
+
+        // The non-flushing close, on its own store so the discarded write cannot affect anything
+        // else. Behaviour lives in the engine's durability tests; this is here for the signature.
+        Path abandonDir = dir.resolve("abandon");
+        Files.createDirectories(abandonDir);
+        try (TestSupport support = new TestSupport(abandonDir)) {
+            ElysiumKV db = ElysiumKV.open(support.options());
+            db.put("k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8));
+            exercise("closeWithoutFlush");
+            db.closeWithoutFlush();
         }
 
         // openWithResult needs its own configuration: open() refuses a transient

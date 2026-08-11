@@ -203,6 +203,14 @@ DbImpl::DbImpl(const Options& options, ResolvedLevels config, ResolvedTiers tier
 }
 
 DbImpl::~DbImpl() {
+    // **Before anything is torn down**, because `flush()` waits on the flush executor and returns
+    // early once `shutting_down_` is set — a flush attempted after the lines below would quietly do
+    // nothing. Best-effort by construction: there is no write-ahead log, so a memtable dropped on a
+    // clean shutdown is lost for no reason, but a destructor has nowhere to report a failure to and
+    // so promises nothing. See `DB::abandon_unflushed`.
+    if (!read_only_ && !abandoned_.load(std::memory_order_relaxed)) {
+        static_cast<void>(flush());
+    }
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
         shutting_down_ = true;

@@ -317,4 +317,23 @@ class ElysiumKVVersionedStoreTest {
                      reopened.put(key("k"), value("ancient"), 1L));
         reopened.close();
     }
+
+    /**
+     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * write-ahead log, so a {@code close()} that does not flush discards everything still in the
+     * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
+     * closes, so no test that goes through a topology can see this; only closing the store directly
+     * can, which is exactly what a caller outside Streams does.
+     */
+    @Test
+    void closingWithoutAFlushKeepsTheWrites(@TempDir Path dir) {
+        ElysiumKVVersionedStore store = open(dir);
+        store.put(key("k"), value("v"), 1_000L);
+        store.close();                       // deliberately no flush()
+
+        ElysiumKVVersionedStore reopened = open(dir);
+        assertEquals("v", valueOf(reopened.get(key("k"))));
+        reopened.close();
+    }
+
 }

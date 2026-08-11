@@ -288,6 +288,10 @@ TEST_F(WatermarkTest, ASetWatermarkSurvivesAFlushAndAReopen) {
 
 // The control for the case above: without the flush the watermark is not durable. There is no
 // write-ahead log, so this is a resume point and not a durability improvement.
+//
+// **`abandon_unflushed` is what makes this a control again.** Destruction now attempts a flush, so
+// simply letting the handle go saves the watermark and the case would assert nothing; the store has
+// to be told to drop what a crash would have dropped.
 TEST_F(WatermarkTest, AWatermarkSetButNeverFlushedIsNotReported) {
     Options options = durable_options();
     {
@@ -299,6 +303,7 @@ TEST_F(WatermarkTest, AWatermarkSetButNeverFlushedIsNotReported) {
 
         write(*db, 20, 20);
         ASSERT_EQ(db->set_watermark(20), Status::Ok);   // deliberately not flushed
+        db->abandon_unflushed();                        // ...and deliberately not saved at close
     }
     auto reopened = open(options);
     ASSERT_NE(reopened, nullptr);
@@ -681,6 +686,9 @@ TEST_F(WatermarkTest, AKillBetweenTheSstPutAndTheManifestEditDoesNotAdvanceTheWa
         ASSERT_EQ(db->set_watermark(900), Status::Ok);
         catalog->fail_next_edit();
         EXPECT_NE(db->flush(), Status::Ok) << "the edit was supposed to fail";
+        // A kill, so nothing gets a second attempt: destruction would otherwise retry the flush,
+        // and the retry would succeed because only the *next* edit was set to fail.
+        db->abandon_unflushed();
     }
 
     auto reopened = open(options);

@@ -425,4 +425,23 @@ class ElysiumKVKeyValueStoreTest {
         assertTrue(error.getMessage().contains("KIP-1035"),
                    "the refusal should say what is missing: " + error.getMessage());
     }
+
+    /**
+     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * write-ahead log, so a {@code close()} that does not flush discards everything still in the
+     * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
+     * closes, so no test that goes through a topology can see this; only closing the store directly
+     * can, which is exactly what a caller outside Streams does.
+     */
+    @Test
+    void closingWithoutAFlushKeepsTheWrites(@TempDir Path dir) {
+        KeyValueStore<Bytes, byte[]> store = open(dir);
+        store.put(key("a"), value("1"));
+        store.close();                       // deliberately no flush()
+
+        KeyValueStore<Bytes, byte[]> reopened = open(dir);
+        assertEquals("1", string(reopened.get(key("a"))));
+        reopened.close();
+    }
+
 }
