@@ -16,8 +16,8 @@ class SmokeTest {
         Path storeDir = dir.resolve("store");
         java.nio.file.Files.createDirectories(storeDir);
 
-        try (LocalFileBlobStore store = new LocalFileBlobStore(storeDir.toString(), "store-0");
-             FileManifestCatalog catalog = new FileManifestCatalog(dir.toString());
+        try (DiskBlobStore store = new DiskBlobStore(storeDir.toString(), "store-0");
+             DiskManifestCatalog catalog = new DiskManifestCatalog(dir.toString());
              ElysiumKVOptions options = new ElysiumKVOptions()
                      .manifestCatalog(catalog)
                      .memtableBytes(64 * 1024)

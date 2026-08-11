@@ -1,5 +1,5 @@
-#ifndef ELYSIUMKV_LOCAL_FILE_BLOB_STORE_HPP
-#define ELYSIUMKV_LOCAL_FILE_BLOB_STORE_HPP
+#ifndef ELYSIUMKV_DISK_BLOB_STORE_HPP
+#define ELYSIUMKV_DISK_BLOB_STORE_HPP
 
 #include "elysiumkv/blob_store.hpp"
 
@@ -15,13 +15,13 @@ namespace elysiumkv {
 /// `NotFound`: creating it is the deployment's job, and an unmounted volume must
 /// fail loudly rather than resemble a fresh one (ARCHITECTURE.md "Immutable named objects"). An *empty* existing root
 /// lists successfully and means empty.
-class LocalFileBlobStore final : public BlobStore {
+class DiskBlobStore final : public BlobStore {
 public:
     /// `id` must be stable across restarts — it is persisted per file in
     /// FileMetadata::store_id. Defaults to the canonicalised root path, which is
     /// stable only if the deployment mounts the store at a fixed path; pass an
     /// explicit id when it does not.
-    explicit LocalFileBlobStore(std::filesystem::path root, std::string id = {});
+    explicit DiskBlobStore(std::filesystem::path root, std::string id = {});
 
     /// Writes are fsync'd before the object becomes visible, and the directory
     /// entry after. A `Durable` level promises that a written object survives a
@@ -55,4 +55,4 @@ private:
 
 }  // namespace elysiumkv
 
-#endif  // ELYSIUMKV_LOCAL_FILE_BLOB_STORE_HPP
+#endif  // ELYSIUMKV_DISK_BLOB_STORE_HPP

@@ -7,9 +7,9 @@
 #include "elysiumkv/memory_budget.hpp"
 #include "cache/sharded_lru.hpp"
 #include "elysiumkv/db.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 #include "elysiumkv/memory_cache_blob_store.hpp"
 
 // The remote implementations are an optional component (ARCHITECTURE.md "Dependencies and artifacts"), but the ABI shape
@@ -379,11 +379,11 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
 
 // --- seams -------------------------------------------------------------------
 
-void* elysiumkv_local_blob_store_create(const char* root_directory, const char* store_id) {
+void* elysiumkv_disk_blob_store_create(const char* root_directory, const char* store_id) {
     return guard_value(
         [&]() -> void* {
             if (root_directory == nullptr) return nullptr;
-            auto store = std::make_shared<LocalFileBlobStore>(
+            auto store = std::make_shared<DiskBlobStore>(
                 root_directory, store_id == nullptr ? std::string() : std::string(store_id));
             return new std::shared_ptr<BlobStore>(std::move(store));
         },
@@ -407,11 +407,11 @@ void* elysiumkv_blob_store_from_vtable(const elysiumkv_blob_store_vtable* vtable
         nullptr);
 }
 
-void* elysiumkv_file_manifest_catalog_create(const char* directory) {
+void* elysiumkv_disk_manifest_catalog_create(const char* directory) {
     return guard_value(
         [&]() -> void* {
             if (directory == nullptr) return nullptr;
-            auto catalog = std::make_shared<FileManifestCatalog>(directory);
+            auto catalog = std::make_shared<DiskManifestCatalog>(directory);
             return new std::shared_ptr<ManifestCatalog>(std::move(catalog));
         },
         nullptr);

@@ -12,8 +12,8 @@
 #include "support/test_db.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 #include "elysiumkv/memory_budget.hpp"
 #include "elysiumkv/memory_cache_blob_store.hpp"
 
@@ -34,7 +34,7 @@ class CacheFaultTest : public ::testing::Test {
 protected:
     void SetUp() override {
         std::filesystem::create_directories(dir_.path() / "store");
-        local_ = std::make_shared<LocalFileBlobStore>(dir_.path() / "store", "store-0");
+        local_ = std::make_shared<DiskBlobStore>(dir_.path() / "store", "store-0");
         local_->set_sync_writes(false);
         faulty_ = std::make_shared<FaultInjectingBlobStore>(local_);
         disk_ = std::make_shared<DiskCacheBlobStore>(faulty_, dir_.path() / "disk", 8u << 20,
@@ -48,7 +48,7 @@ protected:
     }
 
     TempDir dir_;
-    std::shared_ptr<LocalFileBlobStore> local_;
+    std::shared_ptr<DiskBlobStore> local_;
     std::shared_ptr<FaultInjectingBlobStore> faulty_;
     std::shared_ptr<DiskCacheBlobStore> disk_;
     std::shared_ptr<MemoryCacheBlobStore> memory_;
@@ -143,7 +143,7 @@ TEST_F(CacheFaultTest, AFailedPutCachesNothing) {
 /// store that cannot answer is not a store that lost data — and a cache in the way must
 /// not change that verdict either way.
 TEST_F(CacheFaultTest, ADatabaseOverACachedChainSurvivesAnOutage) {
-    auto catalog = std::make_shared<FileManifestCatalog>(dir_.path());
+    auto catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
     Options options;
     options.manifest_catalog = catalog;
     options.memtable_bytes = 32u << 10;

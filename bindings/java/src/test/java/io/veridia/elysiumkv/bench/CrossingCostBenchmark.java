@@ -2,8 +2,8 @@ package io.veridia.elysiumkv.bench;
 
 import io.veridia.elysiumkv.Compression;
 import io.veridia.elysiumkv.Durability;
-import io.veridia.elysiumkv.FileManifestCatalog;
-import io.veridia.elysiumkv.LocalFileBlobStore;
+import io.veridia.elysiumkv.DiskManifestCatalog;
+import io.veridia.elysiumkv.DiskBlobStore;
 import io.veridia.elysiumkv.Pinned;
 import io.veridia.elysiumkv.ElysiumKV;
 import io.veridia.elysiumkv.ElysiumKVIterator;
@@ -60,8 +60,8 @@ public class CrossingCostBenchmark {
     private static final int SCAN_PREFIX_KEYS = 1_000;
 
     private Path dir;
-    private LocalFileBlobStore store;
-    private FileManifestCatalog catalog;
+    private DiskBlobStore store;
+    private DiskManifestCatalog catalog;
     private ElysiumKVOptions options;
     private ElysiumKV db;
 
@@ -74,8 +74,8 @@ public class CrossingCostBenchmark {
     public void setUp() throws IOException {
         dir = Files.createTempDirectory("elysiumkv-bench");
         Files.createDirectories(dir.resolve("store"));
-        store = new LocalFileBlobStore(dir.resolve("store").toString(), "bench");
-        catalog = new FileManifestCatalog(dir.toString());
+        store = new DiskBlobStore(dir.resolve("store").toString(), "bench");
+        catalog = new DiskManifestCatalog(dir.toString());
         options = new ElysiumKVOptions()
                 .manifestCatalog(catalog)
                 .memtableBytes(4L << 20)

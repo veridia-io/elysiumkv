@@ -11,18 +11,18 @@ import java.util.List;
 final class TestSupport implements AutoCloseable {
     private final List<AutoCloseable> owned = new ArrayList<>();
     final Path dir;
-    final LocalFileBlobStore hot;
-    LocalFileBlobStore cold;
+    final DiskBlobStore hot;
+    DiskBlobStore cold;
 
     TestSupport(Path dir) throws IOException {
         this.dir = dir;
         Files.createDirectories(dir.resolve("store"));
-        hot = own(new LocalFileBlobStore(dir.resolve("store").toString(), "store-0"));
+        hot = own(new DiskBlobStore(dir.resolve("store").toString(), "store-0"));
     }
 
     /** One durable tier, two levels — the simplest correct configuration. */
     ElysiumKVOptions options() {
-        FileManifestCatalog catalog = own(new FileManifestCatalog(dir.toString()));
+        DiskManifestCatalog catalog = own(new DiskManifestCatalog(dir.toString()));
         return own(new ElysiumKVOptions()
                 .manifestCatalog(catalog)
                 .memtableBytes(64 * 1024)
@@ -37,8 +37,8 @@ final class TestSupport implements AutoCloseable {
     ElysiumKVOptions transientOptions() throws IOException {
         Path coldDir = dir.resolve("cold");
         Files.createDirectories(coldDir);
-        cold = own(new LocalFileBlobStore(coldDir.toString(), "store-1"));
-        FileManifestCatalog catalog = own(new FileManifestCatalog(dir.toString()));
+        cold = own(new DiskBlobStore(coldDir.toString(), "store-1"));
+        DiskManifestCatalog catalog = own(new DiskManifestCatalog(dir.toString()));
         return own(new ElysiumKVOptions()
                 .manifestCatalog(catalog)
                 .memtableBytes(64 * 1024)

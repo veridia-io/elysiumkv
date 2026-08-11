@@ -3,7 +3,7 @@ package io.veridia.elysiumkv;
 /**
  * The one pluggable metadata seam (ARCHITECTURE.md "Ownership is one compare-and-set"): the manifest generations plus the
  * pointer naming which one is live, and the compare-and-swap that moves it. The
- * seam's name belongs to the seam; {@link FileManifestCatalog}, {@link
+ * seam's name belongs to the seam; {@link DiskManifestCatalog}, {@link
  * S3ManifestCatalog} and {@link DynamoManifestCatalog} are named for what they
  * are.
  *

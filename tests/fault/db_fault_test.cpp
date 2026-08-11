@@ -4,8 +4,8 @@
 #include "db/db_impl.hpp"
 
 #include "elysiumkv/db.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -28,10 +28,10 @@ class DbFaultTest : public ::testing::Test {
 protected:
     void SetUp() override {
         std::filesystem::create_directories(dir_.path() / "store");
-        local_ = std::make_shared<LocalFileBlobStore>(dir_.path() / "store", "store-a");
+        local_ = std::make_shared<DiskBlobStore>(dir_.path() / "store", "store-a");
         local_->set_sync_writes(false);
         faulty_ = std::make_shared<FaultInjectingBlobStore>(local_);
-        catalog_ = std::make_shared<FileManifestCatalog>(dir_.path());
+        catalog_ = std::make_shared<DiskManifestCatalog>(dir_.path());
     }
 
     mutable std::atomic<uint64_t> now_{1'000'000};
@@ -90,7 +90,7 @@ protected:
     }
 
     TempDir dir_;
-    std::shared_ptr<LocalFileBlobStore> local_;
+    std::shared_ptr<DiskBlobStore> local_;
     std::shared_ptr<FaultInjectingBlobStore> faulty_;
     std::shared_ptr<ManifestCatalog> catalog_;
 };

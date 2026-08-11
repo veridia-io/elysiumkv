@@ -1,4 +1,4 @@
-#include "elysiumkv/file_manifest_catalog.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -47,15 +47,15 @@ std::string edit_name(uint64_t seq) {
 
 }  // namespace
 
-FileManifestCatalog::FileManifestCatalog(fs::path directory) : directory_(std::move(directory)) {}
+DiskManifestCatalog::DiskManifestCatalog(fs::path directory) : directory_(std::move(directory)) {}
 
-fs::path FileManifestCatalog::generation_dir(uint64_t generation) const {
+fs::path DiskManifestCatalog::generation_dir(uint64_t generation) const {
     return directory_ / "manifest" / generation_name(generation);
 }
 
-fs::path FileManifestCatalog::current_path() const { return directory_ / "manifest" / "CURRENT"; }
+fs::path DiskManifestCatalog::current_path() const { return directory_ / "manifest" / "CURRENT"; }
 
-Status FileManifestCatalog::write_object(const fs::path& path, Slice bytes) {
+Status DiskManifestCatalog::write_object(const fs::path& path, Slice bytes) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     if (ec) return Status::Io;
@@ -94,7 +94,7 @@ Status FileManifestCatalog::write_object(const fs::path& path, Slice bytes) {
     return synced ? Status::Ok : Status::Io;
 }
 
-GetResult FileManifestCatalog::read_object(const fs::path& path) {
+GetResult DiskManifestCatalog::read_object(const fs::path& path) {
     const int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return std::unexpected(errno == ENOENT ? Status::NotFound : Status::Io);
 
@@ -114,7 +114,7 @@ GetResult FileManifestCatalog::read_object(const fs::path& path) {
     return out;
 }
 
-Result<std::optional<ManifestCatalog::Entry>> FileManifestCatalog::read() {
+Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::read() {
     auto bytes = read_object(current_path());
     if (!bytes) {
         if (bytes.error() == Status::NotFound) return std::optional<Entry>{};
@@ -127,7 +127,7 @@ Result<std::optional<ManifestCatalog::Entry>> FileManifestCatalog::read() {
     return std::optional<Entry>(Entry{current.generation, format_token(current.token)});
 }
 
-Result<std::optional<ManifestCatalog::Entry>> FileManifestCatalog::compare_and_set(
+Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::compare_and_set(
     std::optional<Entry> expected, uint64_t generation) {
     auto observed = read();
     if (!observed) return std::unexpected(observed.error());
@@ -163,23 +163,23 @@ Result<std::optional<ManifestCatalog::Entry>> FileManifestCatalog::compare_and_s
     return std::optional<Entry>(Entry{generation, format_token(token)});
 }
 
-std::future<Status> FileManifestCatalog::put_snapshot(uint64_t generation, Slice bytes) {
+std::future<Status> DiskManifestCatalog::put_snapshot(uint64_t generation, Slice bytes) {
     return make_ready_future(write_object(generation_dir(generation) / "snapshot", bytes));
 }
 
-std::future<GetResult> FileManifestCatalog::get_snapshot(uint64_t generation) {
+std::future<GetResult> DiskManifestCatalog::get_snapshot(uint64_t generation) {
     return make_ready_future(read_object(generation_dir(generation) / "snapshot"));
 }
 
-std::future<Status> FileManifestCatalog::put_edit(uint64_t generation, uint64_t seq, Slice bytes) {
+std::future<Status> DiskManifestCatalog::put_edit(uint64_t generation, uint64_t seq, Slice bytes) {
     return make_ready_future(write_object(generation_dir(generation) / edit_name(seq), bytes));
 }
 
-std::future<GetResult> FileManifestCatalog::get_edit(uint64_t generation, uint64_t seq) {
+std::future<GetResult> DiskManifestCatalog::get_edit(uint64_t generation, uint64_t seq) {
     return make_ready_future(read_object(generation_dir(generation) / edit_name(seq)));
 }
 
-std::future<Result<std::vector<uint64_t>>> FileManifestCatalog::list_edits(uint64_t generation) {
+std::future<Result<std::vector<uint64_t>>> DiskManifestCatalog::list_edits(uint64_t generation) {
     std::error_code ec;
     fs::directory_iterator it(generation_dir(generation), ec);
     if (ec) {
@@ -202,7 +202,7 @@ std::future<Result<std::vector<uint64_t>>> FileManifestCatalog::list_edits(uint6
     return make_ready_future(Result<std::vector<uint64_t>>(std::move(seqs)));
 }
 
-std::future<Status> FileManifestCatalog::delete_generation(uint64_t generation) {
+std::future<Status> DiskManifestCatalog::delete_generation(uint64_t generation) {
     std::error_code ec;
     fs::remove_all(generation_dir(generation), ec);
     return make_ready_future(ec ? Status::Io : Status::Ok);

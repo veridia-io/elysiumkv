@@ -8,7 +8,7 @@
 #include "elysiumkv/memory_budget.hpp"
 #include "sst/sst_writer.hpp"
 #include "support/temp_dir.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -23,7 +23,7 @@ using test::TempDir;
 
 class SstReaderCacheTest : public ::testing::Test {
 protected:
-    void SetUp() override { store_ = std::make_shared<LocalFileBlobStore>(dir_.path()); }
+    void SetUp() override { store_ = std::make_shared<DiskBlobStore>(dir_.path()); }
 
     /// One SST per file number, all the same shape, so the per-reader cost is uniform
     /// and the arithmetic in these tests is about the cache rather than the files.
@@ -82,7 +82,7 @@ protected:
     };
 
     TempDir dir_;
-    std::shared_ptr<LocalFileBlobStore> store_;
+    std::shared_ptr<DiskBlobStore> store_;
     std::set<uint64_t> written_;
     std::map<uint64_t, uint64_t> sizes_;
 };

@@ -59,8 +59,8 @@ class StatusMappingTest {
         java.nio.file.Files.write(blocked, new byte[] {1});
 
         ElysiumKVException thrown = assertThrows(ElysiumKVException.class, () -> {
-            try (LocalFileBlobStore store = new LocalFileBlobStore(blocked.toString(), "broken");
-                 FileManifestCatalog catalog = new FileManifestCatalog(dir.toString());
+            try (DiskBlobStore store = new DiskBlobStore(blocked.toString(), "broken");
+                 DiskManifestCatalog catalog = new DiskManifestCatalog(dir.toString());
                  ElysiumKVOptions options = new ElysiumKVOptions()
                          .manifestCatalog(catalog)
                          .addTier(store, Durability.DURABLE, 0, 0, 0)

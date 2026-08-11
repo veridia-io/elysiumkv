@@ -4,8 +4,8 @@ import io.veridia.elysiumkv.BlobStore;
 import io.veridia.elysiumkv.Compression;
 import io.veridia.elysiumkv.Durability;
 import io.veridia.elysiumkv.ElysiumKVOptions;
-import io.veridia.elysiumkv.FileManifestCatalog;
-import io.veridia.elysiumkv.LocalFileBlobStore;
+import io.veridia.elysiumkv.DiskManifestCatalog;
+import io.veridia.elysiumkv.DiskBlobStore;
 import io.veridia.elysiumkv.ManifestCatalog;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -112,7 +112,7 @@ public final class ElysiumKVStoreConfig {
      * the blob stores and catalog are owned by the options object.
      */
     ElysiumKVOptions toOptions(Path directory) {
-        ManifestCatalog catalog = new FileManifestCatalog(directory.toString());
+        ManifestCatalog catalog = new DiskManifestCatalog(directory.toString());
 
         ElysiumKVOptions options = new ElysiumKVOptions()
                 .manifestCatalog(catalog)
@@ -125,7 +125,7 @@ public final class ElysiumKVStoreConfig {
             // root is missing is an unreachable store, and inventing one would hide a mistyped path.
             Path sst = directory.resolve("sst");
             sst.toFile().mkdirs();
-            BlobStore hot = new LocalFileBlobStore(sst.toString(), "store-0");
+            BlobStore hot = new DiskBlobStore(sst.toString(), "store-0");
             options.addTier(hot, Durability.DURABLE, 0, 0, 0);
         } else {
             // One durable tier, which is normally a cache chain over object storage. There is no

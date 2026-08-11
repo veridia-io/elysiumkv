@@ -1,7 +1,7 @@
 #include "version/version_set.hpp"
 
 #include "support/temp_dir.hpp"
-#include "elysiumkv/file_manifest_catalog.hpp"
+#include "elysiumkv/disk_manifest_catalog.hpp"
 
 #include <gtest/gtest.h>
 
@@ -47,8 +47,8 @@ protected:
     }
 
     TempDir dir_;
-    std::unique_ptr<FileManifestCatalog> catalog_ =
-        std::make_unique<FileManifestCatalog>(dir_.path());
+    std::unique_ptr<DiskManifestCatalog> catalog_ =
+        std::make_unique<DiskManifestCatalog>(dir_.path());
     std::vector<uint64_t> deleted_;
     int delete_calls_ = 0;
 };
@@ -297,7 +297,7 @@ TEST_F(VersionSetTest, AnEditAddressTakenByAnotherWriterFencesTheInstance) {
 
     // A second writer on the same catalog, recovering the state ours just created —
     // so both allocate the same next edit sequence.
-    FileManifestCatalog other_catalog(dir_.path());
+    DiskManifestCatalog other_catalog(dir_.path());
     VersionSet theirs(other_catalog, 1000, recorder());
     ASSERT_EQ(theirs.recover(), Status::Ok);
 
@@ -333,7 +333,7 @@ TEST_F(VersionSetTest, LosingTheRaceToRollAGenerationFencesTheInstance) {
 
     // Another writer rolls generation 2 first, by hand: its snapshot exists and its
     // address is taken.
-    FileManifestCatalog other_catalog(dir_.path());
+    DiskManifestCatalog other_catalog(dir_.path());
     ASSERT_EQ(other_catalog.put_snapshot(2, Slice::from(std::string("theirs"))).get(), Status::Ok);
 
     // One edit takes us past edits_per_generation, so this apply rolls.
@@ -351,7 +351,7 @@ TEST_F(VersionSetTest, LosingTheCompareAndSetFencesTheInstance) {
     ASSERT_EQ(versions->create(), Status::Ok);
 
     // Another writer moves the pointer out from under us.
-    FileManifestCatalog other(dir_.path());
+    DiskManifestCatalog other(dir_.path());
     auto pointer = other.read();
     ASSERT_TRUE(pointer.has_value() && pointer->has_value());
     ASSERT_TRUE(other.compare_and_set(*pointer, 99).has_value());

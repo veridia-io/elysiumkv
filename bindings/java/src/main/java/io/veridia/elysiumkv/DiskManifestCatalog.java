@@ -1,7 +1,7 @@
 package io.veridia.elysiumkv;
 
 /**
- * The file-backed implementation of the {@link ManifestCatalog} seam (ARCHITECTURE.md "Ownership is one compare-and-set").
+ * The on-disk implementation of the {@link ManifestCatalog} seam (ARCHITECTURE.md "Ownership is one compare-and-set").
  *
  * <p>Named for the implementation rather than the seam: {@link S3ManifestCatalog}
  * and {@link DynamoManifestCatalog} exist too, and calling this one {@code
@@ -10,13 +10,13 @@ package io.veridia.elysiumkv;
  *
  * <p>Owned by the caller and must outlive the database.
  */
-public final class FileManifestCatalog extends ManifestCatalog {
-    public FileManifestCatalog(String directory) {
+public final class DiskManifestCatalog extends ManifestCatalog {
+    public DiskManifestCatalog(String directory) {
         super(create(directory));
     }
 
     private static long create(String directory) {
         Native.ensureLoaded();
-        return Native.fileManifestCatalogCreate(directory);
+        return Native.diskManifestCatalogCreate(directory);
     }
 }

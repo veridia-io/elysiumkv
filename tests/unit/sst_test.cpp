@@ -2,7 +2,7 @@
 #include "sst/sst_writer.hpp"
 
 #include "support/temp_dir.hpp"
-#include "elysiumkv/local_file_blob_store.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -59,7 +59,7 @@ protected:
     }
 
     TempDir dir_;
-    LocalFileBlobStore store_{dir_.path()};
+    DiskBlobStore store_{dir_.path()};
     uint64_t file_size_ = 0;
 };
 
@@ -242,7 +242,7 @@ protected:
     }
 
     TempDir dir_;
-    LocalFileBlobStore store_{dir_.path()};
+    DiskBlobStore store_{dir_.path()};
 };
 
 TEST_F(SstCorruptionTest, TruncatedFileFailsToOpen) {

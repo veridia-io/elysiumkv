@@ -1,5 +1,5 @@
-#ifndef ELYSIUMKV_FILE_MANIFEST_CATALOG_HPP
-#define ELYSIUMKV_FILE_MANIFEST_CATALOG_HPP
+#ifndef ELYSIUMKV_DISK_MANIFEST_CATALOG_HPP
+#define ELYSIUMKV_DISK_MANIFEST_CATALOG_HPP
 
 #include "elysiumkv/manifest_catalog.hpp"
 
@@ -15,9 +15,9 @@ namespace elysiumkv {
 /// even though a single-writer filesystem makes contention impossible. The point
 /// is that the *engine* exercises the same code path it will run against a
 /// contended remote catalog.
-class FileManifestCatalog final : public ManifestCatalog {
+class DiskManifestCatalog final : public ManifestCatalog {
 public:
-    explicit FileManifestCatalog(std::filesystem::path directory);
+    explicit DiskManifestCatalog(std::filesystem::path directory);
 
     Result<std::optional<Entry>> read() override;
     Result<std::optional<Entry>> compare_and_set(std::optional<Entry> expected,
@@ -43,4 +43,4 @@ private:
 
 }  // namespace elysiumkv
 
-#endif  // ELYSIUMKV_FILE_MANIFEST_CATALOG_HPP
+#endif  // ELYSIUMKV_DISK_MANIFEST_CATALOG_HPP

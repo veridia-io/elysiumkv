@@ -98,7 +98,7 @@ add_library(elysiumkv STATIC
     src/status.cpp
     src/db/db_impl.cpp
     src/db/level_config.cpp
-    src/blob/local_file_blob_store.cpp
+    src/blob/disk_blob_store.cpp
     src/blob/disk_cache_blob_store.cpp
     src/blob/memory_cache_blob_store.cpp
     src/blob/range_cache.cpp
@@ -110,7 +110,7 @@ add_library(elysiumkv STATIC
     src/compact/picker.cpp
     src/memtable/arena.cpp
     src/memtable/skiplist_memtable.cpp
-    src/manifest/file_manifest_catalog.cpp
+    src/manifest/disk_manifest_catalog.cpp
     src/version/version.cpp
     src/version/version_edit.cpp
     src/version/version_set.cpp

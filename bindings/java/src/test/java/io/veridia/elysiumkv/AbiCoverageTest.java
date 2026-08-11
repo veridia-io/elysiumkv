@@ -128,9 +128,9 @@ class AbiCoverageTest {
             // Options: create/destroy, both aggregates, and the one configure call.
             exercise("optionsCreate");
             exercise("optionsDestroy");
-            exercise("localBlobStoreCreate");
+            exercise("diskBlobStoreCreate");
             exercise("blobStoreDestroy");
-            exercise("fileManifestCatalogCreate");
+            exercise("diskManifestCatalogCreate");
             exercise("manifestCatalogDestroy");
             // ARCHITECTURE.md "Caches chain" — the decorators, over the local store the fixture already owns. The
             // chain is what the ABI has to support, so the chain is what is built.
