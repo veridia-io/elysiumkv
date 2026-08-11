@@ -204,8 +204,12 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
     }
     if (seed == nullptr) return std::nullopt;
 
-    std::string lower = seed->smallest_key;
-    std::string upper = seed->largest_key;
+    // The seed's *effective* span, for the same reason `widen` uses it below. A file carrying only
+    // range tombstones has no data span at all, and starting from an empty one leaves the overlap
+    // search matching nothing — not even the seed itself, whose effective span sits above the empty
+    // upper bound. The compaction then has no inputs, and the code below reads `inputs.front()`.
+    std::string lower = seed->effective_smallest();
+    std::string upper = seed->effective_largest();
 
     if (is_overlapping_level(chosen, source)) {
         compaction.inputs = transitive_overlap(version, chosen, lower, upper);
@@ -258,8 +262,14 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
     // is bottommost would carry those tombstones past the only point that
     // reclaims them, and nothing subsequently forces a rewrite. Fall back to a
     // normal rewrite in that case.
-    const bool drops_nothing =
-        !compaction.output_is_bottommost || compaction.inputs.front().num_tombstones == 0;
+    // Range tombstones count here exactly as point tombstones do: a move does not rewrite, so
+    // carrying either past the level that reclaims them leaves them with nothing to force a rewrite
+    // later. A file can carry range tombstones and no point tombstones at all — a flush whose
+    // memtable saw only a `delete_range` is precisely that — so testing one and not the other lets
+    // the commonest shape through.
+    const bool drops_nothing = !compaction.output_is_bottommost ||
+                               (compaction.inputs.front().num_tombstones == 0 &&
+                                compaction.inputs.front().num_range_tombstones == 0);
 
     compaction.trivial_move = compaction.inputs.size() == 1 && compaction.overlaps.empty() &&
                               drops_nothing &&

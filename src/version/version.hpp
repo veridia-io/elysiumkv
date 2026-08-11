@@ -40,11 +40,27 @@ public:
     /// Files no surviving key can be read from: reclaimable whole, with no rewrite.
     std::vector<FileMetadata> files_entirely_truncated() const;
 
-    /// Files a **newer** file's range tombstone covers completely, and which can therefore be
-    /// unlinked whole — nothing read, nothing rewritten, one edit. This is what makes evicting a
-    /// tenant cheap rather than merely expressible, and it is `files_entirely_truncated` generalised
-    /// from a floor to a range.
-    std::vector<FileMetadata> files_entirely_range_deleted() const;
+    /// A file that a **newer** file's range tombstones may cover completely, paired with the file
+    /// whose tombstones might do it.
+    struct RangeDropCandidate {
+        FileMetadata file;
+        FileMetadata cover;
+        /// The cover carries exactly one range, so the span the manifest records **is** that range
+        /// and no further check is needed. With two or more that span is a hull with gaps in it,
+        /// and a hull can show a file is *not* covered but never that it is — so the tombstones
+        /// themselves have to be read, which a `Version` cannot do.
+        bool exact = false;
+    };
+
+    /// Files that could be unlinked whole because a newer file's range deletes cover them —
+    /// nothing read, nothing rewritten, one edit. This is what makes evicting a tenant cheap rather
+    /// than merely expressible, and it is `files_entirely_truncated` generalised from a floor to a
+    /// range.
+    ///
+    /// **A shortlist, not an answer.** Every candidate here is soundly rejected-or-admitted by the
+    /// manifest alone, so a caller that reads nothing may act on the `exact` ones and drop the rest;
+    /// a caller with store access settles the rest by reading one block per cover.
+    std::vector<RangeDropCandidate> range_drop_candidates() const;
 
     uint64_t total_bytes(int level) const;
     size_t file_count(int level) const;

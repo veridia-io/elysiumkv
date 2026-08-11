@@ -61,8 +61,11 @@ struct DiffOp {
     std::string key;
     std::string value;
     std::string upper;  ///< ScanRange only
-    /// Batch only: (is_delete, key, value).
-    std::vector<std::tuple<bool, std::string, std::string>> batch;
+    /// Batch only. `kind` is `Kind::Put`, `Kind::Remove` or `Kind::DeleteRange`; for the last the
+    /// pair is the bounds. A kind rather than the `is_delete` flag it replaces, because a range is
+    /// a third thing and the whole point of batching it is that **order within the batch decides**
+    /// what survives — which only a stream that can express all three ever asks.
+    std::vector<std::tuple<Kind, std::string, std::string>> batch;
 
     std::string describe() const;
 };

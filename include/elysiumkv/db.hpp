@@ -91,11 +91,26 @@ class WriteBatch {
 public:
     WriteBatch& put(Slice key, Slice value);
     WriteBatch& remove(Slice key);
+
+    /// Deletes `[lower, upper)` as part of this batch.
+    ///
+    /// **Order within the batch decides what survives.** A `put` after this one lands on top of the
+    /// range and lives; a `put` before it is covered and does not. That is the same rule the
+    /// standalone call follows, for the same reason — the memtable resolves the ordering as each
+    /// operation is applied — and it is what makes "evict a tenant and re-seed the space" one
+    /// atomic step rather than two calls with the range visibly empty between them.
+    WriteBatch& delete_range(Slice lower, Slice upper);
+
     size_t size() const { return ops_.size(); }
     void clear() { ops_.clear(); }
 
+    enum class Kind : uint8_t { Put, Remove, DeleteRange };
+
+    /// One operation. For `DeleteRange` the pair is the bounds: `key` is `lower` and `value` is
+    /// `upper`. A kind rather than the `is_delete` flag it replaces, because three states do not
+    /// fit in a bool and two bools would admit a fourth that means nothing.
     struct Op {
-        bool is_delete = false;
+        Kind kind = Kind::Put;
         std::string key;
         std::string value;
     };

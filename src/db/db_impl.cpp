@@ -177,12 +177,17 @@ uint64_t default_clock() {
 }
 
 WriteBatch& WriteBatch::put(Slice key, Slice value) {
-    ops_.push_back({false, key.to_string(), value.to_string()});
+    ops_.push_back({Kind::Put, key.to_string(), value.to_string()});
     return *this;
 }
 
 WriteBatch& WriteBatch::remove(Slice key) {
-    ops_.push_back({true, key.to_string(), {}});
+    ops_.push_back({Kind::Remove, key.to_string(), {}});
+    return *this;
+}
+
+WriteBatch& WriteBatch::delete_range(Slice lower, Slice upper) {
+    ops_.push_back({Kind::DeleteRange, lower.to_string(), upper.to_string()});
     return *this;
 }
 
@@ -509,9 +514,42 @@ Status DbImpl::write(WriteBatch& batch) {
     // Checked in full before anything is applied: ARCHITECTURE.md "Absence is an answer, not an error" says a batch lands as a
     // unit, so discovering an oversized entry halfway through would leave the
     // store holding half of it.
-    for (const WriteBatch::Op& op : batch.ops()) {
-        const Status status = check_entry_size(Slice::from(op.key),
-                                               op.is_delete ? Slice() : Slice::from(op.value));
+    //
+    // The floor is read once here rather than per operation, so every range in the batch is clamped
+    // against the same one — a batch is a unit, and a floor that moved underneath it halfway
+    // through would make it a sequence again.
+    const std::string floor = versions_->current()->truncation_point();
+    // Each op's resolved range, or nothing for an op that is not one or deletes nothing.
+    //
+    // **One entry per op rather than one per range**, indexed by the same loop variable below. A
+    // vector holding only the ranges would need its own cursor, and a cursor that advances on a
+    // different condition than the loop is a drift waiting to happen — the first empty range in a
+    // batch would silently shift every later one onto the wrong bounds.
+    std::vector<std::optional<std::pair<std::string, std::string>>> ranges(batch.ops().size());
+    for (size_t i = 0; i < batch.ops().size(); ++i) {
+        const WriteBatch::Op& op = batch.ops()[i];
+        if (op.kind == WriteBatch::Kind::DeleteRange) {
+            if (Status status = check_entry_size(Slice::from(op.key), Slice()); status != Status::Ok) {
+                return status;
+            }
+            if (Status status = check_entry_size(Slice::from(op.value), Slice());
+                status != Status::Ok) {
+                return status;
+            }
+            // **Clamped, where a `put` in the same batch would be refused**, and the difference is
+            // not an inconsistency. A write below the floor is refused because the engine cannot
+            // tell it from one made before the truncation; a delete below the floor asks for
+            // something already true. Doing this per operation rather than per batch is what lets
+            // one batch hold both.
+            std::string lower = op.key;
+            if (!floor.empty() && lower < floor) lower = floor;
+            // Empty after clamping deletes nothing, and the entry simply stays absent.
+            if (lower < op.value) ranges[i] = std::make_pair(std::move(lower), op.value);
+            continue;
+        }
+        const Status status = check_entry_size(
+            Slice::from(op.key), op.kind == WriteBatch::Kind::Remove ? Slice()
+                                                                     : Slice::from(op.value));
         if (status != Status::Ok) return status;
         // Checked in the same pass and for the same reason: a batch lands whole or not at all, so
         // a key under the floor has to be found before anything is applied.
@@ -525,11 +563,25 @@ Status DbImpl::write(WriteBatch& batch) {
         // only, so a flush never splits a batch across two memtables.
         std::lock_guard<std::mutex> lock(mem_mutex_);
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
-        for (const WriteBatch::Op& op : batch.ops()) {
-            if (op.is_delete) {
-                mem_->remove(Slice::from(op.key));
-            } else {
-                mem_->put(Slice::from(op.key), Slice::from(op.value));
+        for (size_t i = 0; i < batch.ops().size(); ++i) {
+            const WriteBatch::Op& op = batch.ops()[i];
+            switch (op.kind) {
+                case WriteBatch::Kind::Put:
+                    mem_->put(Slice::from(op.key), Slice::from(op.value));
+                    break;
+                case WriteBatch::Kind::Remove:
+                    mem_->remove(Slice::from(op.key));
+                    break;
+                case WriteBatch::Kind::DeleteRange: {
+                    // In op order, so a `put` earlier in the batch is covered by this and a `put`
+                    // later lands on top of it — the memtable resolves that as each op is applied,
+                    // exactly as it does for the standalone call.
+                    if (ranges[i].has_value()) {
+                        mem_->delete_range(Slice::from(ranges[i]->first),
+                                           Slice::from(ranges[i]->second));
+                    }
+                    break;
+                }
             }
         }
     }

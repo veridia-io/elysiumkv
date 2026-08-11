@@ -473,6 +473,12 @@ ELYSIUMKV_API void elysiumkv_batch_destroy(elysiumkv_batch*);
 ELYSIUMKV_API void elysiumkv_batch_put(elysiumkv_batch*, const uint8_t* key, size_t key_len, const uint8_t* value,
                        size_t value_len);
 ELYSIUMKV_API void elysiumkv_batch_delete(elysiumkv_batch*, const uint8_t* key, size_t key_len);
+
+/* Deletes [lower, upper) as part of the batch. Order within the batch decides
+ * what survives: a put after this one lands on top of the range, a put before it
+ * is covered. */
+ELYSIUMKV_API void elysiumkv_batch_delete_range(elysiumkv_batch*, const uint8_t* lower,
+                                      size_t lower_len, const uint8_t* upper, size_t upper_len);
 ELYSIUMKV_API size_t elysiumkv_batch_size(const elysiumkv_batch*);
 /* Applied as a unit: the whole batch lands in one memtable. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_write(elysiumkv_db*, elysiumkv_batch*);

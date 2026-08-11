@@ -138,17 +138,20 @@ INSTANTIATE_TEST_SUITE_P(
         // shed counter off the instance the replay had just *reopened*. Worth remembering
         // as an argument for the check rather than against it: it was the thing that
         // eventually got looked at, instead of a config silently testing nothing.
+        // 48 KiB until range deletes joined the op mix, including inside batches: they cut the
+        // live keyspace enough that the overage stopped happening and the vacuity check below said
+        // so, rather than letting the configuration quietly stop testing the shedding path.
         ReplayConfig{.name = "TightMemoryBudget",
                      .compression = Compression::Zstd,
                      .memtable_bytes = 64u << 10,
-                     .budget_bytes = 48u << 10},
+                     .budget_bytes = 24u << 10},
         // And with the chain, because the blob cache and the block cache compete for the same
         // budget — the substitution warning as an eviction race rather than as advice.
         ReplayConfig{.name = "CachedTightBudget",
                      .compression = Compression::Zstd,
                      .memtable_bytes = 64u << 10,
                      .cached = true,
-                     .budget_bytes = 48u << 10},
+                     .budget_bytes = 24u << 10},
         // The cache reading past what it was asked for. A chunk overruns the request at both
         // ends and the object at the last one, so the slicing that trims it back is where this
         // goes wrong — and it goes wrong as a wrong value or a short read, which is what an

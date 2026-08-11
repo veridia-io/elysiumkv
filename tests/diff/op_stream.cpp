@@ -73,8 +73,10 @@ std::string DiffOp::describe() const {
         case Kind::Get: return "get(" + quote(key) + ")";
         case Kind::Batch: {
             std::string out = "batch{";
-            for (const auto& [is_delete, batch_key, batch_value] : batch) {
-                out += is_delete ? " remove(" + quote(batch_key) + ")"
+            for (const auto& [batch_kind, batch_key, batch_value] : batch) {
+                out += batch_kind == Kind::DeleteRange
+                           ? " delete_range(" + quote(batch_key) + ", " + quote(batch_value) + ")"
+                       : batch_kind == Kind::Remove ? " remove(" + quote(batch_key) + ")"
                                  : " put(" + quote(batch_key) + ", " + quote(batch_value) + ")";
             }
             return out + " }";
@@ -159,10 +161,22 @@ std::vector<DiffOp> generate_ops(uint64_t seed, int count, GeneratorOptions opti
         } else if (choice < 84) {
             op.kind = DiffOp::Kind::Batch;
             for (int j = 0; j < 8; ++j) {
-                const bool is_delete = rng() % 4 == 0;
+                const unsigned roll = rng() % 16;
+                if (roll == 0) {
+                    // One in sixteen, and deliberately mixed in among the puts rather than placed
+                    // at either end: what this exists to exercise is a put on one side of a range
+                    // being covered and a put on the other side surviving.
+                    std::string a = key_for(rng, options.distinct_keys);
+                    std::string b = key_for(rng, options.distinct_keys);
+                    if (b < a) std::swap(a, b);
+                    op.batch.emplace_back(DiffOp::Kind::DeleteRange, std::move(a), std::move(b));
+                    continue;
+                }
+                const bool is_delete = roll % 4 == 0;
                 std::string key = key_for(rng, options.distinct_keys);
                 std::string value = is_delete ? std::string() : value_for(rng);
-                op.batch.emplace_back(is_delete, std::move(key), std::move(value));
+                op.batch.emplace_back(is_delete ? DiffOp::Kind::Remove : DiffOp::Kind::Put,
+                                      std::move(key), std::move(value));
             }
         } else if (choice < 86) {
             op.kind = DiffOp::Kind::ScanAll;

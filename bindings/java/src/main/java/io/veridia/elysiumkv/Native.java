@@ -192,6 +192,8 @@ final class Native {
 
     static native void batchDelete(long batch, byte[] key, int keyLength);
 
+    static native void batchDeleteRange(long batch, byte[] lower, byte[] upper);
+
     static native long batchSize(long batch);
 
     static native void write(long db, long batch);
