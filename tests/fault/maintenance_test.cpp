@@ -145,8 +145,7 @@ protected:
 
     int files_on(int tier_index) { return tier(tier_index).file_count; }
 
-    /// Waits until nothing has invalidated the coordinator's epoch for several ticks **and the
-    /// coordinator has caught up with it**.
+    /// Waits until nothing has invalidated the coordinator's epoch for several ticks.
     ///
     /// **A control that takes the clock out of the gate needs this, and is racy without it.** The
     /// gate opens on *any* epoch change, and an executor that did work invalidates the epoch — so
@@ -154,13 +153,11 @@ protected:
     /// do with time. One of them would observe the advanced clock and do exactly the work the
     /// control asserts cannot happen. "No writes are arriving" is not the same as "quiescent".
     ///
-    /// **A stable epoch is not enough, which is the subtler half.** Once the clock is out of the
-    /// gate, the only thing that can open it is `epoch != last_reconciled_epoch_` — so a reading
-    /// that has been stable for several ticks while the coordinator has not yet *reconciled* it
-    /// leaves the gate armed, and the next tick opens it and does the work anyway. Sampling the
-    /// epoch says the store stopped changing; it does not say the coordinator noticed. Waiting on
-    /// `maintenance_gate_closed_for_test` is what says that, and the header points here in as many
-    /// words: a guess about how many ticks is long enough was wrong on a loaded CI runner.
+    /// **Says the store stopped changing, not that the coordinator noticed** — those come apart, and
+    /// a caller that needs the second one has to ask for it separately. Not folded in here: a test
+    /// that lengthens the interval so the coordinator cannot tick, and then drives `reconcile_for_test`
+    /// itself, can never satisfy it, and waiting on it in this helper hung exactly that test for a
+    /// full `kSettle`. See `wait_until_the_gate_is_closed`.
     void wait_until_quiescent() {
         uint64_t last = engine().maintenance_epoch_for_test();
         int stable = 0;
@@ -168,11 +165,25 @@ protected:
         while (stable < 5 && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(kTick);
             const uint64_t now = engine().maintenance_epoch_for_test();
-            const bool caught_up = engine().maintenance_gate_closed_for_test();
-            stable = (now == last && caught_up) ? stable + 1 : 0;
+            stable = now == last ? stable + 1 : 0;
             last = now;
         }
         EXPECT_GE(stable, 5) << "the store never settled, so nothing after this is a clean control";
+    }
+
+    /// Waits until the coordinator has *reconciled* the current epoch, so its gate is shut on state.
+    ///
+    /// **The half a stable epoch does not cover, and only meaningful where the coordinator ticks.**
+    /// Once the clock is out of the gate, the one remaining way to open it is
+    /// `epoch != last_reconciled_epoch_` — so an epoch that has read the same for several ticks
+    /// while the coordinator has not yet caught up leaves the gate armed, and its next tick opens it
+    /// and does the work the control says is impossible. The engine ships
+    /// `maintenance_gate_closed_for_test` for this and its comment says why: counting ticks is a
+    /// guess about a machine, and it was wrong on a loaded CI runner.
+    void wait_until_the_gate_is_closed() {
+        EXPECT_TRUE(settle([&] { return engine().maintenance_gate_closed_for_test(); }))
+            << "the coordinator never caught up, so the gate is still armed and anything after this "
+               "races it rather than testing it";
     }
 
     TestStore store_{2};
@@ -211,6 +222,7 @@ TEST_F(MaintenanceTest, WithoutATimedReconcileTheQuietStoreNeverRescuesAnything)
     ASSERT_EQ(db_->flush(), Status::Ok);
     ASSERT_TRUE(settle([&] { return files_on(0) > 0; }));
     wait_until_quiescent();
+    wait_until_the_gate_is_closed();
     engine().suppress_timed_maintenance_for_test(true);
 
     // Sampled *before* the window opens, because the two ways this can fail need different answers
