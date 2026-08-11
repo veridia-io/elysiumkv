@@ -114,6 +114,14 @@ uint64_t Compaction::min_write_time_ms() const {
     return oldest;
 }
 
+uint64_t Compaction::max_write_time_ms() const {
+    uint64_t newest = 0;
+    for (const FileMetadata& file : all_inputs()) {
+        if (file.max_write_time_ms > newest) newest = file.max_write_time_ms;
+    }
+    return newest;
+}
+
 WatermarkInterval Compaction::watermark() const {
     const std::vector<FileMetadata> files = all_inputs();
     WatermarkInterval merged;

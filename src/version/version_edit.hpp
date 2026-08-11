@@ -85,6 +85,16 @@ struct FileMetadata {
     /// recomputed after a restart — hence persisted.
     uint64_t min_write_time_ms = 0;
 
+    /// Wall clock of the **newest** write in the file: a flushed L0 file takes its memtable's seal
+    /// time, a compaction output the max over its inputs, a migration carries it unchanged.
+    ///
+    /// Separate from `min_write_time_ms` because the two answer opposite questions. Placement asks
+    /// how old the file's *oldest* data is, so that a file is moved to cold storage as soon as any
+    /// of it qualifies. Expiry asks how young its *newest* data is, because a file may only be
+    /// dropped when everything in it has outlived the limit — using the oldest would delete data
+    /// still inside it. Zero means unknown, and unknown never expires.
+    uint64_t max_write_time_ms = 0;
+
     /// The embedder-supplied watermark interval this file's data lies within — see
     /// `WatermarkInterval` for why it is an interval and not a scalar. A flushed L0 file takes
     /// its source memtable's; a compaction output takes `min` of the lows and `max` of the highs;

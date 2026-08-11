@@ -152,6 +152,39 @@ std::vector<Version::RangeDropCandidate> Version::range_drop_candidates() const 
     return candidates;
 }
 
+bool Version::older_file_overlaps(const FileMetadata& file) const {
+    for (const auto& others : levels_) {
+        for (const FileMetadata& other : others) {
+            const bool older = other.level > file.level ||
+                               (other.level == file.level && other.file_number < file.file_number);
+            if (!older) continue;
+            if (Slice::from(other.largest_key) < Slice::from(file.smallest_key)) continue;
+            if (Slice::from(file.largest_key) < Slice::from(other.smallest_key)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<FileMetadata> Version::files_expired_before(uint64_t cutoff) const {
+    std::vector<FileMetadata> dead;
+    for (const auto& files : levels_) {
+        for (const FileMetadata& file : files) {
+            // Unknown never expires. Nothing should reach here with a zero — every write path sets
+            // it — but guessing "very old" from an absent value would delete a whole file.
+            if (file.max_write_time_ms == 0) continue;
+            // The *newest* write, so the file goes only once everything in it has outlived the
+            // limit. Keyed on the oldest, a file would be dropped while still holding fresh data.
+            if (file.max_write_time_ms > cutoff) continue;
+            // Its range tombstones would go with it, and they shadow files this says nothing about.
+            if (file.num_range_tombstones != 0) continue;
+            if (older_file_overlaps(file)) continue;
+            dead.push_back(file);
+        }
+    }
+    return dead;
+}
+
 std::shared_ptr<const Version> Version::apply(const Version& base, const VersionEdit& edit) {
     std::vector<std::vector<FileMetadata>> levels = base.levels_;
 

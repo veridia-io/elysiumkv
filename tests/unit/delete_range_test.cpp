@@ -439,7 +439,7 @@ TEST_F(DeleteRange, EvictingATenantRemovesItsFiles) {
     // Whichever mechanism gets there first — the whole-file drop or a compaction — the evicted
     // tenant's file must not still be sitting in the version.
     Status status = Status::Ok;
-    engine().reclaim_truncated_files_for_test(status);
+    engine().reclaim_dead_files_for_test(status);
     ASSERT_EQ(status, Status::Ok);
 
     for (const FileMetadata& file : files()) {
@@ -460,7 +460,7 @@ TEST_F(DeleteRange, APartlyCoveredFileIsNotDropped) {
     ASSERT_EQ(db_->flush(), Status::Ok);
 
     Status status = Status::Ok;
-    engine().reclaim_truncated_files_for_test(status);
+    engine().reclaim_dead_files_for_test(status);
     ASSERT_EQ(status, Status::Ok);
 
     for (int i = 10; i < 20; ++i) {
@@ -488,7 +488,7 @@ TEST_F(DeleteRange, ARangeDeleteIsNotMistakenForATruncatedFile) {
     ASSERT_EQ(db_->flush(), Status::Ok);
 
     Status status = Status::Ok;
-    engine().reclaim_truncated_files_for_test(status);
+    engine().reclaim_dead_files_for_test(status);
     ASSERT_EQ(status, Status::Ok);
 
     EXPECT_EQ(db_->get(Slice::from(std::string("mmm:1"))).error(), Status::NotFound)
@@ -667,7 +667,7 @@ TEST_F(DeleteRange, AFileCoveredByOneOfSeveralRangesIsStillDroppedWhole) {
     // by the outcome — with the manifest hull alone, a cover carrying two ranges authorises nothing
     // and the file below is still here.
     Status status = Status::Ok;
-    engine().reclaim_truncated_files_for_test(status);
+    engine().reclaim_dead_files_for_test(status);
     ASSERT_EQ(status, Status::Ok);
 
     for (const FileMetadata& file : files()) {
@@ -691,7 +691,7 @@ TEST_F(DeleteRange, AFileInTheGapBetweenTwoRangesIsNotDropped) {
     ASSERT_EQ(db_->flush(), Status::Ok);
 
     Status status = Status::Ok;
-    engine().reclaim_truncated_files_for_test(status);
+    engine().reclaim_dead_files_for_test(status);
     ASSERT_EQ(status, Status::Ok);
 
     for (int i = 0; i < 10; ++i) {

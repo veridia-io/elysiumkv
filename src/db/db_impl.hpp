@@ -142,9 +142,9 @@ public:
     /// interval. The sweep is idempotent and its patience comes from the clock, not from how often
     /// it is called.
     Status sweep_orphans_for_test() { return sweep_orphans(); }
-    /// One reclaim pass on the calling thread: files a truncation point or a range tombstone has
-    /// made unreadable, dropped by manifest edit alone.
-    bool reclaim_truncated_files_for_test(Status& status) { return reclaim_truncated_files(status); }
+    /// One reclaim pass on the calling thread: files a truncation point, a range tombstone or the
+    /// TTL has made dead, dropped by manifest edit alone.
+    bool reclaim_dead_files_for_test(Status& status) { return reclaim_dead_files(status); }
     /// One reconcile pass on the calling thread, so a test can drive the coordinator's decision
     /// without waiting for a tick. `force_full` bypasses the O(1) gate, which is what the
     /// periodic bypass does every minute in the running loop.
@@ -226,6 +226,8 @@ private:
     void start_background();
 
     // --- write path
+    /// Moves the live memtable to the immutable slot and stamps when writes stopped arriving.
+    void seal_memtable();
     Status maybe_freeze_memtable(bool force);
 
     /// Whether the active memtable should be flushed: `force`, or it has reached
@@ -310,7 +312,7 @@ private:
     /// ARCHITECTURE.md "The differential oracle" — the compaction counterpart of `run_one_flush`, with the same
     /// contract: performs exactly one compaction, reports whether it did work.
     /// Drops files the truncation point has emptied. Same `run_one()` contract as the others.
-    bool reclaim_truncated_files(Status& status);
+    bool reclaim_dead_files(Status& status);
     bool run_one_compaction(Status& status);
     Status run_compaction(const Compaction& compaction);
     /// ARCHITECTURE.md "Migration between tiers" — the third kind of background work, and structurally the simplest:

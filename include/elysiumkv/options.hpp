@@ -146,6 +146,29 @@ struct Options {
     /// across dozens of instances in one process.
     Duration maintenance_interval{1000};
 
+    /// How long data lives before the engine drops it, measured from when it was written.
+    ///
+    /// **Expiry by manifest edit: a file whose every write has outlived this is unlinked whole.**
+    /// Nothing is read and nothing is rewritten, which is what makes it affordable to run
+    /// continuously — the same trick `truncate_below` uses, keyed on age instead of key order.
+    ///
+    /// Three things it is not, each worth knowing before relying on it:
+    ///
+    /// - **The granularity is the file, not the key.** The manifest names files, so a file is the
+    ///   smallest thing an edit can drop; reaching inside one means rewriting it, which is
+    ///   compaction and no longer free. This buys "data older than X disappears", not "this key
+    ///   expires at X".
+    /// - **At or after, never before.** A file is dropped when the sweep next runs and finds it
+    ///   expired, so data may outlive the limit by up to `orphan_sweep_interval`. It is never
+    ///   dropped early, which is the direction that matters.
+    /// - **Only where nothing older sits beneath it.** Dropping a file that shadows an older
+    ///   version of the same key would *uncover* that older version rather than remove the key —
+    ///   a resurrection, not an expiry. So a file expires only once no older file overlaps its
+    ///   range, which in practice means once it has reached the bottom of the tree.
+    ///
+    /// Unset — the default — never expires anything.
+    std::optional<Duration> ttl;
+
     /// How long an object *this instance obsoleted* is kept after nothing local references it.
     ///
     /// **Protects readers, and only readers.** A read-only instance in another process holds a
