@@ -9,12 +9,15 @@ name: Build and Publish Java Library
 # fails at *first use* with an UnsatisfiedLinkError rather than at dependency-resolution time. A
 # single-platform release looks completely fine to whoever cut it.
 on:
-  # Only when the publishing machinery or the binding changes: this builds the native library
-  # three times, and the `ci` workflow already covers the code on every push. It runs on PRs at
-  # all because a publish path exercised only on release day breaks on release day.
+  # Only when the publishing machinery or a binding changes: this builds the native library three
+  # times, and the `ci` workflow runs both bindings' test suites on every push and pull request
+  # regardless of what was touched. What is exercised *here* is the packaging and release path, not
+  # the code — and it runs on pull requests at all because a publish path exercised only on release
+  # day breaks on release day.
   pull_request:
     paths:
       - 'bindings/java/**'
+      - 'bindings/kafka-streams-v3/**'
       - '.github/workflows/publish-java.yml'
   release:
     types: [created]
@@ -280,6 +283,103 @@ jobs:
       - name: Publish to Maven Central
         if: github.event_name == 'release'
         run: mvn -B -f bindings/java/pom.xml deploy -Prelease -DskipTests
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_CENTRAL_GPG_PASSPHRASE }}
+
+  # The Kafka Streams adapter: pure Java, so none of the native machinery above applies to it. It
+  # does need the engine at the version being released, and it gets that by building and installing
+  # it here rather than resolving it from Central — a deploy that has just returned is not a
+  # guarantee that the next resolve will find it, and racing a CDN is not a thing to build a release
+  # on.
+  #
+  # **After the engine, deliberately.** Two artifacts cannot land atomically, so the order is chosen:
+  # an engine without its adapter is usable, an adapter without its engine is not.
+  adapter:
+    name: assemble and publish the Kafka Streams adapter
+    needs: [version, native, jar]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_CENTRAL_GPG_PRIV_KEY }}
+
+      - name: Collect the native libraries
+        uses: actions/download-artifact@v6
+        with:
+          path: bindings/java/native-staging
+          pattern: native-*
+
+      - name: Arrange the staging tree
+        run: |
+          cd bindings/java/native-staging
+          for dir in native-*; do mv "$dir" "${dir#native-}"; done
+
+      # Installed, not resolved. The engine jar this adapter is tested and published against is the
+      # one built from this checkout at this version — the same artifact the job above published.
+      # Tests are skipped only because that job already ran them against this same staging tree.
+      - name: Install the engine at the release version
+        run: |
+          mvn -B -f bindings/java/pom.xml versions:set \
+            -DnewVersion="${{ needs.version.outputs.version }}" -DgenerateBackupPoms=false
+          mvn -B -f bindings/java/pom.xml install -DskipTests
+
+      # Both the adapter's own version and the engine it depends on, from the one tag that names
+      # them. They are released together out of one repository, so a version skew between them
+      # would mean nothing.
+      - name: Set the version
+        run: |
+          mvn -B -f bindings/kafka-streams-v3/pom.xml versions:set \
+            -DnewVersion="${{ needs.version.outputs.version }}" -DgenerateBackupPoms=false
+          mvn -B -f bindings/kafka-streams-v3/pom.xml versions:set-property \
+            -Dproperty=elysiumkv.version \
+            -DnewVersion="${{ needs.version.outputs.version }}" -DgenerateBackupPoms=false
+
+      # **The adapter's test suite has never run anywhere but a developer's machine until now**, and
+      # running it here is worth as much as the publishing: it exercises the adapter against the
+      # assembled engine jar, extracting the platform library out of it exactly as a consumer would,
+      # rather than against a build directory.
+      #
+      # `verify` builds the sources and javadoc jars Central requires, and signs them on a release,
+      # where a failure is a red check rather than a failed publish.
+      - name: Build, test and sign
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            mvn -B -f bindings/kafka-streams-v3/pom.xml verify -Prelease
+          else
+            mvn -B -f bindings/kafka-streams-v3/pom.xml verify
+          fi
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_CENTRAL_GPG_PASSPHRASE }}
+
+      # The published pom must ask for a real engine version. A snapshot left in it would resolve
+      # for nobody, and it is the one field `versions:set` alone would not have touched.
+      - name: The built pom names the released engine
+        run: |
+          EXPECTED="${{ needs.version.outputs.version }}"
+          POM=bindings/kafka-streams-v3/pom.xml
+          RESOLVED=$(mvn -B -q -f "$POM" help:evaluate -Dexpression=elysiumkv.version -DforceStdout)
+          echo "adapter depends on elysiumkv $RESOLVED"
+          [ "$RESOLVED" = "$EXPECTED" ] || { echo "expected $EXPECTED" >&2; exit 1; }
+          case "$RESOLVED" in *SNAPSHOT*) echo "a snapshot cannot be published" >&2; exit 1 ;; esac
+
+      # **A Central release is permanent**, so every check above runs before this step.
+      - name: Publish to Maven Central
+        if: github.event_name == 'release'
+        run: mvn -B -f bindings/kafka-streams-v3/pom.xml deploy -Prelease -DskipTests
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
