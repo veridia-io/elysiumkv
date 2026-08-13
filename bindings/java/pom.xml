@@ -78,6 +78,11 @@
     <elysiumkv.surefire.args></elysiumkv.surefire.args>
 
     <junit.version>5.13.4</junit.version>
+    <!-- Test scope only. Nothing this module ships imports Kafka, and that is the point of the
+         partitioned store: it takes a log through three callbacks and knows nothing about who
+         implements them. The version tracks bindings/kafka-streams-v3 so the worked examples are
+         checked against the same client the Streams adapter is. -->
+    <kafka.version>3.9.1</kafka.version>
     <testcontainers.version>1.21.3</testcontainers.version>
     <!-- Must match the slf4j-api Testcontainers brings (1.7.x): a 2.x binding
          on a 1.x api silently binds nothing and logs "Failed to load class
@@ -199,6 +204,19 @@
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- **Test scope, and it must stay that way.** io.veridia.elysiumkv.partitioned takes no Kafka
+         dependency by design, so this exists purely to compile the worked examples under
+         src/test/.../partitioned/kafka. Their value is that a compiler checks them: an earlier draft
+         of the transaction mapper lived only in a design document, where it declared an interface
+         its own example lambda could not implement. MockProducer and MockConsumer ship inside
+         kafka-clients, so no test-jar is needed. -->
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
       <scope>test</scope>
     </dependency>
 
