@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalLong;
 import java.util.TreeMap;
 
 /**
@@ -83,11 +82,6 @@ final class InMemoryLog {
                 sink.putBatch(end - 1, batch);
             }
         };
-    }
-
-    /** Where a restore would resume from, for asserting that a watermark actually advanced. */
-    static OptionalLong resumeOf(List<OptionalLong> observed) {
-        return observed.isEmpty() ? OptionalLong.empty() : observed.get(observed.size() - 1);
     }
 
     static byte[] encode(Mutation mutation) {

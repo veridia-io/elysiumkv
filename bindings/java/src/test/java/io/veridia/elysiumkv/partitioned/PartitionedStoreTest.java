@@ -55,12 +55,13 @@ class PartitionedStoreTest {
         fixture.close();
     }
 
-    /** @param batchSize how many log records a restore applies per sink call */
+    /** @param batchSize how many log records the default replay applies per sink call */
     private PartitionedStore<String> open(int batchSize) {
-        return open(batchSize, log.restoreIn(batchSize));
+        return open(log.restoreIn(batchSize));
     }
 
-    private PartitionedStore<String> open(int batchSize, Restore<String> restore) {
+    /** The batch size lives in the {@link Restore} the caller passes, so it is not a parameter here. */
+    private PartitionedStore<String> open(Restore<String> restore) {
         return PartitionedStore.<String>builder()
                 .options(fixture::optionsFor)
                 .keyBytes(PartitionFixture.KEY_BYTES)
@@ -464,7 +465,7 @@ class PartitionedStoreTest {
     @Test
     @DisplayName("restore failure fails the assignment")
     void aRestoreFailureFailsTheAssignment() {
-        store = open(8, (partition, through, sink) -> {
+        store = open((partition, through, sink) -> {
             throw new IllegalStateException("injected: no replay for you");
         });
         assertThrows(IllegalStateException.class, () -> store.assign(Collections.singletonList(0)));
@@ -509,7 +510,7 @@ class PartitionedStoreTest {
     @Test
     @DisplayName("a restore that meets a tombstone fails fast")
     void aTombstoneInTheLogFailsTheRestore() {
-        store = open(8, (partition, through, sink) ->
+        store = open((partition, through, sink) ->
                 sink.putBatch(0, Collections.singletonMap("k", null)));
         NullPointerException failure = assertThrows(NullPointerException.class,
                 () -> store.assign(Collections.singletonList(0)));
