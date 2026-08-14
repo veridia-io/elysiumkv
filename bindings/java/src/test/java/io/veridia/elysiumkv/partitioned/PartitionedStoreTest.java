@@ -285,6 +285,209 @@ class PartitionedStoreTest {
         assertTrue(store.behind().isEmpty());
     }
 
+    // --- driven by a transaction manager rather than a callback ---------------
+
+    /*
+     * A container that owns the transaction — Spring's KafkaTransactionManager is the common one —
+     * commits on the application's behalf and offers an after-commit hook and nothing else. There is
+     * no position in which to wrap its commit, so these three tests drive the store the way such a
+     * hook would, one call per outcome. If only `commit(CommitAction)` existed, none of this would be
+     * expressible and the component would be unusable under a transaction manager.
+     */
+
+    @Test
+    @DisplayName("an after-commit hook applies, with no callback anywhere")
+    void aContainerDrivenCommitAppliesThroughTheHook() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        store.stage(0, put("k", "v"));
+
+        log.commitTransaction();     // the container commits; the store is not involved
+        store.applyCommitted();      // ... and then tells the store, from its afterCommit hook
+
+        assertEquals("v", read(0, "k"));
+        assertTrue(store.behind().isEmpty());
+    }
+
+    @Test
+    @DisplayName("an after-rollback hook discards and leaves the partition readable")
+    void aContainerDrivenRollbackDiscards() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        store.stage(0, put("k", "v"));
+
+        log.abortTransaction();
+        store.discard();
+
+        assertNull(read(0, "k"), "a rolled-back transaction must leave nothing applied");
+        assertTrue(store.behind().isEmpty(), "and the partition is not behind: nothing was committed");
+    }
+
+    @Test
+    @DisplayName("a commit whose outcome the container could not establish marks its partitions behind")
+    void aContainerDrivenUnknownOutcomeMarksBehind() {
+        store = open(8);
+        store.assign(Arrays.asList(0, 1));
+        store.stage(0, put("k", "v"));
+        store.stage(1, put("k", "v"));
+
+        // The commit did reach the broker; the container's doCommit threw anyway, so neither the
+        // afterCommit nor the afterRollback hook can be the right one to fire.
+        log.commitTransaction();
+        store.discardUnknown();
+
+        assertEquals(new TreeSet<>(Arrays.asList(0, 1)), new TreeSet<>(store.behind()));
+        assertThrows(PartitionBehindException.class,
+                () -> store.getCommittedBatch(0, Collections.singletonList("k")));
+
+        store.repair(store.behind());
+        assertEquals("v", read(0, "k"), "the repair replays what the transaction turned out to commit");
+        assertEquals("v", read(1, "k"));
+    }
+
+    @Test
+    @DisplayName("applyCommitted with nothing staged is a no-op, not a failure")
+    void applyingAnEmptyBatchIsHarmless() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        store.applyCommitted();   // a batch that changed no state still commits its input offsets
+        assertTrue(store.behind().isEmpty());
+    }
+
+    /**
+     * A container that owns the commit, as Spring's {@code KafkaTransactionManager} does: hooks are
+     * registered per batch and fired once the transaction has completed, one per outcome.
+     */
+    private static final class Container {
+        private Runnable afterCommit;
+        private Runnable afterRollback;
+        private Runnable afterUnknown;
+
+        void register(Runnable commit, Runnable rollback, Runnable unknown) {
+            afterCommit = commit;
+            afterRollback = rollback;
+            afterUnknown = unknown;
+        }
+
+        /** @param transaction the container's own commit; throwing leaves the outcome unknown */
+        void commit(Runnable transaction) {
+            try {
+                transaction.run();
+            } catch (RuntimeException indeterminate) {
+                fire(afterUnknown);
+                throw indeterminate;
+            }
+            fire(afterCommit);
+        }
+
+        void rollback() {
+            fire(afterRollback);
+        }
+
+        /** Cleared before running, as a thread-local hook holder must be. */
+        private void fire(Runnable hook) {
+            Runnable held = hook;
+            afterCommit = afterRollback = afterUnknown = null;
+            if (held != null) {
+                held.run();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a three-hook container handles a commit whose outcome it could not establish")
+    void theThirdHookIsWhatMakesAContainerSafe() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        Container container = new Container();
+        container.register(store::applyCommitted, store::discard, store::discardUnknown);
+
+        store.stage(0, put("k", "v"));
+        assertThrows(RuntimeException.class, () -> container.commit(() -> {
+            log.commitTransaction();      // it did reach the broker
+            throw new IllegalStateException("injected: the commit timed out");
+        }));
+
+        assertEquals(Collections.singleton(0), store.behind(),
+                "the transaction may have carried records the store does not hold");
+        store.repair(Collections.singletonList(0));
+        assertEquals("v", read(0, "k"));
+    }
+
+    @Test
+    @DisplayName("a two-hook container silently leaves the batch staged and the partition readable")
+    void theTwoHookWiringIsTheHazard() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        Container container = new Container();
+        // The usual wiring, and the one that looks complete: afterCommit and afterRollback.
+        container.register(store::applyCommitted, store::discard, null);
+
+        store.stage(0, put("k", "first"));
+        assertThrows(RuntimeException.class, () -> container.commit(() -> {
+            log.commitTransaction();
+            throw new IllegalStateException("injected: the commit timed out");
+        }));
+
+        // Neither hook fired: afterCommit is after the commit, and a container will not roll back a
+        // transaction it could not commit. **The store cannot detect this** — nothing called it — so
+        // this asserts the hazard rather than a behaviour, and it is the caller's to close.
+        assertTrue(store.behind().isEmpty(), "nothing told the store anything, so nothing changed");
+
+        // The cost, made concrete: the abandoned batch is still staged, so the *next* commit applies
+        // writes from a transaction whose outcome was never established.
+        store.stage(0, put("other", "second"));
+        store.applyCommitted();
+        assertEquals("first", read(0, "k"),
+                "a write from the abandoned transaction reached the store on a later commit");
+    }
+
+    @Test
+    @DisplayName("begin() closes that hazard without the container needing a third hook")
+    void beginCatchesAnAbandonedTransaction() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        Container container = new Container();
+        container.register(store::applyCommitted, store::discard, null);   // the two-hook wiring
+
+        store.begin();
+        store.stage(0, put("k", "first"));
+        assertThrows(RuntimeException.class, () -> container.commit(() -> {
+            log.commitTransaction();
+            throw new IllegalStateException("injected: the commit timed out");
+        }));
+        assertTrue(store.behind().isEmpty(), "nothing has told the store anything yet");
+
+        // The next transaction begins, and *that* is what notices: the previous batch resolved to
+        // neither outcome, so it can only have been an unknown one.
+        store.begin();
+        assertEquals(Collections.singleton(0), store.behind());
+
+        // And the partition is unreadable before anything in this batch can fold against it, which
+        // is the whole point of catching it here rather than one commit later.
+        assertThrows(PartitionBehindException.class,
+                () -> store.getCommittedBatch(0, Collections.singletonList("k")));
+
+        store.repair(Collections.singletonList(0));
+        assertEquals("first", read(0, "k"), "the repair replays what the log turned out to hold");
+    }
+
+    @Test
+    @DisplayName("begin() is a no-op when the previous transaction resolved")
+    void beginIsFreeOnTheHappyPath() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        store.begin();
+        store.stage(0, put("k", "v"));
+        log.commitTransaction();
+        store.applyCommitted();
+
+        store.begin();       // nothing staged: no-op
+        store.begin();       // and again
+        assertTrue(store.behind().isEmpty());
+        assertEquals("v", read(0, "k"));
+    }
+
     // --- the apply loop ------------------------------------------------------
 
     @Test

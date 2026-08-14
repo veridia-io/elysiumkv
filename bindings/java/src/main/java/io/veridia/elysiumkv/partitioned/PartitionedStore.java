@@ -30,10 +30,18 @@ import java.util.function.IntFunction;
  * lagging partition may not be served.</b></blockquote>
  *
  * <p>The first clause is enforced structurally: {@link #stage} does not write. It stages, and
- * {@link #commit} applies the staged set as one batch after the caller's transaction has committed.
- * A write cannot reach the store except through a commit, because no other path exists. So a process
- * that dies in between leaves the store <em>behind</em> the log, which is the recoverable direction —
- * the watermark did not advance, and the next restore replays what was missed.
+ * {@link #applyCommitted} applies the staged set as one batch <em>after</em> the caller's
+ * transaction has committed. A write cannot reach the store except through that call, because no
+ * other path exists. So a process that dies in between leaves the store <em>behind</em> the log,
+ * which is the recoverable direction — the watermark did not advance, and the next restore replays
+ * what was missed.
+ *
+ * <p>Which of the three outcomes the caller is in is the caller's to say, in one call each —
+ * {@link #applyCommitted}, {@link #discard}, {@link #discardUnknown}. They are separate rather than
+ * one callback because a container that owns the transaction (Spring's
+ * {@code KafkaTransactionManager}, say) commits on the application's behalf and offers only an
+ * after-commit hook; there is no position in which to wrap its commit. {@link #commit} rebuilds the
+ * single-call form on top, for callers that do own their producer.
  *
  * <p>The second clause is why {@link #getCommittedBatch} and {@link #stage} reject a
  * {@linkplain #behind() behind} partition. Lag is recoverable exactly because the log holds the
@@ -62,12 +70,14 @@ import java.util.function.IntFunction;
  * checkpoint is this component's: {@link #stage} keeps the {@link PendingPosition} each changelog
  * send returns, and after a successful commit the maximum per partition becomes that partition's
  * watermark. They diverge immediately — one state record per changed key, not per input record — so
- * {@link #commit} takes no positions at all and the caller never handles the second.
+ * none of the three outcome calls takes a position, and the caller never handles the second.
  *
  * <h2>Threading</h2>
  *
- * <p>Reads, stages and commits belong to one thread, the one that owns the caller's transaction.
- * {@link #behind()} is safe to call from another.
+ * <p>{@link #begin}, reads, {@link #stage} and whichever outcome call follows belong to one thread —
+ * the one that owns the caller's transaction. A container satisfies this by construction, since it
+ * fires its hooks on the thread that ran the batch, but nothing here checks it.
+ * {@link #behind()} and {@link #assignment()} are safe to call from another.
  *
  * @param <K> the key type. Not {@code byte[]}: Java arrays use identity equality, so two separately
  *            deserialised arrays holding the same bytes are different map keys — a
@@ -268,82 +278,65 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /**
-     * Commits the caller's transaction and then applies everything staged.
+     * Marks the start of a transaction — <b>the one call that makes a two-hook container safe.</b>
      *
-     * <p>The order is the whole design and it cannot be got wrong by rearranging call sites, because
-     * the two calls that could be misordered are one call. Everything the caller's transaction must
-     * do belongs <em>inside</em> {@code action} — checkpointing input positions included — so that a
-     * failure anywhere in it is classified rather than escaping as an unmapped exception that leaves
-     * the transaction open and the batches staged.
+     * <p>Anything still staged here belonged to a transaction that never resolved: neither
+     * {@link #applyCommitted} nor {@link #discard} was called for it. The only outcome that produces
+     * that is a commit whose result the caller could not establish — a container fires its
+     * after-commit hook only after a successful commit, and will not roll back a transaction it could
+     * not commit, so both of the usual hooks stay silent. This treats it as exactly what it is and
+     * calls {@link #discardUnknown}.
      *
-     * <p>On success, per partition: read the pending positions, apply the batch, then stamp the
-     * maximum position as the watermark. The engine carries the watermark in the same memtable as the
-     * writes it covers, so both become durable in one flush — a crash cannot leave a watermark ahead
-     * of the state it claims.
+     * <p>That is why it exists. Without it, closing the hazard needs a third hook wired into the
+     * transaction manager's failure path — obscure enough that the natural two-hook wiring looks
+     * complete and is not. With it, the abandoned batch is dropped and its partitions are marked
+     * behind <em>before</em> this transaction reads anything, which is what stops a fold from
+     * deriving a value from state the log may already have moved past.
      *
-     * @throws AbortableNotCommitted the transaction did not commit; abort it
-     * @throws OutcomeUnknown        it may have; do not abort, close the transport, and the staged
-     *                               partitions are now behind
-     * @throws ProducerDead          the transport is unusable; close it
-     * @throws ApplyFailed           it committed and one or more applies did not
+     * <p>Optional, and a no-op when nothing is staged, so a caller that never calls it is no worse
+     * off than before. It must only be called at a real transaction boundary: calling it mid-batch
+     * discards work in progress, which is safe — the log still holds it — but costs a repair.
      */
-    public void commit(CommitAction action) {
-        Objects.requireNonNull(action, "action");
-        try {
-            action.commit();
-        } catch (AbortableNotCommitted | ProducerDead definite) {
-            discard();
-            throw definite;
-        } catch (OutcomeUnknown unknown) {
-            markBehind(staged.keySet());
-            discard();
-            throw unknown;
-        } catch (RuntimeException unclassified) {
-            // Assuming "not committed" is the unsound direction: it licenses an abort that may not
-            // be legal, and leaves a partition readable that the log may already be ahead of.
-            markBehind(staged.keySet());
-            discard();
-            throw new OutcomeUnknown(
-                    "the commit action threw an unclassified exception, so its outcome is unknown",
-                    unclassified);
+    public void begin() {
+        if (!staged.isEmpty()) {
+            discardUnknown();
         }
-        applyStaged();
     }
 
     /**
-     * Drops whatever is staged. Idempotent, and a no-op after a commit that applied — which is what
-     * lets a caller put it in a {@code finally} and stop reasoning about which paths need it.
+     * <b>The log committed: make it real.</b> Applies every staged batch and advances each
+     * partition's watermark to the highest position its changelog records reached.
      *
-     * <p>It does <b>not</b> abort. Symmetry argues that it should, and that is wrong: after a commit
-     * whose outcome is unknown, aborting is not merely unnecessary but illegal, and only the caller
-     * can know which case it is in.
-     */
-    public void discard() {
-        for (Staged pending : staged.values()) {
-            pending.batch.close();
-        }
-        staged.clear();
-    }
-
-    /** Flushes and closes every partition still held. */
-    @Override
-    public void close() {
-        discard();
-        revoke(assignment());
-    }
-
-    // --- internals -----------------------------------------------------------
-
-    /**
-     * Applies every staged partition and aggregates the failures.
+     * <p>This and the two {@code discard} methods are the contract — one call per outcome the caller
+     * can be in — and they are separate calls precisely so that the caller does not have to own the
+     * commit. A transaction manager that commits on the application's behalf (Spring's
+     * {@code KafkaTransactionManager} being the common one) offers an <em>after-commit</em> hook and
+     * nothing else; there is no callback position in which to wrap its commit. Driving the store from
+     * that hook is the intended shape:
      *
-     * <p>Attempting every partition is the correctness requirement, not tidiness. The transaction
-     * covered all of them, so exiting on the first failure would leave the untried ones committed in
-     * the log, unwritten locally, and still marked ready — which is precisely the state the invariant
-     * exists to make unreachable. {@link ApplyFailed#partitions()} therefore means every partition
-     * whose committed changelog may not be materialised.
+     * <pre>{@code
+     * transactionHook.register(store::applyCommitted, store::discard);
+     * }</pre>
+     *
+     * <p>Per partition: read the pending positions, apply the batch, then stamp the maximum position
+     * as the watermark. The engine carries the watermark in the same memtable as the writes it
+     * covers, so both become durable in one flush — a crash cannot leave a watermark ahead of the
+     * state it claims.
+     *
+     * <p>Calling it when the log did <em>not</em> commit is the one unrecoverable misuse: it puts the
+     * store ahead of the log. Nothing here can detect that, which is why {@link #commit} exists for
+     * callers who do own their transaction.
+     *
+     * <p><b>It attempts every staged partition and aggregates the failures</b>, which is a
+     * correctness requirement rather than tidiness: the transaction covered all of them, so exiting
+     * on the first failure would leave the untried ones committed in the log, unwritten locally, and
+     * still marked ready — precisely the state the invariant exists to make unreachable.
+     * {@link ApplyFailed#partitions()} therefore means every partition whose committed changelog may
+     * not be materialised.
+     *
+     * @throws ApplyFailed one or more partitions may not hold what was committed for them
      */
-    private void applyStaged() {
+    public void applyCommitted() {
         SortedSet<Integer> failed = new TreeSet<>();
         boolean terminal = false;
         RuntimeException first = null;
@@ -373,6 +366,87 @@ public final class PartitionedStore<K> implements AutoCloseable {
             throw new ApplyFailed(failed, terminal, first);
         }
     }
+
+    /**
+     * Commits through a callback the caller supplies, then applies — for callers that own their
+     * transaction rather than delegating it to a container.
+     *
+     * <p>Sugar over {@link #applyCommitted}, {@link #discard} and {@link #discardUnknown}, and worth
+     * having because here the ordering <em>is</em> structural: the two calls that could be misordered
+     * are one call. Everything the caller's transaction must do belongs <em>inside</em>
+     * {@code action} — checkpointing input positions included — so that a failure anywhere in it is
+     * classified rather than escaping as an unmapped exception that leaves the transaction open and
+     * the batches staged.
+     *
+     * @throws AbortableNotCommitted the transaction did not commit; abort it
+     * @throws OutcomeUnknown        it may have; do not abort, close the transport, and the staged
+     *                               partitions are now behind
+     * @throws ProducerDead          the transport is unusable; close it
+     * @throws ApplyFailed           it committed and one or more applies did not
+     */
+    public void commit(CommitAction action) {
+        Objects.requireNonNull(action, "action");
+        try {
+            action.commit();
+        } catch (AbortableNotCommitted | ProducerDead definite) {
+            discard();
+            throw definite;
+        } catch (OutcomeUnknown unknown) {
+            discardUnknown();
+            throw unknown;
+        } catch (RuntimeException unclassified) {
+            // Assuming "not committed" is the unsound direction: it licenses an abort that may not
+            // be legal, and leaves a partition readable that the log may already be ahead of.
+            discardUnknown();
+            throw new OutcomeUnknown(
+                    "the commit action threw an unclassified exception, so its outcome is unknown",
+                    unclassified);
+        }
+        applyCommitted();
+    }
+
+    /**
+     * Drops whatever is staged. Idempotent, and a no-op after a commit that applied — which is what
+     * lets a caller put it in a {@code finally} and stop reasoning about which paths need it.
+     *
+     * <p><b>The log definitely did not commit.</b> Nothing was applied and no watermark moved, so
+     * every partition stays readable. Use {@link #discardUnknown} when that is not established.
+     *
+     * <p>It does <b>not</b> abort. Symmetry argues that it should, and that is wrong: after a commit
+     * whose outcome is unknown, aborting is not merely unnecessary but illegal, and only the caller
+     * can know which case it is in.
+     */
+    public void discard() {
+        for (Staged pending : staged.values()) {
+            pending.batch.close();
+        }
+        staged.clear();
+    }
+
+    /**
+     * <b>The log may or may not have committed.</b> Drops what is staged and marks those partitions
+     * {@linkplain #behind() behind}, because the transaction may have carried records the store does
+     * not hold and serving them would fold new input against state that is missing a committed
+     * update.
+     *
+     * <p>This is the case a container-driven commit makes easy to miss: a commit that times out
+     * fires neither the after-commit nor the after-rollback hook, so a caller wiring only those two
+     * leaves a staged batch behind and a partition readable that may already lag. Whatever position
+     * the transaction manager surfaces that from, it belongs here.
+     */
+    public void discardUnknown() {
+        markBehind(staged.keySet());
+        discard();
+    }
+
+    /** Flushes and closes every partition still held. */
+    @Override
+    public void close() {
+        discard();
+        revoke(assignment());
+    }
+
+    // --- internals -----------------------------------------------------------
 
     private static long maxPosition(List<PendingPosition> positions) {
         if (positions.isEmpty()) {
