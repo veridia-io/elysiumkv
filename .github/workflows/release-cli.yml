@@ -15,11 +15,6 @@ name: Release the CLI
 # Drafting first is not a workaround: Actions does not run workflows for draft releases at all. If
 # immutability is ever turned back on, this has to become tag-driven, building first and then
 # creating the release *with* its assets in one call.
-#
-# **Draft the release, do not publish it.** GitHub freezes a published release's assets, so
-# attaching after publication fails with `422 Cannot upload assets to an immutable release` — which
-# is exactly what v0.4.0 did. Saving a draft fires `created`, this attaches the binaries to the
-# draft, and publishing then locks them in with everything present.
 on:
   push:
     branches: [main]
