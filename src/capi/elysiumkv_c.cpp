@@ -484,6 +484,46 @@ elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_options* optio
     });
 }
 
+elysiumkv_status elysiumkv_options_set_logger(elysiumkv_options* options,
+                                        const elysiumkv_logger_vtable* vtable, int min_level) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) return fail(Status::Config, "elysiumkv_options_set_logger: null options");
+        if (min_level < static_cast<int>(LogLevel::Debug) ||
+            min_level > static_cast<int>(LogLevel::Off)) {
+            return fail(Status::Config, "elysiumkv_options_set_logger: min_level is out of range");
+        }
+        options->options.min_log_level = static_cast<LogLevel>(min_level);
+        // A null vtable is how a caller turns logging off, so it is not an error.
+        if (vtable == nullptr || vtable->write == nullptr) {
+            options->options.logger.reset();
+            return ELYSIUMKV_OK;
+        }
+        // A trampoline rather than a cast between function pointer types: the enums are `int`
+        // underneath, but calling through a differently-typed pointer is undefined even so. The
+        // holder owns the caller's vtable by value, so the caller may let theirs go out of scope.
+        struct Holder {
+            Logger logger;
+            elysiumkv_logger_vtable vtable;
+        };
+        auto holder = std::make_shared<Holder>();
+        holder->vtable = *vtable;
+        holder->logger.context = holder.get();
+        holder->logger.write = [](void* context, LogLevel level, LogEvent event,
+                                  const char* message, size_t len) {
+            auto* self = static_cast<Holder*>(context);
+            self->vtable.write(self->vtable.context, static_cast<int>(level),
+                               static_cast<int>(event), message, len);
+        };
+        // Aliasing: keeps the holder alive, hands the engine the `Logger` inside it.
+        options->options.logger = std::shared_ptr<Logger>(holder, &holder->logger);
+        return ELYSIUMKV_OK;
+    });
+}
+
+static_assert(static_cast<int>(LogLevel::Off) == ELYSIUMKV_LOG_OFF);
+static_assert(static_cast<int>(LogEvent::OrphansReclaimed) == ELYSIUMKV_EVENT_ORPHANS_RECLAIMED);
+static_assert(static_cast<int>(LogEvent::BackgroundRetry) == ELYSIUMKV_EVENT_BACKGROUND_RETRY);
+
 elysiumkv_status elysiumkv_disk_cache_blob_store_create(void* delegate, const char* directory,
                                                     size_t max_cache_bytes, int cache_on_write,
                                                     void** out) {

@@ -27,6 +27,7 @@ add_executable(elysiumkv_tests
     unit/read_path_test.cpp
     unit/picker_test.cpp
     unit/compaction_test.cpp
+    unit/logger_test.cpp
     unit/large_value_test.cpp
     unit/overlap_boundary_test.cpp
     unit/key_edges_test.cpp

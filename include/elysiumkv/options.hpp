@@ -102,6 +102,39 @@ struct LevelOptions {
     static std::map<int, LevelOptions> geometric(size_t base, int multiplier, int count);
 };
 
+/// Ordered: a sink receives everything at or above `Options::min_log_level`.
+enum class LogLevel : int { Debug = 0, Info = 1, Warn = 2, Error = 3, Off = 4 };
+
+/// The machine-readable half of a log line, so an embedder can route and count without
+/// parsing the message. Values are stable across releases; append, never renumber.
+enum class LogEvent : int {
+    FlushComplete = 0,
+    CompactionComplete = 1,
+    CompactionFailed = 2,
+    MigrationComplete = 3,
+    /// A background operation failed. `BackgroundRetry` follows if it is retried.
+    BackgroundFailure = 4,
+    BackgroundRetry = 5,
+    StallEntered = 6,
+    StallLeft = 7,
+    StoresDiscarded = 8,
+    Fenced = 9,
+    GenerationRolled = 10,
+    OrphansReclaimed = 11,
+};
+
+/// A vtable rather than `std::function` so it crosses the C ABI — see `Options::clock` for the
+/// asymmetry this exists to avoid.
+///
+/// **Called on engine threads, with no engine lock held, synchronously.** A slow sink applies
+/// backpressure to flush and compaction; use an async appender. `message` is valid only for the
+/// duration of the call and is not NUL-terminated.
+struct Logger {
+    void* context = nullptr;
+    void (*write)(void* context, LogLevel level, LogEvent event, const char* message,
+                  size_t len) = nullptr;
+};
+
 struct Options {
     /// ARCHITECTURE.md "A tier is not a level" — ordered hot to cold. The last tier catches everything.
     std::vector<Tier> tiers;
@@ -261,6 +294,10 @@ struct Options {
     /// blocking. the valve is not configurable off; this only chooses how the
     /// caller learns about it.
     bool block_on_stall = true;
+
+    /// Null means no logging, and no message is formatted.
+    std::shared_ptr<Logger> logger;
+    LogLevel min_log_level = LogLevel::Info;
 };
 
 uint64_t default_clock();

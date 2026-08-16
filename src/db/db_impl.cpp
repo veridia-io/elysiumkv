@@ -7,6 +7,7 @@
 #include "sst/sst_writer.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <limits>
@@ -218,16 +219,19 @@ DbImpl::~DbImpl() {
     }
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         shutting_down_ = true;
     }
     {
         std::lock_guard<std::mutex> lock(compaction_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         shutting_down_compaction_ = true;
     }
     // The coordinator goes first: it is the only thing that hands the executors new work, so
     // stopping it before joining them keeps shutdown from racing a dispatch.
     {
         std::lock_guard<std::mutex> lock(maintenance_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         shutting_down_maintenance_ = true;
     }
     maintenance_tick_.notify_all();
@@ -243,6 +247,26 @@ DbImpl::~DbImpl() {
 const ResolvedLevel& DbImpl::level_config(int level) const {
     const int clamped = std::clamp(level, 0, config_.last());
     return config_.levels[static_cast<size_t>(clamped)];
+}
+
+void DbImpl::note_generation_roll() const {
+    if (!logger_enabled(LogLevel::Info)) return;
+    const uint64_t current = versions_->generation();
+    uint64_t seen = last_seen_generation_.load(std::memory_order_relaxed);
+    if (current == seen) return;
+    if (!last_seen_generation_.compare_exchange_strong(seen, current)) return;  // already reported
+    // Zero is "have not looked yet", not a roll from generation zero.
+    if (seen == 0) return;
+    log_event(LogLevel::Info, LogEvent::GenerationRolled, "manifest generation ", seen, " -> ",
+              current, "; the previous generation's edits are collapsed into a snapshot");
+}
+
+void DbImpl::log_emit(LogLevel level, LogEvent event, const std::string& message) const {
+    // Not a style rule: an appender that blocks under `mem_mutex_` stalls every writer, and a sink
+    // that reads the store it is logging about deadlocks.
+    assert(locks_held() == 0 && "the logger sink must not run under an engine lock");
+    const Logger& sink = *options_.logger;
+    sink.write(sink.context, level, event, message.data(), message.size());
 }
 
 Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable,
@@ -426,6 +450,7 @@ Status DbImpl::put(Slice key, Slice value) {
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
         mem_->put(key, value);
     }
@@ -459,6 +484,7 @@ Status DbImpl::delete_range(Slice lower, Slice upper) {
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
         mem_->delete_range(lower, upper);
     }
@@ -472,6 +498,7 @@ Status DbImpl::remove(Slice key) {
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
         mem_->remove(key);
     }
@@ -569,6 +596,7 @@ Status DbImpl::write(WriteBatch& batch) {
         // Applied as a unit: the freeze decision is taken at batch boundaries
         // only, so a flush never splits a batch across two memtables.
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
         for (size_t i = 0; i < batch.ops().size(); ++i) {
             const WriteBatch::Op& op = batch.ops()[i];
@@ -599,14 +627,18 @@ bool DbImpl::run_one_flush(Status& status) {
     std::shared_ptr<SkiplistMemtable> pending;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (imm_ == nullptr) return false;
         pending = imm_;
     }
 
+    const uint64_t pending_bytes = pending->approximate_bytes();
+    const uint64_t pending_entries = pending->num_entries();
     status = flush_memtable(pending);
 
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (status == Status::Ok) {
             imm_.reset();
             flushes_.fetch_add(1, std::memory_order_relaxed);
@@ -619,6 +651,17 @@ bool DbImpl::run_one_flush(Status& status) {
             // the two things to report.
             bg_error_ = status;
         }
+    }
+    if (status == Status::Ok) {
+        log_event(LogLevel::Info, LogEvent::FlushComplete, "flush wrote ", pending_entries,
+                  " entries, ", pending_bytes, " bytes");
+        // Flushes are the most frequent edit, so a roll is noticed within one of them wherever it
+        // actually happened — compaction included.
+        note_generation_roll();
+    } else {
+        log_event(LogLevel::Warn, LogEvent::BackgroundFailure, "flush failed: ",
+                  status_name(status),
+                  is_retryable(status) ? ", will retry" : ", terminal");
     }
     flush_finished_.notify_all();
     return status == Status::Ok;
@@ -642,8 +685,10 @@ bool DbImpl::memtable_flush_due(bool force) const {
 }
 
 Status DbImpl::freeze_and_flush_inline(bool force) {
+    Status retried_from = Status::Ok;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         if (imm_ == nullptr) {
             if (!memtable_flush_due(force)) return Status::Ok;
             if (mem_->empty()) return Status::Ok;
@@ -651,7 +696,14 @@ Status DbImpl::freeze_and_flush_inline(bool force) {
         }
         // A frozen memtable left over from a failed flush is retried here: Io
         // means "ask again later", and inline mode has nowhere else to ask.
-        if (is_retryable(bg_error_)) bg_error_ = Status::Ok;
+        if (is_retryable(bg_error_)) {
+            retried_from = bg_error_;
+            bg_error_ = Status::Ok;
+        }
+    }
+    if (retried_from != Status::Ok) {
+        log_event(LogLevel::Warn, LogEvent::BackgroundRetry,
+                  "retrying a flush that failed with ", status_name(retried_from));
     }
 
     Status status = Status::Ok;
@@ -676,7 +728,36 @@ void DbImpl::seal_memtable() {
 Status DbImpl::maybe_freeze_memtable(bool force) {
     if (inline_mode()) return freeze_and_flush_inline(force);
 
+    // Declared before the lock so it runs *after* the lock is released — the sink must never see
+    // an engine mutex held, and every exit below is inside the critical section.
+    struct Deferred {
+        const DbImpl* self;
+        Status retried_from = Status::Ok;
+        Status gave_up_with = Status::Ok;
+        uint64_t stalled_ms = 0;
+        bool rejected = false;
+        ~Deferred() try {
+            if (retried_from != Status::Ok) {
+                self->log_event(LogLevel::Warn, LogEvent::BackgroundRetry,
+                                "retrying a flush that failed with ", status_name(retried_from));
+            }
+            if (gave_up_with != Status::Ok) {
+                self->log_event(LogLevel::Error, LogEvent::BackgroundFailure,
+                                "a write is failing on ", status_name(gave_up_with));
+            }
+            if (rejected) {
+                self->log_event(LogLevel::Warn, LogEvent::StallEntered,
+                                "write rejected: a flush is still in flight");
+            } else if (stalled_ms != 0) {
+                self->log_event(LogLevel::Warn, LogEvent::StallLeft, "writer blocked ", stalled_ms,
+                                " ms waiting for a flush");
+            }
+        } catch (...) {
+        }
+    } deferred{this};
+
     std::unique_lock<std::mutex> lock(mem_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
     if (!memtable_flush_due(force)) return Status::Ok;
     if (mem_->empty() && imm_ == nullptr) return Status::Ok;
 
@@ -688,13 +769,18 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
             // Io means "ask again later" (ARCHITECTURE.md "Immutable named objects"), so a failed flush must not
             // leave the instance permanently unable to flush. One retry per
             // call; if it fails again the caller hears about it.
-            if (!is_retryable(bg_error_) || retried) return bg_error_;
+            if (!is_retryable(bg_error_) || retried) {
+                deferred.gave_up_with = bg_error_;
+                return bg_error_;
+            }
+            deferred.retried_from = bg_error_;
             bg_error_ = Status::Ok;
             retried = true;
             flush_scheduled_.notify_one();
         }
         if (!options_.block_on_stall) {
             stalls_.fetch_add(1, std::memory_order_relaxed);
+            deferred.rejected = true;
             return Status::Stalled;
         }
         stalls_.fetch_add(1, std::memory_order_relaxed);
@@ -703,6 +789,7 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
         const uint64_t stall_ended = options_.clock();
         if (stall_ended > stall_began) {
             stalled_total_ms_.fetch_add(stall_ended - stall_began, std::memory_order_relaxed);
+            deferred.stalled_ms += stall_ended - stall_began;
         }
     }
     if (mem_->empty()) return Status::Ok;
@@ -739,6 +826,7 @@ Status DbImpl::flush() {
     if (Status status = maybe_freeze_memtable(true); status != Status::Ok) return status;
 
     std::unique_lock<std::mutex> lock(mem_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
     while (imm_ != nullptr && bg_error_ == Status::Ok && !shutting_down_) {
         flush_finished_.wait(lock);
     }
@@ -762,6 +850,7 @@ void DbImpl::background_flush_loop() {
     while (true) {
         {
             std::unique_lock<std::mutex> lock(mem_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
             while (!shutting_down_ && (imm_ == nullptr || bg_error_ != Status::Ok)) {
                 // Bounded, never untimed: a retryable failure leaves `bg_error_` set with a
                 // frozen memtable still waiting, and the coordinator's tick is what asks again.
@@ -887,6 +976,7 @@ void DbImpl::reconcile(bool force_full) {
     bool rotated = false;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         // `imm_ != nullptr` means the flush executor is already busy; there is nothing to hand
         // it, and waiting for it here would be the coordinator doing long-running work.
         if (!shutting_down_ && imm_ == nullptr && bg_error_ == Status::Ok && mem_ != nullptr &&
@@ -939,6 +1029,7 @@ void DbImpl::maintenance_loop() {
     while (true) {
         {
             std::unique_lock<std::mutex> lock(maintenance_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
             if (shutting_down_maintenance_) return;
             // **Always bounded.** Waiting untimed when no tier has a `max_age` was the first
             // draft's shape and it reintroduces the defect: a tier crossing `max_bytes`, a
@@ -1256,6 +1347,7 @@ Result<Pinned> DbImpl::get(Slice key) {
     std::shared_ptr<SkiplistMemtable> imm;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         mem = mem_;
         imm = imm_;
     }
@@ -1323,6 +1415,7 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
     std::shared_ptr<SkiplistMemtable> imm;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         mem = mem_;
         imm = imm_;
     }
@@ -1488,6 +1581,7 @@ Stats DbImpl::stats() const {
 
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         // Everything not yet in an SST, live and frozen alike: a frozen memtable
         // waiting on a flush is exactly as unwritten as the live one.
         uint64_t oldest_write = 0;
@@ -1604,6 +1698,7 @@ Status DbImpl::set_watermark(uint64_t position) {
     if (unusable_.load()) return Status::Unusable;
 
     std::lock_guard<std::mutex> lock(mem_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
     if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
 
     // Taking the write path's own lock is what makes "every write completed before this call"
@@ -1673,6 +1768,7 @@ bool DbImpl::shed_if_over_budget() {
     // step is the third one, which is the caller's rate.
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         const size_t worth_flushing = options_.memtable_bytes / 4;
         if (mem_ == nullptr || mem_->approximate_bytes() < worth_flushing) {
             return budget->overage() > 0;
@@ -1687,6 +1783,31 @@ bool DbImpl::shed_if_over_budget() {
 
 Status DbImpl::throttle_writes() {
     if (unusable_.load()) return Status::Unusable;
+
+    // Reported once per stalled call rather than per wait iteration, and after the loop so no lock
+    // is held. The reason is what an operator needs: which valve closed, not that one did.
+    struct Deferred {
+        const DbImpl* self;
+        bool reported = false;
+        bool rejected = false;
+        const char* reason = "";
+        int level = -1;
+        int files = 0;
+        uint64_t stalled_ms = 0;
+        ~Deferred() try {
+            if (!reported) return;
+            std::ostringstream where;
+            if (level >= 0) where << " (L" << level << " at " << files << " files)";
+            if (rejected) {
+                self->log_event(LogLevel::Warn, LogEvent::StallEntered, "write rejected on ",
+                                reason, where.str());
+            } else {
+                self->log_event(LogLevel::Warn, LogEvent::StallLeft, "writer blocked ", stalled_ms,
+                                " ms on ", reason, where.str());
+            }
+        } catch (...) {
+        }
+    } deferred{this};
 
     // ARCHITECTURE.md "A process-wide memory budget" before the level and tier valves: a process over its memory budget has a
     // problem that no amount of compaction fixes, and the two cheapest remedies are
@@ -1777,19 +1898,41 @@ Status DbImpl::throttle_writes() {
 
         stalls_.fetch_add(1, std::memory_order_relaxed);
         schedule_compaction();
-        if (!options_.block_on_stall) return Status::Stalled;
+        if (!deferred.reported) {
+            deferred.reported = true;
+            deferred.reason = budget_stall  ? "the memory budget"
+                              : transient_stalled() ? "a transient tier past its stall age"
+                                                    : "level file counts";
+            for (const ResolvedLevel& level : config_.levels) {
+                const auto files = static_cast<int>(version->file_count(level.level));
+                if (level.stop_at.has_value() && files >= *level.stop_at) {
+                    deferred.level = level.level;
+                    deferred.files = files;
+                    break;
+                }
+            }
+        }
+        if (!options_.block_on_stall) {
+            deferred.rejected = true;
+            return Status::Stalled;
+        }
 
         const uint64_t began = now_ms();
         {
             std::unique_lock<std::mutex> lock(compaction_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
             if (shutting_down_compaction_) return Status::Ok;
             compaction_finished_.wait_for(lock, std::chrono::milliseconds(50));
         }
         const uint64_t ended = now_ms();
-        if (ended > began) stalled_total_ms_.fetch_add(ended - began, std::memory_order_relaxed);
+        if (ended > began) {
+            stalled_total_ms_.fetch_add(ended - began, std::memory_order_relaxed);
+            deferred.stalled_ms += ended - began;
+        }
 
         {
             std::lock_guard<std::mutex> lock(mem_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
             if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
         }
         if (unusable_.load()) return Status::Unusable;
@@ -1836,6 +1979,9 @@ Result<uint64_t> DbImpl::write_new_sst(BlobStore& store, Slice bytes) {
     versions_->mark_fenced();
     last_error_ = "object names are being taken as fast as they are allocated: another writer "
                   "owns this store";
+    log_event(LogLevel::Error, LogEvent::Fenced,
+              "fenced: object names are being taken as fast as they are allocated, so another "
+              "writer owns this store");
     return std::unexpected(Status::Fenced);
 }
 
@@ -1863,7 +2009,11 @@ void DbImpl::collect_orphans(const std::map<std::string, std::vector<std::string
         // One call per store, like collection after a compaction. A store that
         // crashed mid-compaction can have dozens of these, and open is exactly
         // when a round trip per object is least welcome.
-        if (!orphans.empty()) (void)store->remove_many(orphans).get();
+        if (!orphans.empty()) {
+            (void)store->remove_many(orphans).get();
+            log_event(LogLevel::Info, LogEvent::OrphansReclaimed, "reclaimed ", orphans.size(),
+                      " unreferenced object(s) from store '", store_id, "'");
+        }
     }
 }
 
@@ -1892,6 +2042,7 @@ Status DbImpl::sweep_orphans() {
     // hook that quietly corrupts `orphan_first_seen_` when used alongside a running engine is a
     // trap rather than a hook.
     std::lock_guard<std::mutex> sweeping(sweep_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
 
     // **Re-read the manifest before deciding anything.** This is what turns a repeated observation
     // into a sustained one: a file whose edit committed since the last sweep is referenced now and
@@ -1906,6 +2057,8 @@ Status DbImpl::sweep_orphans() {
     // slow CI runner failing a test that passes locally because the sweep never overlapped anything.
     if (versions_->manifest_advanced()) {
         versions_->mark_fenced();
+        log_event(LogLevel::Error, LogEvent::Fenced,
+                  "fenced: the manifest moved under this writer, so another process owns the store");
         return Status::Fenced;
     }
 
@@ -2034,6 +2187,9 @@ Status DbImpl::verify_stores_and_discard() {
 
         discarded_stores_.push_back(store_id);
         discarded_files_ += dropped;
+        log_event(LogLevel::Warn, LogEvent::StoresDiscarded, "transient store '", store_id,
+                  "' did not survive: dropped ", dropped,
+                  " file(s); the store is behind until the caller replays");
         // After a discard the store is *wrong*, not merely incomplete: a key
         // whose newer value lived here now reads as its older one. The engine
         // reports; it does not enforce read blocking.

@@ -32,6 +32,12 @@ jmethodID g_exception_of = nullptr;   // static of(int, String) -> ElysiumKVExce
 jclass g_string_class = nullptr;      // java/lang/String
 jclass g_runtime_exception = nullptr; // java/lang/RuntimeException, for glue-level failures
 
+/* The logger is the only call that goes C++ -> Java, and it arrives on engine threads the JVM has
+ * never seen. Everything else here runs on a thread that entered through JNI and already has an
+ * env. */
+JavaVM* g_vm = nullptr;
+jmethodID g_logger_log = nullptr;     // void log(int, int, String) on LoggerBridge
+
 void* as_pointer(jlong handle) { return reinterpret_cast<void*>(static_cast<intptr_t>(handle)); }
 
 jlong as_handle(const void* pointer) {
@@ -799,6 +805,77 @@ void JNICALL options_configure_compaction(JNIEnv* env, jclass, jlong options, jd
     });
 }
 
+/* --- the logger sink ------------------------------------------------------
+ *
+ * Attaches this thread to the JVM on first use and detaches when the thread ends, rather than per
+ * call: a flush at `Info` logs once a minute per partition, and attach/detach is far more expensive
+ * than the upcall it would wrap. `AsDaemon` so an attached compaction thread never holds JVM
+ * shutdown open. */
+class AttachedThread {
+public:
+    AttachedThread() {
+        if (g_vm == nullptr) return;
+        void* raw = nullptr;
+        if (g_vm->GetEnv(&raw, JNI_VERSION_1_8) == JNI_OK) {
+            env_ = static_cast<JNIEnv*>(raw);
+            return;   // the JVM already owns this thread; not ours to detach
+        }
+        if (g_vm->AttachCurrentThreadAsDaemon(&raw, nullptr) == JNI_OK) {
+            env_ = static_cast<JNIEnv*>(raw);
+            attached_ = true;
+        }
+    }
+    ~AttachedThread() {
+        if (attached_ && g_vm != nullptr) g_vm->DetachCurrentThread();
+    }
+    JNIEnv* env() const { return env_; }
+
+private:
+    JNIEnv* env_ = nullptr;
+    bool attached_ = false;
+};
+
+void logger_write(void* context, int level, int event, const char* message, size_t len) {
+    static thread_local AttachedThread attached;
+    JNIEnv* env = attached.env();
+    if (env == nullptr || g_logger_log == nullptr) return;
+
+    // The engine hands over a length and no terminator, so this cannot go through NewStringUTF.
+    std::string owned(message, len);
+    jstring text = env->NewStringUTF(owned.c_str());
+    if (text == nullptr) {
+        env->ExceptionClear();   // OOM building the message must not fail the flush that logged it
+        return;
+    }
+    env->CallVoidMethod(static_cast<jobject>(context), g_logger_log, static_cast<jint>(level),
+                        static_cast<jint>(event), text);
+    // **A throwing appender must not propagate.** The engine calls this from the middle of a flush
+    // or compaction, which would otherwise fail because logging it did.
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(text);
+}
+
+void JNICALL options_set_logger(JNIEnv* env, jclass, jlong options, jobject sink, jint min_level) {
+    guard_void(env, [&] {
+        if (sink == nullptr) {
+            check(env, elysiumkv_options_set_logger(as_options(options), nullptr, min_level));
+            return;
+        }
+        // A global ref: the sink outlives this call by the lifetime of the store. Deliberately
+        // never released — options are configured once per store and the alternative is a
+        // registry keyed on a handle the C ABI does not hand back.
+        jobject global = env->NewGlobalRef(sink);
+        if (global == nullptr) {
+            throw_glue(env, "elysiumkv JNI: could not retain the logger");
+            return;
+        }
+        elysiumkv_logger_vtable vtable;
+        vtable.context = global;
+        vtable.write = logger_write;
+        check(env, elysiumkv_options_set_logger(as_options(options), &vtable, min_level));
+    });
+}
+
 void JNICALL truncate_below(JNIEnv* env, jclass, jlong db, jbyteArray key, jint key_length) {
     guard_void(env, [&] {
         ByteArrayCopy key_bytes(env, key, key_length);
@@ -1079,6 +1156,9 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(iter_create)},
     {const_cast<char*>("optionsConfigureCompaction"), const_cast<char*>("(JDJ)V"),
      reinterpret_cast<void*>(options_configure_compaction)},
+    {const_cast<char*>("optionsSetLogger"),
+     const_cast<char*>("(JLio/veridia/elysiumkv/LoggerBridge;I)V"),
+     reinterpret_cast<void*>(options_set_logger)},
     {const_cast<char*>("deleteRange"), const_cast<char*>("(J[B[B)V"),
      reinterpret_cast<void*>(delete_range)},
     {const_cast<char*>("truncateBelow"), const_cast<char*>("(J[BI)V"),
@@ -1142,6 +1222,14 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_exception_of = env->GetStaticMethodID(g_exception_class, "of",
                                             "(ILjava/lang/String;)Lio/veridia/elysiumkv/ElysiumKVException;");
     if (g_exception_of == nullptr) return JNI_ERR;
+
+    jclass logger_class = env->FindClass("io/veridia/elysiumkv/LoggerBridge");
+    if (logger_class == nullptr) return JNI_ERR;
+    g_logger_log = env->GetMethodID(logger_class, "log", "(IILjava/lang/String;)V");
+    env->DeleteLocalRef(logger_class);
+    if (g_logger_log == nullptr) return JNI_ERR;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8) != JNI_OK) return JNI_ERR;
+    g_vm = vm;
 
     jclass native_class = env->FindClass("io/veridia/elysiumkv/Native");
     if (native_class == nullptr) return JNI_ERR;

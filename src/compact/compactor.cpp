@@ -85,6 +85,7 @@ void DbImpl::dispatch_maintenance() {
     if (inline_mode()) return;
     {
         std::lock_guard<std::mutex> lock(compaction_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         compaction_pending_ = true;
     }
     compaction_scheduled_.notify_one();
@@ -174,6 +175,7 @@ void DbImpl::background_compaction_loop() {
     while (true) {
         {
             std::unique_lock<std::mutex> lock(compaction_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
             // Untimed on purpose, and it is not the untimed wait the maintenance design forbids:
             // this thread waits to be *dispatched*, and the coordinator's bounded tick is what
             // guarantees a dispatch arrives. Putting a second timer here would be the second
@@ -219,6 +221,7 @@ void DbImpl::background_compaction_loop() {
                 const Status swept = sweep_orphans();
                 if (swept != Status::Ok && !is_retryable(swept)) {
                     std::lock_guard<std::mutex> lock(mem_mutex_);
+                    ELYSIUMKV_LOCK_AUDIT();
                     if (bg_error_ == Status::Ok || is_retryable(bg_error_)) bg_error_ = swept;
                 }
             }
@@ -236,6 +239,7 @@ void DbImpl::background_compaction_loop() {
         if (did_work) note_maintenance_state_changed();
         if (status != Status::Ok && !is_retryable(status)) {
             std::lock_guard<std::mutex> lock(mem_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
             // **The cause, not the consequence.** This thread reports `Unusable` for
             // any already-terminal instance, so writing unconditionally would replace
             // the first real failure — a fence, a corruption — with a derived one, and
@@ -297,7 +301,10 @@ Status DbImpl::compact_level(int level) {
         // A rewrite, never a move: moving is exactly what fails to migrate.
         compaction.trivial_move = false;
 
+        // Before the lock: the line is composed under it and emitted once it is released.
+        DeferredLine deferred{this};
         std::lock_guard<std::mutex> work(compaction_work_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
         {
             // Scoped, so this version is released before the compaction runs:
             // holding it would make every file it references look like a live
@@ -330,7 +337,7 @@ Status DbImpl::compact_level(int level) {
                                         Slice::from(span_low), Slice::from(span_high));
         }
 
-        if (Status status = run_compaction(compaction); status != Status::Ok) return status;
+        if (Status status = run_compaction(compaction, deferred); status != Status::Ok) return status;
     }
 
     // The last compaction's superseded files are only collectable now that this
@@ -344,6 +351,7 @@ Status DbImpl::compact_level(int level) {
 bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
     if (task_suppressed(MaintenanceTask::LevelZeroEscape)) return false;
 
+    DeferredLine deferred{this};
     Compaction compaction;
     {
         auto version = versions_->current();
@@ -402,7 +410,7 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
                                     Slice::from(seed->effective_largest()));
     }
 
-    status = run_compaction(compaction);
+    status = run_compaction(compaction, deferred);
     return status == Status::Ok;
 }
 
@@ -417,7 +425,10 @@ bool DbImpl::run_one_migration(Status& status) {
     }
 
     // A migration and a compaction both mutate the version; they must not race.
+    // Before the lock: the line is composed under it and emitted once it is released.
+    DeferredLine deferred{this};
     std::lock_guard<std::mutex> work(compaction_work_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
 
     std::optional<Migration> migration;
     {
@@ -442,12 +453,12 @@ bool DbImpl::run_one_migration(Status& status) {
         return compact_l0_file_off_its_tier(status);
     }
 
-    status = run_migration(*migration);
+    status = run_migration(*migration, deferred);
     compaction_finished_.notify_all();
     return status == Status::Ok;
 }
 
-Status DbImpl::run_migration(const Migration& migration) {
+Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     ELYSIUMKV_CLAIM_DELETING_TASK();
     BlobStore* source = store_for(migration.file.store_id);
     if (source == nullptr) return Status::Corrupt;
@@ -497,6 +508,12 @@ Status DbImpl::run_migration(const Migration& migration) {
 
     migrations_.fetch_add(1, std::memory_order_relaxed);
     migration_bytes_.fetch_add(migration.file.file_bytes, std::memory_order_relaxed);
+    line.set(LogLevel::Info, LogEvent::MigrationComplete, "file ", migration.file.file_number,
+              " (L", migration.file.level, ", ", migration.file.file_bytes, " bytes) left tier ",
+              migration.from_tier, " for tier ", migration.to_tier,
+              migration.capacity_eviction  ? " (capacity)"
+              : migration.leaves_transient ? " (transient)"
+                                           : " (age)");
     if (options_.paranoid_checks) return check_invariants();
     return Status::Ok;
 }
@@ -514,7 +531,10 @@ bool DbImpl::run_one_compaction(Status& status) {
     // Picking and running are one unit: the inputs are chosen from a version,
     // and another compaction finishing in between would leave this one merging
     // files that no longer describe the store.
+    // Before the lock: the line is composed under it and emitted once it is released.
+    DeferredLine deferred{this};
     std::lock_guard<std::mutex> work(compaction_work_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
 
     std::optional<Compaction> compaction;
     {
@@ -532,7 +552,7 @@ bool DbImpl::run_one_compaction(Status& status) {
         density_compactions_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    status = run_compaction(*compaction);
+    status = run_compaction(*compaction, deferred);
     compaction_finished_.notify_all();
     return status == Status::Ok;
 }
@@ -565,8 +585,9 @@ Status DbImpl::compact_until_quiet() {
     return status;
 }
 
-Status DbImpl::run_compaction(const Compaction& compaction) {
+Status DbImpl::run_compaction(const Compaction& compaction, DeferredLine& line) {
     ELYSIUMKV_CLAIM_DELETING_TASK();
+    const uint64_t began_ms = now_ms();
     VersionEdit edit;
     edit.compaction_pointers.emplace_back(compaction.level, compaction.largest_key());
 
@@ -593,9 +614,17 @@ Status DbImpl::run_compaction(const Compaction& compaction) {
         for (FileMetadata& file : outputs) edit.added.push_back(std::move(file));
     }
 
-    if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) return status;
+    if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) {
+        line.set(LogLevel::Warn, LogEvent::CompactionFailed, "L", compaction.level, "->L",
+                 compaction.output_level, " could not be installed: ", status_name(status));
+        return status;
+    }
 
     compactions_.fetch_add(1, std::memory_order_relaxed);
+    line.set(LogLevel::Info, LogEvent::CompactionComplete, "L", compaction.level, "->L",
+              compaction.output_level, ": ", compaction.inputs.size(), "+",
+              compaction.overlaps.size(), " files in, ", compaction.input_bytes(), " bytes, ",
+              compaction.trivial_move ? "moved" : "merged", " in ", now_ms() - began_ms, " ms");
     // A trivial move reads nothing — it is a manifest edit, the file is not
     // opened. Counting its inputs as bytes read inflates the only number an
     // operator has for write amplification, and in the common case where a level

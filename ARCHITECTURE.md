@@ -640,6 +640,34 @@ could not know how much to read before knowing the version, and no future format
 parseable. Because the magic is checked before anything else is trusted, it is frozen — changing it
 makes every existing file report as corrupt.
 
+### Diagnostics
+
+The engine has no logger of its own. `Options::logger` is a sink the embedder supplies, and with
+none configured nothing is emitted and no message is formatted.
+
+Three properties make it safe to call arbitrary embedder code from inside a storage engine:
+
+**Nothing here is durable.** Events are not written anywhere, are not replayed, and no decision
+depends on one. A dropped line costs visibility and nothing else, which is what allows the sink to
+be synchronous and unbuffered.
+
+**The sink never runs under an engine lock.** The most useful call site — the assignment to
+`bg_error_` — sits inside `mem_mutex_`, and an appender that blocks there stalls every writer while
+a sink that reads the store deadlocks outright. Sites that must compose a line inside a critical
+section use `DeferredLine`, declared before the lock so destruction order emits it after the lock is
+released. A debug-only counter of held mutexes asserts this at every emit.
+
+**It is synchronous, on the thread that produced the event.** That is backpressure by design: a slow
+sink slows the flush or compaction that logged. The alternative — an internal queue — needs its own
+drop policy and lets lines outlive the store that wrote them, and every embedder already has an
+async appender.
+
+The counterpart is `Stats`, and the split is worth keeping clean: `Stats` answers *how much* and is
+safe to scrape and aggregate; the logger answers *what happened* and is read after the fact. The
+case that motivated it is one neither could see alone — a retryable background failure is set and
+then cleared by the next write, so both the failure and the retry are logged, and a store retrying
+its way through a degraded backend reads as a stream of warnings rather than as silence.
+
 ## How we know it works
 
 The testing strategy assumes the interesting bugs are not the ones a unit test finds.

@@ -168,6 +168,9 @@ class AbiCoverageTest {
             // Called by prepare() on every open, so opening below covers it; the marker is what
             // says so, since this test asserts on the declared surface rather than on behaviour.
             exercise("optionsConfigureCompaction");
+            // Likewise — prepare() sets it whether or not a sink was configured, so the null path
+            // is what every other test here already crosses. LoggerTest covers a real one.
+            exercise("optionsSetLogger");
 
             ElysiumKV db = PinLeakExtension.watch(support.open());
             exercise("open");
