@@ -8,12 +8,17 @@ name: Release the CLI
 #
 # No Windows. The engine's storage seams are POSIX-shaped and nobody has asked; adding it later is
 # a matrix line and a build fix, not a design change.
+#
+# **Draft the release, do not publish it.** GitHub freezes a published release's assets, so
+# attaching after publication fails with `422 Cannot upload assets to an immutable release` — which
+# is exactly what v0.4.0 did. Saving a draft fires `created`, this attaches the binaries to the
+# draft, and publishing then locks them in with everything present.
 on:
   push:
     branches: [main]
   pull_request:
   release:
-    types: [published]
+    types: [created]
   workflow_dispatch:
 
 permissions:
@@ -124,12 +129,20 @@ jobs:
           name: elysiumkv-${{ matrix.platform }}
           path: elysiumkv-${{ matrix.platform }}.tar.gz*
 
-      - name: Attach to the release
+      # Refuses a published release rather than failing at the upload: the error GitHub returns
+      # names the asset, not the cause, and this says which of the two it is.
+      - name: Attach to the draft release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          if [ "${{ github.event.release.draft }}" != "true" ]; then
+            echo "::error::$TAG is already published, so its assets are immutable. Create the" \
+                 "release as a draft, let this attach the binaries, then publish it."
+            exit 1
+          fi
+          gh release upload "$TAG" \
             "elysiumkv-${{ matrix.platform }}.tar.gz" \
             "elysiumkv-${{ matrix.platform }}.tar.gz.sha256" \
             --clobber
