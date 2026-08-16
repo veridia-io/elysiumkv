@@ -1,0 +1,135 @@
+name: Release the CLI
+
+# The `elysiumkv` binary as a release asset, one per platform.
+#
+# **It runs on pull requests too**, for the same reason the Java publish does: a release path
+# exercised only on release day breaks on release day. On a PR it builds and smoke-tests every
+# platform and uploads nothing.
+#
+# No Windows. The engine's storage seams are POSIX-shaped and nobody has asked; adding it later is
+# a matrix line and a build fix, not a design change.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to attach assets to a release
+
+jobs:
+  build:
+    name: cli / ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same three the Java native artifact ships, and the same names, so an operator who has
+        # seen one recognises the other.
+        include:
+          - {os: ubuntu-latest,    platform: linux-x86_64}
+          - {os: ubuntu-24.04-arm, platform: linux-aarch64}
+          - {os: macos-latest,     platform: darwin-aarch64}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Same CMake pin as the ci workflow — see the comment there.
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          CMAKE_VERSION=4.4.0
+          case "${RUNNER_ARCH}" in
+            X64)   CMAKE_ARCH=x86_64 ;;
+            ARM64) CMAKE_ARCH=aarch64 ;;
+            *) echo "unhandled runner arch ${RUNNER_ARCH}" >&2; exit 1 ;;
+          esac
+          CMAKE_DIR="cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}"
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      # Derived, never written down here — see the note in publish-java.yml.
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/vcpkg/archives
+          # `aws` is in the key for the reason publish-java.yml explains: the feature is selected
+          # by a CMake option, so vcpkg.json does not change when it is switched on and a hit on a
+          # pre-AWS cache would pay the full SDK build on every release.
+          key: vcpkg-aws-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-aws-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      # **With AWS, always.** A CLI that cannot read a DynamoDB manifest is useless for the stores
+      # most worth inspecting — the remote ones — and the failure would arrive as "no AWS support"
+      # at the moment someone is already debugging something else.
+      - name: Build
+        run: |
+          cmake --preset release \
+            -DELYSIUMKV_BUILD_AWS=ON \
+            -DELYSIUMKV_BUILD_TESTS=OFF \
+            -DELYSIUMKV_BUILD_BENCH=OFF \
+            -B build/cli
+          cmake --build build/cli --target elysiumkv_cli
+
+      # A binary that links the SDK but had the branches preprocessed away reports "no AWS
+      # support" and looks like a credentials problem. That happened once during development, so
+      # the release asserts it rather than trusting the link line.
+      - name: Smoke test
+        run: |
+          BIN=build/cli/cli/elysiumkv
+          "$BIN" --version
+          "$BIN" manifest --help > /dev/null
+          for backend in dynamo s3; do
+            if "$BIN" manifest --catalog "$backend" 2>&1 | grep -q "no AWS support"; then
+              echo "built without AWS support: --catalog $backend is unavailable" >&2
+              exit 1
+            fi
+          done
+          # An empty directory has no manifest, and saying so is the correct answer rather than a
+          # crash — which also proves the disk backend is wired.
+          mkdir -p /tmp/empty
+          "$BIN" manifest --catalog disk --dir /tmp/empty 2>&1 | grep -q "never been written"
+
+      - name: Package
+        run: |
+          install -m 0755 build/cli/cli/elysiumkv "elysiumkv-${{ matrix.platform }}"
+          tar czf "elysiumkv-${{ matrix.platform }}.tar.gz" "elysiumkv-${{ matrix.platform }}"
+          shasum -a 256 "elysiumkv-${{ matrix.platform }}.tar.gz" \
+            > "elysiumkv-${{ matrix.platform }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: elysiumkv-${{ matrix.platform }}
+          path: elysiumkv-${{ matrix.platform }}.tar.gz*
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "elysiumkv-${{ matrix.platform }}.tar.gz" \
+            "elysiumkv-${{ matrix.platform }}.tar.gz.sha256" \
+            --clobber
