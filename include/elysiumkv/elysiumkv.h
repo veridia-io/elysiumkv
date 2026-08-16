@@ -196,6 +196,53 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_
                                                      double tombstone_density_trigger,
                                                      uint64_t tombstone_density_min_entries);
 
+/* --- diagnostics -----------------------------------------------------------
+ *
+ * The engine has no logger of its own and nothing here is persisted; `write` is the only way it
+ * says anything. `event` is a stable code (elysiumkv_log_event) so a binding can route and count
+ * without parsing `message`.
+ *
+ * **Called on engine threads — flush, compaction and maintenance — synchronously, with no engine
+ * lock held.** A sink that blocks applies backpressure to the operation that produced the line, so
+ * hand it to an async appender rather than doing work in it. It must not call back into the store.
+ *
+ * `message` is not NUL-terminated and is valid only for the duration of the call; copy to keep it.
+ *
+ * `min_level` follows elysiumkv_log_level: 0 debug, 1 info, 2 warn, 3 error, 4 off. A NULL vtable
+ * turns logging off, which is the default and costs one comparison per candidate line. */
+typedef enum {
+    ELYSIUMKV_LOG_DEBUG = 0,
+    ELYSIUMKV_LOG_INFO = 1,
+    ELYSIUMKV_LOG_WARN = 2,
+    ELYSIUMKV_LOG_ERROR = 3,
+    ELYSIUMKV_LOG_OFF = 4
+} elysiumkv_log_level;
+
+/* Append, never renumber: a binding maps these to its own names. */
+typedef enum {
+    ELYSIUMKV_EVENT_FLUSH_COMPLETE = 0,
+    ELYSIUMKV_EVENT_COMPACTION_COMPLETE = 1,
+    ELYSIUMKV_EVENT_COMPACTION_FAILED = 2,
+    ELYSIUMKV_EVENT_MIGRATION_COMPLETE = 3,
+    ELYSIUMKV_EVENT_BACKGROUND_FAILURE = 4,
+    ELYSIUMKV_EVENT_BACKGROUND_RETRY = 5,
+    ELYSIUMKV_EVENT_STALL_ENTERED = 6,
+    ELYSIUMKV_EVENT_STALL_LEFT = 7,
+    ELYSIUMKV_EVENT_STORES_DISCARDED = 8,
+    ELYSIUMKV_EVENT_FENCED = 9,
+    ELYSIUMKV_EVENT_GENERATION_ROLLED = 10,
+    ELYSIUMKV_EVENT_ORPHANS_RECLAIMED = 11
+} elysiumkv_log_event;
+
+typedef struct {
+    void* context;
+    void (*write)(void* context, int level, int event, const char* message, size_t len);
+} elysiumkv_logger_vtable;
+
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_logger(elysiumkv_options*,
+                                                     const elysiumkv_logger_vtable*,
+                                                     int min_level);
+
 /* --- seams -----------------------------------------------------------------
  *
  * The built-in on-disk implementations, plus function-pointer vtables so a

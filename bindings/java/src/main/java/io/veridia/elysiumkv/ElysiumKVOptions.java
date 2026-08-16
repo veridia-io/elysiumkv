@@ -23,6 +23,8 @@ public final class ElysiumKVOptions implements AutoCloseable {
     private long orphanRetentionMs;
     private long orphanSweepIntervalMs;
     private double tombstoneDensityTrigger;
+    private LoggerBridge loggerBridge;
+    private int minLogLevel = ElysiumKVLogger.Level.INFO.ordinal();
     private long tombstoneDensityMinEntries;
     private long blockBytes;
     private long blockCacheBytes;
@@ -222,6 +224,19 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Where the engine reports what it is doing. Null, the default, means no logging and no
+     * message is formatted.
+     *
+     * <p>The sink runs on engine threads and the operation that produced the line waits for it, so
+     * give it an async appender rather than doing work in it. See {@link ElysiumKVLogger}.
+     */
+    public ElysiumKVOptions logger(ElysiumKVLogger sink, ElysiumKVLogger.Level minLevel) {
+        loggerBridge = sink == null ? null : new LoggerBridge(sink);
+        minLogLevel = minLevel == null ? ElysiumKVLogger.Level.INFO.ordinal() : minLevel.ordinal();
+        return this;
+    }
+
     boolean checked() {
         return paranoidChecks > 0;
     }
@@ -266,6 +281,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
         // that adding a knob does not break every existing caller of the other.
         Native.optionsConfigureCompaction(handle(), tombstoneDensityTrigger,
                                           tombstoneDensityMinEntries);
+        Native.optionsSetLogger(handle(), loggerBridge, minLogLevel);
         return handle();
     }
 

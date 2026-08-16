@@ -6,6 +6,7 @@
 #include "compact/migrator.hpp"
 #include "compact/picker.hpp"
 #include "db/level_config.hpp"
+#include "db/lock_audit.hpp"
 #include "memtable/skiplist_memtable.hpp"
 #include "sst/sst_reader.hpp"
 #include "sst/sst_reader_cache.hpp"
@@ -17,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -328,12 +330,14 @@ private:
     /// contract: performs exactly one compaction, reports whether it did work.
     /// Drops files the truncation point has emptied. Same `run_one()` contract as the others.
     bool reclaim_dead_files(Status& status);
+    /// Defined below, with the rest of the diagnostics.
+    class DeferredLine;
     bool run_one_compaction(Status& status);
-    Status run_compaction(const Compaction& compaction);
+    Status run_compaction(const Compaction& compaction, DeferredLine& line);
     /// ARCHITECTURE.md "Migration between tiers" — the third kind of background work, and structurally the simplest:
     /// it moves bytes without interpreting them. Same `run_one()` contract.
     bool run_one_migration(Status& status);
-    Status run_migration(const Migration& migration);
+    Status run_migration(const Migration& migration, DeferredLine& line);
     /// An L0 file cannot be migrated without reordering L0's positional recency
     /// (ARCHITECTURE.md "Positional recency"), so it leaves its tier by being compacted into L1 instead. Returns
     /// false when no L0 file needs to move.
@@ -409,6 +413,61 @@ private:
 
     const ResolvedLevel& level_config(int level) const;
     uint64_t now_ms() const { return options_.clock(); }
+
+    // --- diagnostics (docs/logger-spec.md)
+    bool logger_enabled(LogLevel level) const {
+        return options_.logger != nullptr && options_.logger->write != nullptr &&
+               level >= options_.min_log_level;
+    }
+    /// Asserts no engine lock is held, then hands the line to the embedder's sink.
+    void log_emit(LogLevel level, LogEvent event, const std::string& message) const;
+    /// Reports a manifest generation roll once, whoever notices it first. The roll itself happens
+    /// inside `VersionSet` on whichever edit crosses the threshold; observing it from here is what
+    /// keeps the logger out of a class whose locks this file cannot audit.
+    void note_generation_roll() const;
+    mutable std::atomic<uint64_t> last_seen_generation_{0};
+    /// Formats only when the level is enabled, so a disabled logger costs one comparison.
+    template <typename... Args>
+    void log_event(LogLevel level, LogEvent event, Args&&... args) const {
+        if (!logger_enabled(level)) return;
+        std::ostringstream message;
+        (message << ... << args);
+        log_emit(level, event, message.str());
+    }
+
+    /// A line composed inside a critical section and emitted once it is left. **Declare it before
+    /// the lock**: destruction runs in reverse, so it outlives the guard and the sink sees no lock.
+    class DeferredLine {
+    public:
+        explicit DeferredLine(const DbImpl* self) : self_(self) {}
+        DeferredLine(const DeferredLine&) = delete;
+        DeferredLine& operator=(const DeferredLine&) = delete;
+        ~DeferredLine() {
+            // A destructor is noexcept; a throwing sink must not take the process with it.
+            try {
+                if (pending_) self_->log_emit(level_, event_, message_);
+            } catch (...) {
+            }
+        }
+
+        template <typename... Args>
+        void set(LogLevel level, LogEvent event, Args&&... args) {
+            if (!self_->logger_enabled(level)) return;
+            std::ostringstream message;
+            (message << ... << args);
+            message_ = message.str();
+            level_ = level;
+            event_ = event;
+            pending_ = true;
+        }
+
+    private:
+        const DbImpl* self_;
+        bool pending_ = false;
+        LogLevel level_ = LogLevel::Info;
+        LogEvent event_ = LogEvent::FlushComplete;
+        std::string message_;
+    };
 
     Options options_;
     ResolvedLevels config_;
