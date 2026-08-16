@@ -62,6 +62,8 @@ enum class MaintenanceTask : uint32_t {
     LevelZeroEscape = 1u << 3,      ///< an L0 file compacted off a tier its age has outgrown
 };
 
+class WindowedBlobStore;
+
 class DbImpl final : public DB {
 public:
     static Result<OpenResult> open(const Options& options, bool require_all_durable,
@@ -311,6 +313,8 @@ private:
     /// One thread drives both migration and compaction (ARCHITECTURE.md "Migration between tiers"): migration off a
     /// transient tier first, then compaction.
     void background_compaction_loop();
+    Result<std::shared_ptr<SstReader>> compaction_reader_for(
+        const FileMetadata& file, std::vector<std::unique_ptr<WindowedBlobStore>>& windows);
     /// Nudges the maintenance executor to look now. Demoted by the coordinator from *the*
     /// trigger to an optimisation — it is what keeps a stalled writer from waiting a full tick —
     /// and it invalidates the epoch, which is the half that is not optional.
