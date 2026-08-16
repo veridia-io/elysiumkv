@@ -32,6 +32,14 @@
           ]
         }
       ]
+    },
+    "cli": {
+      "description": "The elysiumkv command-line tool",
+      "dependencies": [
+        "cli11",
+        "nlohmann-json",
+        "tabulate"
+      ]
     }
   }
 }

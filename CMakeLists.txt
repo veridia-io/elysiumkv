@@ -16,6 +16,10 @@ endif()
 # Off by default, and deliberately so: aws-sdk-cpp is by far the heaviest thing
 # in this build, and an embedder with no remote tier should not pay for it — nor
 # should the four-preset matrix that runs on every change.
+option(ELYSIUMKV_BUILD_CLI "Build the elysiumkv command-line tool" ON)
+if(ELYSIUMKV_BUILD_CLI)
+    list(APPEND VCPKG_MANIFEST_FEATURES "cli")
+endif()
 option(ELYSIUMKV_BUILD_AWS "Build the S3 and DynamoDB implementations" OFF)
 if(ELYSIUMKV_BUILD_AWS)
     list(APPEND VCPKG_MANIFEST_FEATURES "aws")
@@ -251,4 +255,11 @@ if(ELYSIUMKV_BUILD_TESTS)
 endif()
 if(ELYSIUMKV_BUILD_BENCH)
     add_subdirectory(bench)
+endif()
+
+# --- the operator CLI ---------------------------------------------------------
+# A shipped binary rather than a build-tree tool, so it is not gated on tests or benchmarks: it is
+# what you reach for when a store is misbehaving, which is when a release build is what you have.
+if(ELYSIUMKV_BUILD_CLI)
+    add_subdirectory(cli)
 endif()
