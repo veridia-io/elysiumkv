@@ -13,6 +13,7 @@
 
 #include "db/db_impl.hpp"
 
+#include "blob/windowed_blob_store.hpp"
 #include "compact/merging_iterator.hpp"
 #include "compact/migrator.hpp"
 #include "compact/picker.hpp"
@@ -608,6 +609,33 @@ Status DbImpl::run_compaction(const Compaction& compaction) {
     return Status::Ok;
 }
 
+/// Bounds a compaction's buffering. Two megabytes is 512 blocks at the default block size, so it
+/// removes almost all of the round trips while staying small enough that every partition compacting
+/// at once stays well inside the shared memory budget.
+constexpr size_t kCompactionWindowBytes = 2u << 20;
+
+/// A reader for one compaction input: windowed, and outside the shared caches.
+///
+/// It deliberately does not use `reader_for`. That one memoises into `readers_`, which the serving
+/// path shares — a reader wrapping a window would then outlive the compaction and hold its buffer.
+/// The block cache is left null for the same reason in reverse: these blocks are read once and
+/// caching them would evict the working set that reads actually use.
+Result<std::shared_ptr<SstReader>> DbImpl::compaction_reader_for(
+    const FileMetadata& file, std::vector<std::unique_ptr<WindowedBlobStore>>& windows) {
+    BlobStore* store = store_for(file.store_id);
+    if (store == nullptr) return std::unexpected(Status::Corrupt);
+
+    windows.push_back(
+        std::make_unique<WindowedBlobStore>(store->bulk_view(), kCompactionWindowBytes));
+
+    SstReaderOptions reader_options;
+    reader_options.block_bytes = options_.block_bytes;
+    reader_options.file_number = file.file_number;
+    reader_options.block_cache = nullptr;
+    return SstReader::open(*windows.back(), sst_object_name(file.file_number), file.file_bytes,
+                           reader_options);
+}
+
 Status DbImpl::write_compaction_outputs(const Compaction& compaction,
                                         std::vector<FileMetadata>& outputs) {
     const ResolvedLevel& target = level_config(compaction.output_level);
@@ -615,11 +643,15 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // Sources in recency order: the source level first (L0 already sorted by
     // descending file number), then the output level. Recency is positional (ARCHITECTURE.md "Positional recency").
     std::vector<std::shared_ptr<SstReader>> readers;
+    // One window per input, alive until the merge is done. Compaction reads each input once, in
+    // order, so a sliding window turns one request per block into one per window — the difference
+    // between ~11,800 round trips and a dozen when the input is on object storage.
+    std::vector<std::unique_ptr<WindowedBlobStore>> windows;
     std::vector<std::unique_ptr<InternalIterator>> children;
     std::vector<std::vector<RangeTombstone>> child_ranges;
     std::vector<RangeTombstone> all_ranges;
     for (const FileMetadata& file : compaction.all_inputs()) {
-        auto reader = reader_for(file);
+        auto reader = compaction_reader_for(file, windows);
         if (!reader) return reader.error();
         readers.push_back(*reader);
         children.push_back((*reader)->iterator());

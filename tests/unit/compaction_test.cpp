@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdio>
 #include <memory>
 #include <set>
@@ -387,4 +388,86 @@ TEST_F(CompactionTest, StopAtReportsStalledWhenBlockingIsDeclined) {
 }
 
 }  // namespace
+}  // namespace elysiumkv::test
+
+// --- compaction reads its inputs in windows ------------------------------------
+
+namespace elysiumkv::test {
+namespace {
+
+/// Counts `get` calls and forwards everything. The count is the whole point: against object
+/// storage each one is a round trip, and that — not bandwidth — is what made a production
+/// compaction take minutes.
+class CountingBlobStore final : public BlobStore {
+public:
+    explicit CountingBlobStore(std::shared_ptr<BlobStore> delegate)
+        : delegate_(std::move(delegate)) {}
+
+    std::string id() const override { return delegate_->id(); }
+
+    std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
+        gets_.fetch_add(1, std::memory_order_relaxed);
+        return delegate_->get(name, offset, len);
+    }
+    std::future<Status> put(std::string_view name, Slice bytes) override {
+        return delegate_->put(name, bytes);
+    }
+    std::future<Status> remove(std::string_view name) override { return delegate_->remove(name); }
+    std::future<ListResult> list(std::string_view prefix) override {
+        return delegate_->list(prefix);
+    }
+
+    uint64_t gets() const { return gets_.load(std::memory_order_relaxed); }
+    void reset() { gets_.store(0, std::memory_order_relaxed); }
+
+private:
+    std::shared_ptr<BlobStore> delegate_;
+    std::atomic<uint64_t> gets_{0};
+};
+
+}  // namespace
+
+/* **The neuter is the old code**: point `compaction_reader_for` at the store instead of a
+ * `WindowedBlobStore` and this fails, because `SstReader` then asks for one block at a time. At a
+ * 4 KiB block that is one request per 4 KiB of input; with a 2 MiB window it is one per 2 MiB. The
+ * assertion is deliberately loose — it pins the order of magnitude, not an exact count, because
+ * the exact count depends on how the picker happens to group files.
+ */
+TEST(CompactionReadTest, ReadsItsInputsInWindowsRatherThanOneRequestPerBlock) {
+    TestStore backing;
+    auto counting = std::make_shared<CountingBlobStore>(backing.store());
+
+    Options options;
+    options.manifest_catalog = backing.catalog();
+    options.tiers.push_back(Tier{counting, Durability::Durable, {}, {}, {}});
+    options.levels = make_levels(Compression::None);
+    options.memtable_bytes = 1024 * 1024;
+    options.block_bytes = 4096;
+    options.background = BackgroundMode::Inline;
+
+    auto db = DB::open(options);
+    ASSERT_TRUE(db.has_value());
+
+    // Several megabytes, so each L0 file is hundreds of blocks — the scale at which one request
+    // per block and one per window differ by orders of magnitude rather than by a few.
+    std::string value(512, 'x');
+    for (int i = 0; i < 20000; ++i) {
+        const std::string key = "key" + std::string(6 - std::to_string(i).size(), '0') +
+                                std::to_string(i);
+        ASSERT_EQ((*db)->put(Slice::from(key), Slice::from(value)), Status::Ok);
+    }
+    ASSERT_EQ((*db)->flush(), Status::Ok);
+
+    const uint64_t before = counting->gets();
+    ASSERT_EQ((*db)->compact_level(0), Status::Ok);
+    const uint64_t during_compaction = counting->gets() - before;
+
+    // 4000 x 512 B is ~2 MiB of values, so block-at-a-time would be several hundred requests;
+    // windowed is a handful per input file plus its index and filter.
+    EXPECT_LT(during_compaction, 100u)
+        << "compaction issued " << during_compaction
+        << " reads — that is block-at-a-time, not windowed";
+    EXPECT_GT(during_compaction, 0u) << "no reads at all means the compaction did not happen";
+}
+
 }  // namespace elysiumkv::test
