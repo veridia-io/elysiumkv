@@ -19,8 +19,13 @@ on:
       - 'bindings/java/**'
       - 'bindings/kafka-streams-v3/**'
       - '.github/workflows/publish-java.yml'
+  # **published, not created.** A draft is provisional — it can be edited or deleted — and Maven
+  # Central is not: a version pushed there cannot be replaced. Publishing is the point at which the
+  # release stops being a draft, so it is the point at which the artifact should go out. It also
+  # orders the two release workflows correctly: `release-cli` attaches its binaries to the draft on
+  # `created`, and this runs afterwards, when the release is published with those assets in place.
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   # The release tag is the only place the version is written down. Both artifacts derive from it:
