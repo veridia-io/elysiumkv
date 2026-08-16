@@ -383,12 +383,18 @@ jobs:
       # -Delysiumkv.remote.required=true turns the Java suite's skips into failures:
       # a skipped remote test on the one runner that has Docker is
       # indistinguishable from a pass.
+      #
+      # The same flag for Kafka, for the same reason and on the same runner. This is also the
+      # only job where the partitioned store's production shape runs at all — a transient tier
+      # over S3, a DynamoDB manifest and a real transaction — because it is the only one with
+      # both an AWS-enabled native and a Docker daemon.
       - name: Test the binding against remote storage
         run: |
           cmake --build build/aws --target elysiumkv_jni
           mvn -B -f bindings/java verify \
             -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/aws \
-            -Delysiumkv.remote.required=true
+            -Delysiumkv.remote.required=true \
+            -Delysiumkv.kafka.required=true
 
   # ARCHITECTURE.md "Benchmarks" — benchmarks are gating, not reported. The differential oracle
   # validates answers, not cost.

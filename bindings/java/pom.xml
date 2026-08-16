@@ -233,6 +233,16 @@
       <scope>test</scope>
     </dependency>
 
+    <!-- The Kafka module, unlike localstack: a broker needs advertised listeners rewritten to the
+         mapped port before a client outside the container can reach it, and that is real logic
+         rather than a spelling of getHost(). It pulls in no client library of its own. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>kafka</artifactId>
+      <version>${testcontainers.version}</version>
+      <scope>test</scope>
+    </dependency>
+
     <!-- Without an SLF4J binding, Testcontainers' diagnostics go to a no-op logger:
          every container failure reads "Could not find a valid Docker environment.
          Please see logs" and there are no logs. That cost real time once. -->

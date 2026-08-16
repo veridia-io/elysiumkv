@@ -28,17 +28,17 @@ import org.testcontainers.containers.wait.strategy.Wait;
  * {@code -Delysiumkv.remote.required=true} and the same missing precondition becomes
  * a failure there.
  */
-final class RemoteEnvironment {
+public final class RemoteEnvironment {
     private static final String IMAGE = "localstack/localstack:4.4.0";
     private static final int PORT = 4566;
 
     /** Shared by every test; per-test isolation comes from prefixes and store ids. */
-    static final String BUCKET = "elysiumkv";
-    static final String TABLE = "elysiumkv-manifest";
+    public static final String BUCKET = "elysiumkv";
+    public static final String TABLE = "elysiumkv-manifest";
 
     /** LocalStack accepts anything, and these are the conventional placeholders. */
-    static final String ACCESS_KEY = "test";
-    static final String SECRET_KEY = "test";
+    public static final String ACCESS_KEY = "test";
+    public static final String SECRET_KEY = "test";
 
     private static GenericContainer<?> container;
     private static String endpoint;
@@ -51,7 +51,7 @@ final class RemoteEnvironment {
      * {@code -Delysiumkv.remote.required=true} says this machine was supposed to be
      * able to run it.
      */
-    static synchronized String requireEndpoint() {
+    public static synchronized String requireEndpoint() {
         boolean required = Boolean.getBoolean("elysiumkv.remote.required");
 
         if (!ElysiumKV.hasAwsSupport()) {
