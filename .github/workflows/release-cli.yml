@@ -9,6 +9,13 @@ name: Release the CLI
 # No Windows. The engine's storage seams are POSIX-shaped and nobody has asked; adding it later is
 # a matrix line and a build fix, not a design change.
 #
+# **This attaches assets after publication, which requires immutable releases to be off.** With the
+# setting on, the upload fails with `422 Cannot upload assets to an immutable release`, and there is
+# no way to attach them afterwards — v0.4.0 shipped without binaries for exactly this reason.
+# Drafting first is not a workaround: Actions does not run workflows for draft releases at all. If
+# immutability is ever turned back on, this has to become tag-driven, building first and then
+# creating the release *with* its assets in one call.
+#
 # **Draft the release, do not publish it.** GitHub freezes a published release's assets, so
 # attaching after publication fails with `422 Cannot upload assets to an immutable release` — which
 # is exactly what v0.4.0 did. Saving a draft fires `created`, this attaches the binaries to the
@@ -17,8 +24,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # `published`, not `created`: it fires both for a direct publish and for a draft published later,
+  # whereas `created` misses the second. Actions never runs for the draft itself.
   release:
-    types: [created]
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -129,19 +138,12 @@ jobs:
           name: elysiumkv-${{ matrix.platform }}
           path: elysiumkv-${{ matrix.platform }}.tar.gz*
 
-      # Refuses a published release rather than failing at the upload: the error GitHub returns
-      # names the asset, not the cause, and this says which of the two it is.
-      - name: Attach to the draft release
+      - name: Attach to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${{ github.event.release.draft }}" != "true" ]; then
-            echo "::error::$TAG is already published, so its assets are immutable. Create the" \
-                 "release as a draft, let this attach the binaries, then publish it."
-            exit 1
-          fi
           gh release upload "$TAG" \
             "elysiumkv-${{ matrix.platform }}.tar.gz" \
             "elysiumkv-${{ matrix.platform }}.tar.gz.sha256" \
