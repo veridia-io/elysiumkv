@@ -198,14 +198,9 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
     if (!index) return std::unexpected(index.error());
     reader->index_block_ = *index;
 
-    auto filter = store.get(reader->name_, reader->footer_.filter.offset,
-                            reader->footer_.filter.length)
-                      .get();
-    if (!filter) return std::unexpected(filter.error());
-    auto filter_content = unframe_block(Slice::from(*filter), reader->max_uncompressed());
-    if (!filter_content) return std::unexpected(filter_content.error());
-    reader->filter_ = std::move(*filter_content);
-
+    // **The filter is not read here.** Iteration never consults it, and a compaction opens a
+    // reader per input, so this was a third round trip and ~1.25 MB per million entries fetched
+    // and discarded on every merge. `get` loads it on first use.
     return reader;
 }
 
@@ -233,9 +228,24 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
     return block;
 }
 
+Status SstReader::ensure_filter() {
+    std::lock_guard<std::mutex> lock(filter_mutex_);
+    if (filter_loaded_) return Status::Ok;
+
+    auto filter = store_.get(name_, footer_.filter.offset, footer_.filter.length).get();
+    if (!filter) return filter.error();
+    auto content = unframe_block(Slice::from(*filter), max_uncompressed());
+    if (!content) return content.error();
+
+    filter_ = std::move(*content);
+    filter_loaded_ = true;
+    return Status::Ok;
+}
+
 Result<std::optional<SstReader::Found>> SstReader::get(Slice key) {
     // The filter exists to make this rejection cheap; it is consulted before any
-    // data block is touched.
+    // data block is touched. Loaded on the first `get` rather than at open — see `open`.
+    if (Status status = ensure_filter(); status != Status::Ok) return std::unexpected(status);
     if (!bloom_may_contain(Slice::from(filter_), key)) return std::optional<Found>{};
 
     BlockIterator index(index_block_);
