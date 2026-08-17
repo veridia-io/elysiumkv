@@ -21,9 +21,36 @@ public:
         : levels_(std::move(levels)),
           next_file_number_(next_file_number),
           compaction_pointers_(std::move(compaction_pointers)),
-          truncation_point_(std::move(truncation_point)) {}
+          truncation_point_(std::move(truncation_point)) {
+        carries_ranges_.resize(levels_.size(), false);
+        for (size_t level = 0; level < levels_.size(); ++level) {
+            for (const FileMetadata& file : levels_[level]) {
+                if (file.num_range_tombstones != 0) {
+                    carries_ranges_[level] = true;
+                    break;
+                }
+            }
+        }
+    }
 
     const std::vector<std::vector<FileMetadata>>& levels() const { return levels_; }
+
+    /// Whether any file at this level carries range tombstones.
+    ///
+    /// **What it licenses is a binary search on the read path.** Below L0 the *data* spans are
+    /// disjoint and sorted, so at most one file can hold a key — but a range tombstone span is
+    /// neither bounded by its file's data span nor disjoint from its neighbours', so a file whose
+    /// keys are elsewhere can still be the one that answers. When no file here carries any, that
+    /// second reason to open a file cannot arise and the level is searchable rather than scannable.
+    /// Computed once, at construction, because a Version is immutable.
+    ///
+    /// The negative control is `DeleteRange.ATombstoneSurvivesACompactionThatDoesNotReachWhatItShadows`:
+    /// force this to `false` and that test fails, because the search then walks past the file
+    /// whose tombstone answers the lookup.
+    bool carries_ranges(int level) const {
+        return level >= 0 && static_cast<size_t>(level) < carries_ranges_.size() &&
+               carries_ranges_[static_cast<size_t>(level)];
+    }
     size_t num_levels() const { return levels_.size(); }
     const std::vector<FileMetadata>& files_at(int level) const;
 
@@ -106,6 +133,7 @@ public:
 
 private:
     std::vector<std::vector<FileMetadata>> levels_;
+    std::vector<bool> carries_ranges_;
     uint64_t next_file_number_ = 1;
     std::map<int, std::string> compaction_pointers_;
     std::string truncation_point_;

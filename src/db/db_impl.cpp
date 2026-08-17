@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1237,6 +1238,15 @@ Status DbImpl::check_invariants(Invariant* which) const {
         listings.emplace(store_id, std::move(*names));
     }
 
+    // Indexed once, for the reason `verify_stores_and_discard` gives: linear per file made this
+    // quadratic, and ordering is not something `BlobStore::list` promises.
+    std::map<std::string, std::unordered_set<std::string_view>> present;
+    for (const auto& [store_id, names] : listings) {
+        auto& index = present[store_id];
+        index.reserve(names.size());
+        for (const std::string& name : names) index.emplace(name);
+    }
+
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
         const auto& files = version->files_at(level);
 
@@ -1244,11 +1254,10 @@ Status DbImpl::check_invariants(Invariant* which) const {
             const FileMetadata& file = files[i];
 
             // Every file in the current version exists in its recorded store.
-            auto listing = listings.find(file.store_id);
-            if (listing == listings.end()) return fail(Invariant::StoreMissing);
+            auto listing = present.find(file.store_id);
+            if (listing == present.end()) return fail(Invariant::StoreMissing);
             const std::string name = sst_object_name(file.file_number);
-            if (std::find(listing->second.begin(), listing->second.end(), name) ==
-                listing->second.end()) {
+            if (!listing->second.contains(name)) {
                 return fail(Invariant::ObjectMissing);
             }
 
@@ -1406,7 +1415,31 @@ Result<Pinned> DbImpl::get(Slice key) {
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
         // L0 is ordered by descending file number, so the first hit is the most
         // recent; deeper levels are non-overlapping, so there is at most one.
-        for (const FileMetadata& file : version->files_at(level)) {
+        const std::vector<FileMetadata>& files = version->files_at(level);
+
+        // **Binary search where the level allows it**, which is what ARCHITECTURE.md - A read
+        // describes and what this loop did not do: below L0 the data spans are disjoint and
+        // sorted by smallest key, so `lower_bound` on the largest key lands on the only file that
+        // can hold it. That is O(log n) against a scan of the level, and for a bottom level of
+        // 50,000 files the scan is 50,000 string comparisons per lookup — the one cost a bloom
+        // filter cannot remove, because it is paid before any file is opened.
+        //
+        // **Not when the level carries range tombstones.** Their spans are neither bounded by the
+        // data span nor disjoint across files, so the ordering the search relies on does not hold
+        // for the second reason to open a file, and the level is scanned as before.
+        size_t begin = 0;
+        size_t end = files.size();
+        if (level > 0 && !version->carries_ranges(level)) {
+            const auto found = std::lower_bound(
+                files.begin(), files.end(), key, [](const FileMetadata& file, Slice probe) {
+                    return Slice::from(file.largest_key) < probe;
+                });
+            begin = static_cast<size_t>(found - files.begin());
+            end = std::min(files.size(), begin + 1);
+        }
+
+        for (size_t index = begin; index < end; ++index) {
+            const FileMetadata& file = files[index];
             // Either span can be the reason to open this file. The tombstone span is not bounded by
             // the data span — a file can delete a range it holds no keys in — so a lookup that
             // consulted only the data span would walk straight past the file that answers it.
@@ -2157,20 +2190,37 @@ Status DbImpl::verify_stores_and_discard() {
         listings.emplace(store_id, std::move(*names));
     }
 
+    // **Indexed, not scanned.** Both sizes here are "files in this store", so a linear lookup per
+    // file made open quadratic — at 10,000 files that is ~10^8 string comparisons before the store
+    // opens, on a path an embedder runs at every rebalance.
+    //
+    // A set rather than a binary search over the listing: `BlobStore::list` promises nothing about
+    // ordering, and an embedder's own store reaches this through the C ABI vtable. Assuming sorted
+    // input would turn an unsorted store into "these files are missing", and for a Transient store
+    // that discards every file on it.
+    std::map<std::string, std::unordered_set<std::string_view>> present;
+    for (const auto& [store_id, names] : listings) {
+        auto& index = present[store_id];
+        index.reserve(names.size());
+        // Views into `listings`, which outlives this function.
+        for (const std::string& name : names) index.emplace(name);
+    }
+
     std::map<std::string, std::vector<FileMetadata>> missing_by_store;
-    for (const FileMetadata& file : version->all_files()) {
-        auto listing = listings.find(file.store_id);
-        if (listing == listings.end()) {
+    for (const auto& level : version->levels()) {
+      for (const FileMetadata& file : level) {
+        auto listing = present.find(file.store_id);
+        if (listing == present.end()) {
             return fail_terminal(Status::Config,
                                  "file " + sst_object_name(file.file_number) +
                                      " names store '" + file.store_id +
                                      "', which is not in this configuration");
         }
         const std::string name = sst_object_name(file.file_number);
-        if (std::find(listing->second.begin(), listing->second.end(), name) ==
-            listing->second.end()) {
+        if (!listing->second.contains(name)) {
             missing_by_store[file.store_id].push_back(file);
         }
+      }
     }
 
     for (const auto& [store_id, missing] : missing_by_store) {
@@ -2229,7 +2279,6 @@ Status DbImpl::verify_stores_and_discard() {
     // *sustained* observation that can support it lives in `sweep_orphans`, which re-reads the
     // manifest so a file whose edit has since landed leaves the candidate set on its own. The
     // counter advance above is what makes not deleting safe in the meantime.
-    (void)listings;
     return Status::Ok;
 }
 

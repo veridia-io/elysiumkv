@@ -1,6 +1,7 @@
 #include "sst/sst_reader.hpp"
 #include "sst/sst_writer.hpp"
 
+#include "fault/fault_injecting_blob_store.hpp"
 #include "support/temp_dir.hpp"
 #include "elysiumkv/disk_blob_store.hpp"
 
@@ -62,6 +63,39 @@ protected:
     DiskBlobStore store_{dir_.path()};
     uint64_t file_size_ = 0;
 };
+
+
+/// **Opening a reader must not fetch the bloom filter.** Only `get` consults it, and a compaction
+/// opens a reader per input — so an eager load was a third round trip and, at ten bits per key,
+/// about 1.25 MB per million entries transferred and thrown away on every merge. Against a remote
+/// store the round trip is the expensive half.
+TEST(SstFilterTest, OpeningAReaderDoesNotFetchTheFilter) {
+    TempDir dir;
+    auto disk = std::make_shared<DiskBlobStore>(dir.path());
+    test::FaultInjectingBlobStore store(disk);
+
+    SstWriter writer({.bloom_bits_per_key = 10, .compression = Compression::None});
+    for (const Entry& e : sample(2000)) {
+        writer.add(Slice::from(e.key), e.type, Slice::from(e.value));
+    }
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(store.put("000000000001.sst", Slice::from(built->bytes)).get(), Status::Ok);
+
+    const uint64_t before_open = store.call_count(test::FaultInjectingBlobStore::Op::Get);
+    auto reader = SstReader::open(store, "000000000001.sst", built->bytes.size(), {});
+    ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+
+    const uint64_t at_open = store.call_count(test::FaultInjectingBlobStore::Op::Get);
+    EXPECT_EQ(at_open - before_open, 2u)
+        << "the footer tail and the index block, and nothing else";
+
+    // And it is still there when something actually asks: lazy, not dropped.
+    auto found = (*reader)->get(Slice::from(std::string("user:00000042")));
+    ASSERT_TRUE(found.has_value()) << status_name(found.error());
+    EXPECT_TRUE(found->has_value()) << "a key that was written must still be found";
+    EXPECT_GT(store.call_count(test::FaultInjectingBlobStore::Op::Get), at_open);
+}
 
 TEST_P(SstTest, PointLookupsFindEveryEntry) {
     const auto entries = sample(2000);

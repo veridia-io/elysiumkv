@@ -118,7 +118,14 @@ identity be the number alone rather than a store-and-number pair.
 2. L0 files in descending file-number order — they overlap, so all of them may need consulting,
    which is why L0's file count is a direct read-amplification term;
 3. each deeper level in turn, one file at most per level, found by binary search because files in a
-   level do not overlap.
+   level do not overlap — **unless some file at that level carries a range tombstone**, in which
+   case the level is scanned.
+
+The exception is not a detail. A file's *data* span is disjoint from its neighbours' and sorted, which
+is what makes the search correct; a *range tombstone* span is neither — a file can delete a range it
+holds no keys in, so the file that answers a lookup may be one whose keys are somewhere else
+entirely. `Version::carries_ranges` is checked per level, and levels that carry none — which is all
+of them in a store that never calls `delete_range` — take the search.
 
 Within a file: consult the bloom filter, then the index block, then the data block. Blocks come from
 the block cache as pins — no copy on a hit. On a miss the cache chain is walked outward (memory,

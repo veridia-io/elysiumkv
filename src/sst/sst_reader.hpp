@@ -9,6 +9,7 @@
 #include "elysiumkv/blob_store.hpp"
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -68,8 +69,14 @@ public:
     /// keeps alive. **The filter dominates** — 10 bits per key is ~1.25 MB for a
     /// million-entry file, which is why the reader cache is bounded by bytes rather
     /// than by a count of open files.
+    ///
+    /// Charged from the footer rather than from the buffer, so it is the same before and after
+    /// the filter is loaded. A figure that grew on first `get` would leave the reader cache
+    /// under-charged for every reader that has not been read from yet — and it must not read
+    /// `filter_`, which is written under `filter_mutex_` and this is neither locked nor on that
+    /// path.
     size_t memory_bytes() const {
-        return (index_block_ != nullptr ? index_block_->size() : 0) + filter_.size() +
+        return (index_block_ != nullptr ? index_block_->size() : 0) + footer_.filter.length +
                name_.size() + sizeof(SstReader);
     }
 
@@ -79,12 +86,18 @@ private:
 
     size_t max_uncompressed() const;
 
+    /// Loads the bloom filter if this is the first `get`. Every reader of `filter_` goes through
+    /// here first, so the lock orders the one write against all subsequent reads.
+    Status ensure_filter();
+
     BlobStore& store_;
     std::string name_;
     uint64_t file_size_ = 0;
     SstReaderOptions options_;
     Footer footer_;
     std::shared_ptr<const Block> index_block_;
+    std::mutex filter_mutex_;
+    bool filter_loaded_ = false;
     Buffer filter_;
 };
 
