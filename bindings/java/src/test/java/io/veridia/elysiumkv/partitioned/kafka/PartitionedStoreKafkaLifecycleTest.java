@@ -61,7 +61,11 @@ class PartitionedStoreKafkaLifecycleTest {
 
     @AfterEach
     void tearDown() {
-        fixture.close();
+        // setUp() aborts on an assumption when there is no Docker, or no AWS in the native. JUnit
+        // still runs this, so without the guard a clean skip is reported as an error.
+        if (fixture != null) {
+            fixture.close();
+        }
     }
 
     // --- the loop -------------------------------------------------------------------------
