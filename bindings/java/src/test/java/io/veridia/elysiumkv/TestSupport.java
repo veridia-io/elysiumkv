@@ -49,8 +49,10 @@ final class TestSupport implements AutoCloseable {
                 .level(1, Compression.NONE, 0, 0, 0, 0, 0));
     }
 
+    /** Owned, so background compaction cannot outlive the test and write into a @TempDir that
+     * JUnit is already deleting. */
     ElysiumKV open() {
-        return ElysiumKV.open(options());
+        return own(ElysiumKV.open(options()));
     }
 
     <T extends AutoCloseable> T own(T closeable) {

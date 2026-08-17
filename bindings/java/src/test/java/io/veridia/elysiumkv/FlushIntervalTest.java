@@ -54,7 +54,7 @@ class FlushIntervalTest {
     void anIdleMemtableIsFlushedOnceTheIntervalElapses(@TempDir Path dir) throws Exception {
         try (TestSupport support = new TestSupport(dir)) {
             ElysiumKV db = PinLeakExtension.watch(
-                    ElysiumKV.open(options(dir, 100, support)));
+                    support.own(ElysiumKV.open(options(dir, 100, support))));
             db.put(TestSupport.key(1), TestSupport.bytes("v"));
             // No second write, no flush() call. Only the interval can produce a file.
             assertTrue(waitForFlush(db, 5_000),
@@ -68,7 +68,7 @@ class FlushIntervalTest {
     void withoutAnIntervalAnIdleMemtableIsNeverFlushed(@TempDir Path dir) throws Exception {
         try (TestSupport support = new TestSupport(dir)) {
             ElysiumKV db = PinLeakExtension.watch(
-                    ElysiumKV.open(options(dir, 0, support)));
+                    support.own(ElysiumKV.open(options(dir, 0, support))));
             db.put(TestSupport.key(1), TestSupport.bytes("v"));
             Thread.sleep(500);
             assertEquals(0, l0Files(db), "size was the only trigger, and it was never reached");

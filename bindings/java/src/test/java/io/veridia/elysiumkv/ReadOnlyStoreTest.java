@@ -85,7 +85,7 @@ class ReadOnlyStoreTest {
 
             ElysiumKVOptions equal =
                     support.options().obsoleteRetentionMs(600_000).orphanRetentionMs(600_000);
-            ElysiumKV db = PinLeakExtension.watch(ElysiumKV.open(equal));
+            ElysiumKV db = PinLeakExtension.watch(support.own(ElysiumKV.open(equal)));
             assertEquals(0, db.stats().levels().get(0).fileCount());
             db.close();
         }

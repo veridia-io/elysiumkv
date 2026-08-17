@@ -54,8 +54,8 @@ class LoggerTest {
                 events.add(event);
                 messages.add(message);
             };
-            ElysiumKV db = PinLeakExtension.watch(ElysiumKV.open(
-                    options(dir, support, sink, ElysiumKVLogger.Level.INFO)));
+            ElysiumKV db = PinLeakExtension.watch(support.own(ElysiumKV.open(
+                    options(dir, support, sink, ElysiumKVLogger.Level.INFO))));
             fill(db, 400, "k");
             db.flush();
 
@@ -87,8 +87,8 @@ class LoggerTest {
                 threads.add(Thread.currentThread().getId());
                 events.add(event);
             };
-            ElysiumKV db = PinLeakExtension.watch(ElysiumKV.open(
-                    options(dir, support, sink, ElysiumKVLogger.Level.INFO)));
+            ElysiumKV db = PinLeakExtension.watch(support.own(ElysiumKV.open(
+                    options(dir, support, sink, ElysiumKVLogger.Level.INFO))));
             for (int round = 0; round < 8; round++) {
                 fill(db, 200, "round" + round + "-");
                 db.flush();
@@ -112,8 +112,8 @@ class LoggerTest {
             ElysiumKVLogger sink = (level, event, message) -> {
                 throw new IllegalStateException("this appender is broken");
             };
-            ElysiumKV db = PinLeakExtension.watch(ElysiumKV.open(
-                    options(dir, support, sink, ElysiumKVLogger.Level.INFO)));
+            ElysiumKV db = PinLeakExtension.watch(support.own(ElysiumKV.open(
+                    options(dir, support, sink, ElysiumKVLogger.Level.INFO))));
             fill(db, 400, "k");
             db.flush();   // throws if the exception propagated back through the engine
             try (Pinned value = db.get(TestSupport.bytes("k1"))) {
@@ -125,8 +125,8 @@ class LoggerTest {
     @Test
     void aNullSinkIsAcceptedAndSaysNothing(@TempDir Path dir) throws Exception {
         try (TestSupport support = new TestSupport(dir)) {
-            ElysiumKV db = PinLeakExtension.watch(ElysiumKV.open(
-                    options(dir, support, null, ElysiumKVLogger.Level.INFO)));
+            ElysiumKV db = PinLeakExtension.watch(support.own(ElysiumKV.open(
+                    options(dir, support, null, ElysiumKVLogger.Level.INFO))));
             fill(db, 200, "k");
             db.flush();
             try (Pinned value = db.get(TestSupport.bytes("k1"))) {
