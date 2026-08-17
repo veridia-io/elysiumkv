@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
@@ -142,8 +143,17 @@ TEST_F(Truncate, ConcurrentWritesAndTruncationsStayConsistent) {
     std::atomic<int> refused{0};
     std::atomic<int> accepted{0};
 
+    // **Runs until told to stop, rather than for a fixed number of rounds.** A fixed count is a
+    // race against the truncations: a memtable put is far cheaper than a manifest write, so under
+    // a sanitizer the writer finished every round before the floor had risen at all, and the test
+    // then failed its own "the floor never overtook the writer" check. The engine was fine; the
+    // premise was being hoped for rather than established.
     std::thread writer([&] {
-        for (int round = 0; !stop.load() && round < 4000; ++round) {
+        for (int round = 0; !stop.load(); ++round) {
+            if (round > 5'000'000) {   // a stuck test should fail, not hang
+                ADD_FAILURE() << "the writer was never asked to stop";
+                return;
+            }
             const Status status =
                 db_->put(Slice::from(key_at(round % 400)), Slice::from(std::string("w")));
             if (status == Status::Ok) {
@@ -157,14 +167,33 @@ TEST_F(Truncate, ConcurrentWritesAndTruncationsStayConsistent) {
         }
     });
 
+    /// Waits for a premise to become true, so the test states it rather than assuming it.
+    const auto await = [&](const std::atomic<int>& counter, const char* what) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (counter.load() == 0) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                ADD_FAILURE() << what;
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    };
+
+    const bool wrote = await(accepted, "the writer never got a write through");
+
     for (int floor = 1; floor <= 200; floor += 1) {
         ASSERT_EQ(db_->truncate_below(Slice::from(key_at(floor))), Status::Ok);
     }
+
+    // The floor is now above half the keys the writer cycles through, so refusals follow within a
+    // cycle. Waiting for one is what makes "the floor overtook the writer" a fact.
+    const bool blocked = wrote && await(refused, "the floor never overtook the writer");
     stop.store(true);
     writer.join();
 
-    EXPECT_GT(accepted.load(), 0) << "the writer never got through, so this proved nothing";
-    EXPECT_GT(refused.load(), 0) << "the floor never overtook the writer, so this proved nothing";
+    EXPECT_TRUE(wrote);
+    EXPECT_TRUE(blocked);
 
     // Nothing below the final floor survives, whoever won any individual race.
     for (int i = 0; i < 200; ++i) {
@@ -173,6 +202,7 @@ TEST_F(Truncate, ConcurrentWritesAndTruncationsStayConsistent) {
     }
     EXPECT_EQ(static_cast<DbImpl*>(db_.get())->check_invariants(), Status::Ok);
 }
+
 
 /// A batch lands whole or not at all, so one key under the floor refuses all of it.
 TEST_F(Truncate, ABatchWithOneKeyBelowTheFloorLandsNotAtAll) {
