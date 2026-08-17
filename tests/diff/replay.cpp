@@ -118,6 +118,9 @@ public:
         if (config.cached) {
             cache_every_tier(options_, store_.path() / "cache", config.cache_fetch_granularity);
         }
+        if (config.max_compaction_bytes != 0) {
+            options_.max_compaction_bytes = config.max_compaction_bytes;
+        }
         options_.age_jitter = config.jitter;
         options_.tombstone_density_trigger = config.tombstone_density_trigger;
         // Low, because the streams are short: the engine default of 1024 entries would keep the

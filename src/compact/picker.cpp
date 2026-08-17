@@ -48,6 +48,40 @@ std::vector<FileMetadata> transitive_overlap(const Version& version, int level,
     }
 }
 
+/// Trims an overlapping level's input set to `budget`, **oldest first**.
+///
+/// `max_compaction_bytes` was consulted only when deciding whether to *expand* a compaction back
+/// into its source level, so the primary set was unbounded — and at L0 the transitive closure is
+/// "usually all of them". ARCHITECTURE.md turns that budget into the third term of the exposure
+/// window, so leaving it unenforced made the arithmetic there a statement about a limit that did
+/// not exist.
+///
+/// **The direction is forced by positional recency.** Recency is `(level, file_number)`, so a file
+/// left behind at an overlapping level is newer than the output if and only if its number is
+/// larger. Keeping the oldest and dropping the newest leaves every remaining file *above* the
+/// output, which is the order reads already expect; keeping the newest would strand an older file
+/// at L0 shadowing an output built from newer data, and it would return stale values.
+///
+/// So the set stays downward-closed in age, and at least the oldest file always goes — a budget
+/// smaller than one file must still make progress rather than stall the level for ever.
+void trim_to_budget(std::vector<FileMetadata>& inputs, size_t budget) {
+    if (budget == 0 || total_bytes(inputs) <= budget) return;
+
+    std::sort(inputs.begin(), inputs.end(),
+              [](const FileMetadata& a, const FileMetadata& b) {
+                  return a.file_number < b.file_number;
+              });
+
+    uint64_t bytes = 0;
+    size_t kept = 0;
+    for (const FileMetadata& file : inputs) {
+        if (kept != 0 && bytes + file.file_bytes > budget) break;
+        bytes += file.file_bytes;
+        ++kept;
+    }
+    inputs.resize(kept);
+}
+
 /// ARCHITECTURE.md "Compaction" — the seed for a non-overlapping level comes from the persisted compaction
 /// pointer — the largest key of the previous compaction there — wrapping at the
 /// end of the keyspace, so the sweep covers the keyspace evenly instead of
@@ -221,6 +255,11 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
 
     if (is_overlapping_level(chosen, source)) {
         compaction.inputs = transitive_overlap(version, chosen, lower, upper);
+        trim_to_budget(compaction.inputs, max_compaction_bytes);
+        // Trimming narrows the span, so the bounds are rebuilt from what survived rather than
+        // carried over from the closure.
+        lower = compaction.inputs.front().effective_smallest();
+        upper = compaction.inputs.front().effective_largest();
     } else {
         compaction.inputs = {*seed};
     }

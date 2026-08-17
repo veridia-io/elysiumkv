@@ -80,7 +80,10 @@ TEST_P(DifferentialTest, MatchesTheOracle) {
     const int first_seed = env_int("ELYSIUMKV_DIFF_SEED", 1);
 
     for (int seed = first_seed; seed < first_seed + seed_count(); ++seed) {
-        const std::vector<DiffOp> ops = generate_ops(static_cast<uint64_t>(seed), ops_count);
+        GeneratorOptions generator;
+        if (config.distinct_keys != 0) generator.distinct_keys = config.distinct_keys;
+        const std::vector<DiffOp> ops =
+            generate_ops(static_cast<uint64_t>(seed), ops_count, generator);
         auto failure = replay(ops, config);
         if (!failure.has_value()) continue;
 
@@ -111,6 +114,20 @@ INSTANTIATE_TEST_SUITE_P(
                      .compression = Compression::Zstd,
                      .split_stores = true,
                      .transient_band = true},
+        // A budget small enough that an L0 compaction rarely takes its whole closure, so the trim
+        // runs throughout. The oracle is unchanged by it: which files a compaction takes is a
+        // scheduling decision, and every answer must be identical to the same stream without it.
+        //
+        // **The trim's *direction* is not pinned here** — inverting it leaves this config passing.
+        // That is pinned by `PickerTest.TrimmingAnOverlappingLevelKeepsTheOldestFiles` and, as an
+        // observable stale read, by
+        // `CompactionTest.TrimmingAnOversizedL0CompactionKeepsTheNewestValues`. What this adds is
+        // that a trimmed input set still produces answers the oracle accepts at all.
+        ReplayConfig{.name = "TinyCompactionBudget",
+                     .compression = Compression::Zstd,
+                     .memtable_bytes = 32u << 10,
+                     .max_compaction_bytes = 48u << 10,
+                     .distinct_keys = 40},
         // The same transient band with the age trigger spread. Jitter decides *when* a file
         // crosses to the colder tier, so every answer here must be identical to `TransientBand`
         // — and if it is not, the offset has leaked into something it must not touch.

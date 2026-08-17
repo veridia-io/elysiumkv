@@ -53,6 +53,61 @@ ResolvedLevels config(int max_files = 4, size_t l1_max_bytes = 4096, int level_c
     return *resolved;
 }
 
+/// **`max_compaction_bytes` bounds the primary input set, not only the expansion.** It used to be
+/// consulted only when deciding whether to widen a compaction back into its source level, so the
+/// set it was documented to bound was unbounded — and at L0 the transitive closure is usually the
+/// whole level. ARCHITECTURE.md turns that budget into the third term of the exposure window, so
+/// the arithmetic there was about a limit nothing enforced.
+TEST(PickerTest, AnOverlappingLevelsInputSetStaysInsideTheBudget) {
+    // Five mutually overlapping L0 files of 1000 bytes each: the closure is all of them.
+    std::vector<FileMetadata> files;
+    for (uint64_t n = 1; n <= 5; ++n) files.push_back(file(0, n, "a", "z"));
+    auto version = version_of(files);
+
+    auto compaction = pick_compaction(*version, config(/*max_files=*/2), /*budget=*/3500);
+    ASSERT_TRUE(compaction.has_value());
+
+    uint64_t bytes = 0;
+    for (const FileMetadata& input : compaction->inputs) bytes += input.file_bytes;
+    EXPECT_LE(bytes, 3500u) << "the closure was taken whole regardless of the budget";
+    EXPECT_LT(compaction->inputs.size(), files.size());
+}
+
+/// **Oldest first, and the direction is forced.** Recency is `(level, file_number)`, so a file left
+/// at an overlapping level is newer than the output exactly when its number is larger. Trimming the
+/// newest keeps every survivor above the output; trimming the oldest would strand a stale file at
+/// L0 shadowing an output built from newer data, and reads would return the stale value.
+TEST(PickerTest, TrimmingAnOverlappingLevelKeepsTheOldestFiles) {
+    std::vector<FileMetadata> files;
+    for (uint64_t n = 1; n <= 5; ++n) files.push_back(file(0, n, "a", "z"));
+    auto version = version_of(files);
+
+    auto compaction = pick_compaction(*version, config(/*max_files=*/2), /*budget=*/2500);
+    ASSERT_TRUE(compaction.has_value());
+    ASSERT_FALSE(compaction->inputs.empty());
+
+    uint64_t highest_taken = 0;
+    for (const FileMetadata& input : compaction->inputs) {
+        highest_taken = std::max(highest_taken, input.file_number);
+    }
+    EXPECT_EQ(compaction->inputs.size(), 2u);
+    EXPECT_EQ(highest_taken, 2u)
+        << "the set must be downward-closed in age; leaving an older file behind inverts recency";
+}
+
+/// A budget smaller than a single file must still make progress. Compacting nothing would leave the
+/// level over its limit for ever, which is a stall rather than a bound.
+TEST(PickerTest, ABudgetSmallerThanOneFileStillCompactsTheOldest) {
+    std::vector<FileMetadata> files;
+    for (uint64_t n = 1; n <= 5; ++n) files.push_back(file(0, n, "a", "z"));
+    auto version = version_of(files);
+
+    auto compaction = pick_compaction(*version, config(/*max_files=*/2), /*budget=*/10);
+    ASSERT_TRUE(compaction.has_value());
+    ASSERT_EQ(compaction->inputs.size(), 1u);
+    EXPECT_EQ(compaction->inputs.front().file_number, 1u) << "the oldest, so recency survives";
+}
+
 TEST(PickerTest, NothingToDoWhenEveryLevelIsUnderItsLimits) {
     auto version = version_of({file(0, 1, "a", "b"), file(1, 2, "a", "b")});
     EXPECT_FALSE(pick_compaction(*version, config(), 1u << 30).has_value());

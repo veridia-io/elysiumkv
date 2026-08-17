@@ -229,6 +229,46 @@ TEST_F(CompactionTest, TrivialMoveRepointsTheSameObject) {
     expect_reads(1000, 1050, "v1");
 }
 
+/// **A budget that trims an L0 compaction must not reorder recency.** Recency is
+/// `(level, file_number)`, so a file left at L0 is newer than the output exactly when its number is
+/// larger. Trimming the newest keeps every survivor above the output; trimming the *oldest* strands
+/// a stale file at L0 shadowing an output built from newer data — and a read then returns the value
+/// that was overwritten.
+///
+/// Written over the same keys repeatedly, because that is what puts a stale value underneath a
+/// newer one. Without the overwrites a mis-ordered compaction uncovers nothing and the bug is
+/// invisible.
+TEST_F(CompactionTest, TrimmingAnOversizedL0CompactionKeepsTheNewestValues) {
+    Options options = make_options(store_, Compression::None, 1u << 20);
+    options.levels[0].max_files = 2;
+    // Smaller than a single one of the L0 files below, so every compaction has to trim and the
+    // "must still make progress" path is the one taken.
+    options.max_compaction_bytes = 16u << 10;
+    open(options);
+
+    // Four generations over one narrow key range, with a payload big enough that a file is
+    // comfortably over the budget. Every file holds a different value for the same keys, which is
+    // what puts a stale value under a newer one.
+    const auto write_generation = [&](int round) {
+        const std::string value(512, static_cast<char>('a' + round));
+        for (int i = 0; i < 200; ++i) {
+            ASSERT_EQ(db_->put(Slice::from(key_at(i)), Slice::from(value)), Status::Ok);
+        }
+        ASSERT_EQ(db_->flush(), Status::Ok);
+    };
+    for (int round = 0; round < 4; ++round) write_generation(round);
+    ASSERT_EQ(engine().compact_until_quiet(), Status::Ok);
+
+    // The newest generation is what every key must read back as.
+    const std::string newest(512, 'd');
+    for (int i = 0; i < 200; ++i) {
+        auto found = db_->get_copy(Slice::from(key_at(i)));
+        ASSERT_TRUE(found.has_value()) << key_at(i) << ": " << status_name(found.error());
+        EXPECT_EQ(std::string(found->begin(), found->end()), newest) << key_at(i);
+    }
+    EXPECT_EQ(engine().check_invariants(), Status::Ok);
+}
+
 TEST_F(CompactionTest, CompactionOutputIsPlacedByAgeNotByLevel) {
     // **An injected clock, because the real one made this intermittent.** The bound below is a
     // millisecond, and whether the data had aged past it by the time the compaction placed its
