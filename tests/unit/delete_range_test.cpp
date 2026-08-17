@@ -713,8 +713,12 @@ TEST_F(DeleteRange, TheReceiptTurnsTrueOnlyOnceTheFilesAreGone) {
     ASSERT_EQ(db_->flush(), Status::Ok);          // a second spanning 40..79
 
     // Covers the first file entirely and the second only in part.
-    const Slice lower = Slice::from(key_at(0));
-    const Slice upper = Slice::from(key_at(60));
+    // Named, not `Slice::from(key_at(0))` — that binds a Slice to a temporary that dies at the
+    // end of the declaration, and the dangling read happened to survive in debug.
+    const std::string low = key_at(0);
+    const std::string high = key_at(60);
+    const Slice lower = Slice::from(low);
+    const Slice upper = Slice::from(high);
     ASSERT_EQ(db_->delete_range(lower, upper), Status::Ok);
     ASSERT_EQ(db_->flush(), Status::Ok);
 
@@ -747,8 +751,10 @@ TEST_F(DeleteRange, TheTombstoneCarrierDoesNotBlockItsOwnReceipt) {
     put("zzz:keep", "v");   // outside the band, so a file survives to carry the tombstone
     ASSERT_EQ(db_->flush(), Status::Ok);
 
-    const Slice lower = Slice::from(std::string("key:000000"));
-    const Slice upper = Slice::from(std::string("key:000099"));
+    const std::string low = "key:000000";
+    const std::string high = "key:000099";
+    const Slice lower = Slice::from(low);
+    const Slice upper = Slice::from(high);
     ASSERT_EQ(db_->delete_range(lower, upper), Status::Ok);
     ASSERT_EQ(db_->flush(), Status::Ok);
 

@@ -115,64 +115,123 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
     return Status::Ok;
 }
 
+/// How many times `recover` re-reads a pointer that moved under it before giving up. Installing
+/// takes four round trips against a manifest another process rolls with one compare-and-set, so
+/// losing once is ordinary; losing four times running means the writer is rolling far faster than
+/// this reader can read, which is a `Stale` answer rather than a failure.
+constexpr int kRecoverAttempts = 4;
+
+/// **Loading is four round trips against a manifest that moves.** Read the pointer, fetch the
+/// snapshot, list the edits, fetch each one — and a writer rolls a generation and deletes the
+/// previous one between any two of those steps. Two interleavings used to be visible to a healthy
+/// reader, and both are answered here by re-reading the pointer:
+///
+/// - The pointer named generation *N*, the writer rolled and deleted *N*, and the snapshot came
+///   back `NotFound` — which was reported as **`Corrupt`**, telling an operator their store was
+///   damaged when nothing was wrong with it.
+/// - The snapshot won the race and `list_edits` lost. **A missing generation directory lists as
+///   no edits rather than as an error**, deliberately, so the snapshot installed with none of its
+///   up-to-1000 edits replayed, `refresh()` returned `Ok`, and the reader's view moved *backwards*
+///   — a key it had just read could revert or vanish.
+///
+/// The manifest is the one thing here with no retention window of its own: SST objects get
+/// `obsolete_retention` precisely because a reader elsewhere is invisible to the collector, and
+/// generations, read by that same invisible reader in four steps rather than one, get none.
 Status VersionSet::recover() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto pointer = catalog_.read();
-    if (!pointer) return pointer.error();
-    if (!pointer->has_value()) return Status::NotFound;  // empty store
+    for (int attempt = 0; attempt < kRecoverAttempts; ++attempt) {
+        auto pointer = catalog_.read();
+        if (!pointer) return pointer.error();
+        if (!pointer->has_value()) return Status::NotFound;  // empty store
 
-    entry_ = **pointer;
-    const uint64_t generation = entry_->generation;
+        const ManifestCatalog::Entry entry = **pointer;
+        const uint64_t generation = entry.generation;
 
-    auto snapshot_bytes = catalog_.get_snapshot(generation).get();
-    if (!snapshot_bytes) {
-        // The pointer names a generation whose snapshot is unreadable. That is
-        // not a missing store, it is a damaged one.
-        return snapshot_bytes.error() == Status::NotFound ? Status::Corrupt
-                                                          : snapshot_bytes.error();
-    }
-    auto snapshot = decode_version_snapshot(Slice::from(*snapshot_bytes));
-    if (!snapshot) return snapshot.error();
-
-    std::map<int, std::string> pointers;
-    for (const auto& [level, key] : snapshot->compaction_pointers) pointers[level] = key;
-
-    VersionEdit initial;
-    initial.added = std::move(snapshot->files);
-    next_file_number_.store(snapshot->next_file_number, std::memory_order_relaxed);
-
-    auto version = Version::apply(Version({}, snapshot->next_file_number, std::move(pointers),
-                                          snapshot->truncation_point),
-                                  initial);
-
-    auto seqs = catalog_.list_edits(generation).get();
-    if (!seqs) return seqs.error();
-
-    // Apply in sequence order, stopping at the first gap or the first object
-    // that fails to decode: an edit that was never acknowledged, whose files are
-    // orphans. Objects after a gap are ignored even if present (ARCHITECTURE.md "Open and recovery").
-    uint64_t expected_seq = 1;
-    for (uint64_t seq : *seqs) {
-        if (seq != expected_seq) break;
-        auto bytes = catalog_.get_edit(generation, seq).get();
-        if (!bytes) {
-            if (bytes.error() == Status::NotFound) break;
-            return bytes.error();
+        auto snapshot_bytes = catalog_.get_snapshot(generation).get();
+        if (!snapshot_bytes) {
+            if (snapshot_bytes.error() != Status::NotFound) return snapshot_bytes.error();
+            // A snapshot the pointer names and that is not there is either a damaged store or a
+            // generation deleted under us. The pointer is what tells the two apart.
+            auto moved = catalog_.read();
+            if (moved && moved->has_value() && (*moved)->generation != generation) continue;
+            return Status::Corrupt;
         }
-        auto edit = decode_version_edit(Slice::from(*bytes));
-        if (!edit) break;  // torn write: everything from here on is unacknowledged
+        auto snapshot = decode_version_snapshot(Slice::from(*snapshot_bytes));
+        if (!snapshot) return snapshot.error();
 
-        version = Version::apply(*version, *edit);
-        if (edit->next_file_number > next_file_number_.load(std::memory_order_relaxed)) {
-            next_file_number_.store(edit->next_file_number, std::memory_order_relaxed);
+        std::map<int, std::string> pointers;
+        for (const auto& [level, key] : snapshot->compaction_pointers) pointers[level] = key;
+
+        // Held locally until this attempt commits: a discarded attempt must not leave the
+        // file-number counter moved, and it only ever rises.
+        uint64_t file_number = snapshot->next_file_number;
+
+        VersionEdit initial;
+        initial.added = std::move(snapshot->files);
+
+        auto version = Version::apply(Version({}, snapshot->next_file_number, std::move(pointers),
+                                              snapshot->truncation_point),
+                                      initial);
+
+        auto seqs = catalog_.list_edits(generation).get();
+        if (!seqs) return seqs.error();
+
+        // Apply in sequence order, stopping at the first gap or the first object
+        // that fails to decode: an edit that was never acknowledged, whose files are
+        // orphans. Objects after a gap are ignored even if present (ARCHITECTURE.md "Open and recovery").
+        uint64_t expected_seq = 1;
+        bool unreadable = false;
+        for (uint64_t seq : *seqs) {
+            if (seq != expected_seq) break;
+            auto bytes = catalog_.get_edit(generation, seq).get();
+            if (!bytes) {
+                if (bytes.error() == Status::NotFound) break;
+                unreadable = true;
+                break;
+            }
+            auto edit = decode_version_edit(Slice::from(*bytes));
+            if (!edit) break;  // torn write: everything from here on is unacknowledged
+
+            version = Version::apply(*version, *edit);
+            if (edit->next_file_number > file_number) file_number = edit->next_file_number;
+            ++expected_seq;
         }
-        ++expected_seq;
+        if (unreadable) {
+            // Same question as a missing snapshot: rolled under us, or genuinely unreadable.
+            auto moved = catalog_.read();
+            if (moved && moved->has_value() && (*moved)->generation != generation) continue;
+            return Status::Io;
+        }
+
+        // **Re-read the pointer before installing anything.** Everything above was read across
+        // four separate round trips; if the generation moved during them, what was assembled is a
+        // mixture rather than a snapshot, and the empty-edit-list case above makes that mixture
+        // look perfectly well formed.
+        auto after = catalog_.read();
+        if (!after) return after.error();
+        if (!after->has_value()) return Status::NotFound;
+        if ((*after)->generation != generation) continue;
+
+        // Monotone or nothing. Generations only advance and edits only accumulate, so this cannot
+        // fire while the store is well formed — it is here because "the reader went backwards" is
+        // the failure the case above produced silently, and a checked property beats a hoped-for
+        // one.
+        if (entry_.has_value() && (generation < entry_->generation ||
+                                   (generation == entry_->generation && expected_seq < next_seq_))) {
+            return Status::Corrupt;
+        }
+
+        entry_ = entry;
+        next_seq_ = expected_seq;
+        next_file_number_.store(file_number, std::memory_order_relaxed);
+        install(version);
+        return Status::Ok;
     }
 
-    next_seq_ = expected_seq;
-    install(version);
-    return Status::Ok;
+    // Lost every attempt. Nothing is wrong with the store and nothing is wrong with this reader;
+    // it is simply behind, which is what `Stale` says.
+    return Status::Stale;
 }
 
 Status VersionSet::apply(VersionEdit edit) {

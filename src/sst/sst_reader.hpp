@@ -63,7 +63,12 @@ public:
     const std::string& name() const { return name_; }
 
     /// Reads and validates one framed block, consulting the block cache first.
-    Result<std::shared_ptr<const Block>> load_block(const BlockHandle& handle);
+    ///
+    /// `prefetched`, when non-empty, is the framed bytes at `handle` already in hand — the tail
+    /// read in `open` covers the index on a well-sized file. It skips the fetch, not any of the
+    /// checks: a prefetch that fails its checksum falls through to the same repair as any other.
+    Result<std::shared_ptr<const Block>> load_block(const BlockHandle& handle,
+                                                    Slice prefetched = {});
 
     /// Resident bytes: the index block and the bloom filter, which are what a reader
     /// keeps alive. **The filter dominates** — 10 bits per key is ~1.25 MB for a

@@ -3,6 +3,7 @@
 #include "sst/format.hpp"
 
 #include "compact/merging_iterator.hpp"
+#include "util/budget_charge.hpp"
 #include "util/jitter.hpp"
 #include "compact/picker.hpp"
 #include "sst/sst_writer.hpp"
@@ -1146,6 +1147,8 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     // ARCHITECTURE.md "A tier is not a level" — placement from the memtable's age alone.
     const Tier& tier = tier_for(/*file_number=*/0, memtable->creation_time_ms());
 
+    // The flush output, whole, held until the put lands. Same reason as the migration copy.
+    const BudgetCharge charged(options_.memory_budget, built->bytes.size());
     auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
     if (!file_number) return file_number.error();
 

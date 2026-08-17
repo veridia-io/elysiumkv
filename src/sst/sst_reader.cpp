@@ -171,18 +171,39 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
         return std::unexpected(Status::Corrupt);
     }
 
-    // One read for the whole footer; the trailer is validated out of the same bytes, so a
-    // well-formed file costs a single round trip here. Sized to the **widest** footer this build
-    // knows rather than to the version it hopes for — the width is only discoverable from the
-    // trailer, which is inside these bytes, so reading a v1 width first would cost a second round
-    // trip on every v2 file to fetch the twelve bytes it turned out to need.
-    const auto tail_len = static_cast<size_t>(
-        std::min<uint64_t>(file_size, static_cast<uint64_t>(Footer::kFooterLengthV2)));
+    // **One speculative read of the tail, not one read per structure at it.** The index block, the
+    // range-delete block and the footer are adjacent at the end of the file (FORMAT.md §5), so a
+    // single read of the end usually carries all three — and the filter sits *before* the index,
+    // so this stops short of the one structure `open` deliberately no longer wants.
+    //
+    // Sized to the **widest** footer this build knows at minimum, rather than to the version it
+    // hopes for: the width is only discoverable from the trailer, which is inside these bytes, so
+    // reading a v1 width first would cost a second round trip on every v2 file to fetch the twelve
+    // bytes it turned out to need.
+    //
+    // Guessing short costs nothing but the second read this used to make unconditionally, so the
+    // constant is a trade of bandwidth against round trips — which is the right trade on the
+    // medium this engine is for, and the wrong one nowhere that matters.
+    //
+    // **Sized against the default file, not against the largest one.** At `target_file_bytes` of
+    // 16 MiB and 4 KiB blocks an index runs to roughly 200 KB, so this covers it; a file several
+    // times that has an index this does not reach and falls back to the second read, exactly as
+    // before. Growing the constant to chase those would move real bandwidth on every open to save
+    // a round trip on a minority of files — the structural answer for them is a two-level index,
+    // where the top level is small whatever the file size.
+    constexpr uint64_t kSpeculativeTailBytes = 256u << 10;
+    const auto tail_len = static_cast<size_t>(std::min<uint64_t>(
+        file_size,
+        std::max<uint64_t>(kSpeculativeTailBytes, static_cast<uint64_t>(Footer::kFooterLengthV2))));
     auto tail = store.get(name, file_size - tail_len, tail_len).get();
     if (!tail) return std::unexpected(tail.error());
     if (tail->size() != tail_len) return std::unexpected(Status::Corrupt);
 
-    const Slice tail_slice = Slice::from(*tail);
+    const uint64_t tail_start = file_size - tail_len;
+    const auto footer_window = static_cast<size_t>(
+        std::min<uint64_t>(tail_len, static_cast<uint64_t>(Footer::kFooterLengthV2)));
+    const Slice tail_slice(tail->data() + (tail_len - footer_window), footer_window);
+
     auto footer_length = Footer::footer_length_from_trailer(tail_slice);
     if (!footer_length) return std::unexpected(footer_length.error());
     if (static_cast<uint64_t>(*footer_length) > file_size) return std::unexpected(Status::Corrupt);
@@ -194,7 +215,15 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
         new SstReader(store, std::move(name), file_size, options));
     reader->footer_ = *footer;
 
-    auto index = reader->load_block(reader->footer_.index);
+    // The index is inside the tail whenever the guess was long enough, which is the whole point.
+    const BlockHandle& index_handle = reader->footer_.index;
+    Slice index_bytes;
+    if (index_handle.offset >= tail_start &&
+        index_handle.offset + index_handle.length <= file_size) {
+        index_bytes = Slice(tail->data() + (index_handle.offset - tail_start), index_handle.length);
+    }
+
+    auto index = reader->load_block(index_handle, index_bytes);
     if (!index) return std::unexpected(index.error());
     reader->index_block_ = *index;
 
@@ -204,7 +233,8 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
     return reader;
 }
 
-Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& handle) {
+Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& handle,
+                                                          Slice prefetched) {
     if (options_.block_cache != nullptr) {
         if (auto cached = options_.block_cache->get(options_.file_number, handle.offset)) {
             return cached;
@@ -214,11 +244,17 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
         return std::unexpected(Status::Corrupt);
     }
 
-    auto raw = store_.get(name_, handle.offset, handle.length).get();
-    if (!raw) return std::unexpected(raw.error());
+    Buffer fetched;
+    Slice framed = prefetched;
+    if (framed.size() != handle.length) {
+        auto raw = store_.get(name_, handle.offset, handle.length).get();
+        if (!raw) return std::unexpected(raw.error());
+        fetched = std::move(*raw);
+        framed = Slice::from(fetched);
+    }
 
-    auto content = raw->size() == handle.length
-                       ? unframe_block(Slice::from(*raw), max_uncompressed())
+    auto content = framed.size() == handle.length
+                       ? unframe_block(framed, max_uncompressed())
                        : Result<Buffer>(std::unexpected(Status::Corrupt));
     if (!content) {
         // **A rotted cache file is not a corrupt store.** The bytes may have come from a disk

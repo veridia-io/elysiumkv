@@ -5,6 +5,9 @@ find_package(benchmark CONFIG REQUIRED)
 # total key count.
 add_executable(elysiumkv_bench
     bench_main.cpp
+    # The latency-injecting store is the tests' one, not a second copy: a benchmark double that
+    # drifts from the tested one measures itself.
+    ${CMAKE_SOURCE_DIR}/tests/fault/fault_injecting_blob_store.cpp
 )
 target_link_libraries(elysiumkv_bench PRIVATE
     elysiumkv elysiumkv_flags benchmark::benchmark)
