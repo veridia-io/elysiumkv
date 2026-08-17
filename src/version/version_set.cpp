@@ -79,6 +79,7 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
         snapshot.compaction_pointers.emplace_back(level, key);
     }
     snapshot.truncation_point = version->truncation_point();
+    snapshot.watermark_floor = version->watermark_floor();
 
     const std::string bytes = encode_version_snapshot(snapshot);
     if (Status status = catalog_.put_snapshot(generation, Slice::from(bytes)).get();
@@ -171,7 +172,8 @@ Status VersionSet::recover() {
         initial.added = std::move(snapshot->files);
 
         auto version = Version::apply(Version({}, snapshot->next_file_number, std::move(pointers),
-                                              snapshot->truncation_point),
+                                              snapshot->truncation_point,
+                                              snapshot->watermark_floor),
                                       initial);
 
         auto seqs = catalog_.list_edits(generation).get();

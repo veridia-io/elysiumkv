@@ -230,13 +230,21 @@ TEST_F(CompactionTest, TrivialMoveRepointsTheSameObject) {
 }
 
 TEST_F(CompactionTest, CompactionOutputIsPlacedByAgeNotByLevel) {
+    // **An injected clock, because the real one made this intermittent.** The bound below is a
+    // millisecond, and whether the data had aged past it by the time the compaction placed its
+    // output depended on how loaded the machine was — it failed roughly one run in three under a
+    // parallel suite with builds running beside it, and never in isolation. Advancing the clock
+    // by hand states the precondition instead of racing it.
+    std::atomic<uint64_t> now{1'000'000};
     Options options = make_tiered_options(store_, Duration(1), Compression::Zstd, 16u << 10);
     options.levels[0].max_files = 1;
     options.levels[1].max_bytes = 1;
+    options.clock = [&now] { return now.load(std::memory_order_relaxed); };
     open(options);
 
     put_range(0, 200, "v1");
     ASSERT_EQ(db_->flush(), Status::Ok);
+    now.fetch_add(10);   // past the hot tier's bound, deterministically
     ASSERT_EQ(engine().compact_until_quiet(), Status::Ok);
 
     // tier 0 accepts nothing older than 1ms, so output made from data written a

@@ -71,6 +71,44 @@ inline void accumulate_max(std::optional<uint64_t>& into, std::optional<uint64_t
     into = into.has_value() ? std::max(*into, *value) : value;
 }
 
+/// **A loss, recorded so the next open still knows about it.**
+///
+/// Discarding is itself a manifest edit that removes the lost files, so their intervals — the only
+/// evidence of what was lost — are gone by the next open. `Version::watermark_floor` carries this
+/// in their place.
+///
+/// The distinction the wrapping `std::optional` makes is between *no loss has been recorded* and
+/// *a loss was recorded and it certifies nothing*: the second happens when a discarded file had no
+/// lower bound at all, and collapsing the two would send the store straight back to trusting
+/// `max(high)`.
+struct WatermarkFloor {
+    /// The highest position still certifiable. `nullopt` means nothing is.
+    std::optional<uint64_t> position;
+
+    /// **A partial replay earns nothing.** The floor is not raised as the embedder re-materialises
+    /// the gap — it stands until the replay is declared complete, and is then cleared outright.
+    ///
+    /// Crediting progress incrementally is the tempting design and it is wrong twice over. A replay
+    /// is the newest data in the store, so it lands on the *transient* tier; losing that tier again
+    /// before it ages off takes the replay with it, and a floor raised on the strength of it would
+    /// go on certifying a position whose evidence had been destroyed twice. The cost of not
+    /// crediting it is that a crash mid-replay repeats work already done, which is bounded by the
+    /// gap and is the cheaper mistake by a wide margin.
+    ///
+    /// Lowered, though, by a *further* loss: `nullopt` is absorbing, since nothing certifiable
+    /// stays nothing certifiable.
+    void lower_to(std::optional<uint64_t> bound) {
+        if (!position.has_value()) return;
+        if (!bound.has_value()) {
+            position = std::nullopt;
+            return;
+        }
+        if (*bound < *position) position = bound;
+    }
+
+    bool operator==(const WatermarkFloor&) const = default;
+};
+
 /// Everything recovery needs to choose a resume position, shaped so that the unsound answer cannot
 /// be written.
 ///

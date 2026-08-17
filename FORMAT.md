@@ -12,8 +12,8 @@ Current versions:
 | Format | Version | Constant |
 | --- | --- | --- |
 | SST file | 1 | `Footer::kFormatVersion1` |
-| Manifest edit | 5 | `kEditFormatVersion` |
-| Manifest snapshot | 5 | `kSnapshotFormatVersion` |
+| Manifest edit | 6 | `kEditFormatVersion` |
+| Manifest snapshot | 6 | `kSnapshotFormatVersion` |
 | Stats buffer | 1 | `kStatsFormatVersion` |
 
 Conventions throughout: **little-endian** fixed-width integers; `varint32`/`varint64` are
@@ -239,7 +239,7 @@ and a migration carries it unchanged.
 Framed with `compression_type = 0`.
 
 ```
-format_version     varint32   5
+format_version     varint32   6
 next_file_number   varint64
 added_count        varint64
 added              file entry × added_count
@@ -247,6 +247,7 @@ deleted_count      varint64
 deleted            (varint64 level ‖ varint64 file_number) × deleted_count
 compaction_pointers
 truncation_point   string
+watermark_floor    varint64 state ‖ varint64 position
 ```
 
 ### Snapshot
@@ -254,12 +255,13 @@ truncation_point   string
 Framed with **zstd**, because a snapshot is always read whole.
 
 ```
-format_version     varint32   5
+format_version     varint32   6
 next_file_number   varint64
 file_count         varint64
 files              file entry × file_count
 compaction_pointers
 truncation_point   string
+watermark_floor    varint64 state ‖ varint64 position
 ```
 
 The **truncation point** is the key below which everything has been dropped. Empty means no
@@ -268,6 +270,25 @@ under it. It is **monotone**: applying an edit takes the max of the edit's value
 so replaying the manifest is idempotent and an edit replayed out of order cannot resurrect data.
 A file whose largest key is below the point holds nothing readable and is unlinked whole; a file
 straddling it is narrowed by the next compaction to cover it.
+
+The **watermark floor** records a loss. In a *snapshot* it is the resulting state: `0` for no loss
+recorded, `1` for a loss permitting `position`, `2` for a loss permitting nothing. In an *edit* it is
+an instruction, and takes a fourth value: `0` says nothing, `1` and `2` install a floor, and `3`
+removes one. `position` is meaningful only for state `1`. Zero is a valid position, so neither
+"permits nothing" nor "no loss" can be inferred from the value.
+
+It exists because discarding a lost store is itself an edit that **removes the lost files**, taking
+their watermark intervals — the only evidence of what was lost — with them. Recovery would then fall
+back to the maximum `watermark_high` over the survivors, which is sound only while nothing has ever
+been lost.
+
+A floor is installed by a discard and is **never raised**. Files written while the gap is being
+re-materialised are the youngest data in the store, so they sit on the tier that just failed and a
+second loss would take them too; crediting them would certify a position whose evidence had been
+destroyed twice. A further loss lowers it. It is removed in one step, by
+`elysiumkv_mark_recovery_complete` — the embedder declaring its replay finished — after which the
+files cover the gap and speak for themselves again. A crash before that repeats the replay, which is
+bounded by the gap.
 
 ## 7. Stats buffer (C ABI)
 

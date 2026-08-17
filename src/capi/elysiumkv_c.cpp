@@ -1504,8 +1504,18 @@ elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db* db, uint8_t* buf, 
     });
 }
 
-void elysiumkv_mark_recovery_complete(elysiumkv_db* db) {
-    if (db != nullptr) db->reads()->mark_recovery_complete();
+elysiumkv_status elysiumkv_mark_recovery_complete(elysiumkv_db* db) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr) {
+            return fail(Status::Config, "elysiumkv_mark_recovery_complete: null db");
+        }
+        const Status status = db->reads()->mark_recovery_complete();
+        if (status != Status::Ok) {
+            return fail(status, std::string("mark_recovery_complete: ") +
+                                    std::string(status_name(status)));
+        }
+        return ELYSIUMKV_OK;
+    });
 }
 
 // --- watermark ----------------------------------------------------------------

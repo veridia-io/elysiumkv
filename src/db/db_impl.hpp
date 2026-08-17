@@ -231,7 +231,7 @@ public:
         if (pinned >= 0) return pinned != 0;
         return transient_stalled_.load();
     }
-    void mark_recovery_complete() override { requires_recovery_.store(false); }
+    Status mark_recovery_complete() override;
 
 private:
     DbImpl(const Options& options, ResolvedLevels config, ResolvedTiers tiers);

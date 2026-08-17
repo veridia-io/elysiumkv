@@ -6,6 +6,8 @@
 #include "elysiumkv/status.hpp"
 #include "version/watermark.hpp"
 
+#include <optional>
+
 #include <cstdint>
 #include <algorithm>
 #include <string>
@@ -130,9 +132,20 @@ struct VersionEdit {
     /// truncation be a single field instead of a log of ranges.
     std::string truncation_point;
 
+    /// What this edit says about the watermark floor — see `Version::watermark_floor`.
+    ///
+    /// Three states rather than two, because "say nothing" and "there is no longer a floor" are
+    /// different instructions: almost every edit is silent, a discard installs one, and the
+    /// embedder declaring its replay complete removes one.
+    enum class FloorUpdate : uint8_t { Silent, Set, Clear };
+    FloorUpdate floor_update = FloorUpdate::Silent;
+    /// Meaningful only when `floor_update == Set`.
+    WatermarkFloor watermark_floor;
+
     bool empty() const {
         return added.empty() && deleted.empty() && compaction_pointers.empty() &&
-               truncation_point.empty() && next_file_number == 0;
+               truncation_point.empty() && floor_update == FloorUpdate::Silent &&
+               next_file_number == 0;
     }
 };
 
@@ -148,6 +161,7 @@ struct VersionSnapshot {
     std::vector<FileMetadata> files;
     std::vector<std::pair<int, std::string>> compaction_pointers;
     std::string truncation_point;
+    std::optional<WatermarkFloor> watermark_floor;
 };
 
 std::string encode_version_snapshot(const VersionSnapshot&);

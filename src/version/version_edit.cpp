@@ -6,8 +6,8 @@
 namespace elysiumkv {
 namespace {
 
-constexpr uint32_t kEditFormatVersion = 5;
-constexpr uint32_t kSnapshotFormatVersion = 5;
+constexpr uint32_t kEditFormatVersion = 6;
+constexpr uint32_t kSnapshotFormatVersion = 6;
 /// A manifest snapshot for a mature store is a few hundred KB; the bound only
 /// has to keep a corrupt length from becoming an allocation.
 constexpr size_t kMaxManifestBytes = 256u << 20;
@@ -127,6 +127,65 @@ std::string frame(const std::string& content, Compression codec) {
     return out;
 }
 
+/// Three states, not two: **no loss recorded**, **a loss permitting a position**, and **a loss
+/// permitting nothing**. Zero is a valid position, so none of them can be inferred from the value.
+/// An edit's instruction: 0 silent, 1 set a position, 2 set "certifies nothing", 3 clear.
+void put_floor_update(std::string& out, VersionEdit::FloorUpdate update,
+                      const WatermarkFloor& floor) {
+    uint64_t state = 0;
+    switch (update) {
+        case VersionEdit::FloorUpdate::Silent: state = 0; break;
+        case VersionEdit::FloorUpdate::Set: state = floor.position.has_value() ? 1u : 2u; break;
+        case VersionEdit::FloorUpdate::Clear: state = 3; break;
+    }
+    put_varint64(out, state);
+    put_varint64(out, floor.position.value_or(0));
+}
+
+bool get_floor_update(const uint8_t*& p, const uint8_t* limit, VersionEdit::FloorUpdate& update,
+                      WatermarkFloor& floor) {
+    uint64_t state = 0;
+    uint64_t value = 0;
+    if (!get_varint64(p, limit, state)) return false;
+    if (state > 3) return false;
+    if (!get_varint64(p, limit, value)) return false;
+    switch (state) {
+        case 0: update = VersionEdit::FloorUpdate::Silent; break;
+        case 1:
+            update = VersionEdit::FloorUpdate::Set;
+            floor.position = value;
+            break;
+        case 2:
+            update = VersionEdit::FloorUpdate::Set;
+            floor.position = std::nullopt;
+            break;
+        default: update = VersionEdit::FloorUpdate::Clear; break;
+    }
+    return true;
+}
+
+void put_floor(std::string& out, const std::optional<WatermarkFloor>& floor) {
+    const uint64_t state = !floor.has_value()          ? 0u
+                           : floor->position.has_value() ? 1u
+                                                         : 2u;
+    put_varint64(out, state);
+    put_varint64(out, floor.has_value() ? floor->position.value_or(0) : 0);
+}
+
+bool get_floor(const uint8_t*& p, const uint8_t* limit, std::optional<WatermarkFloor>& floor) {
+    uint64_t state = 0;
+    uint64_t value = 0;
+    if (!get_varint64(p, limit, state)) return false;
+    if (state > 2) return false;
+    if (!get_varint64(p, limit, value)) return false;
+    if (state == 0) {
+        floor = std::nullopt;
+    } else {
+        floor = WatermarkFloor{state == 1 ? std::optional<uint64_t>(value) : std::nullopt};
+    }
+    return true;
+}
+
 }  // namespace
 
 std::string encode_version_edit(const VersionEdit& edit) {
@@ -145,6 +204,7 @@ std::string encode_version_edit(const VersionEdit& edit) {
 
     put_pointers(content, edit.compaction_pointers);
     put_string(content, edit.truncation_point);
+    put_floor_update(content, edit.floor_update, edit.watermark_floor);
     return frame(content, Compression::None);
 }
 
@@ -188,6 +248,9 @@ Result<VersionEdit> decode_version_edit(Slice bytes) {
 
     if (!get_pointers(p, limit, edit.compaction_pointers)) return std::unexpected(Status::Corrupt);
     if (!get_string(p, limit, edit.truncation_point)) return std::unexpected(Status::Corrupt);
+    if (!get_floor_update(p, limit, edit.floor_update, edit.watermark_floor)) {
+        return std::unexpected(Status::Corrupt);
+    }
     return edit;
 }
 
@@ -199,6 +262,7 @@ std::string encode_version_snapshot(const VersionSnapshot& snapshot) {
     for (const FileMetadata& file : snapshot.files) put_file(content, file);
     put_pointers(content, snapshot.compaction_pointers);
     put_string(content, snapshot.truncation_point);
+    put_floor(content, snapshot.watermark_floor);
 
     // Unlike SST data blocks, a snapshot is always read whole, so whole-object
     // compression is the right shape here.
@@ -234,6 +298,7 @@ Result<VersionSnapshot> decode_version_snapshot(Slice bytes) {
         return std::unexpected(Status::Corrupt);
     }
     if (!get_string(p, limit, snapshot.truncation_point)) return std::unexpected(Status::Corrupt);
+    if (!get_floor(p, limit, snapshot.watermark_floor)) return std::unexpected(Status::Corrupt);
     return snapshot;
 }
 
