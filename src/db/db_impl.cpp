@@ -573,6 +573,15 @@ Status DbImpl::truncate_below(Slice key) {
     return Status::Ok;
 }
 
+Result<bool> DbImpl::range_is_erased(Slice lower, Slice upper) const {
+    // **The truncation point is deliberately not consulted.** A band below the floor is
+    // unreadable, and unreadable is not erased — the objects are still there until the reclaim
+    // collects them. A receipt that counted "you cannot read it" as "it is gone" would be the one
+    // kind of wrong answer this is for.
+    auto version = versions_->current();
+    return !version->any_file_holds(lower, upper);
+}
+
 Status DbImpl::write(WriteBatch& batch) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
     // Checked in full before anything is applied: ARCHITECTURE.md "Absence is an answer, not an error" says a batch lands as a

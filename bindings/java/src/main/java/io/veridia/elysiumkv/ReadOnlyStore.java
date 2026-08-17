@@ -52,6 +52,17 @@ public interface ReadOnlyStore extends AutoCloseable {
     BatchedIterator batchedPrefixIterator(byte[] prefix);
 
     /**
+     * Half-open range scan, batched; null bounds are unbounded. The prefix scans have had a
+     * batched form since the beginning and this did not, for no reason anyone recorded — so a
+     * range scan through the binding was stuck on the slow path while the README measured the
+     * batched one at 4–7x faster per entry.
+     */
+    BatchedIterator batchedIterator(byte[] lo, byte[] hi);
+
+    /** The same batched range scan, descending. */
+    BatchedIterator batchedReverseIterator(byte[] lo, byte[] hi);
+
+    /**
      * The batched scan, descending. Present so that choosing a direction never costs the batching:
      * a long descending scan is exactly the case the batched path exists for, and without this one
      * the only reverse option is the per-entry iterator at roughly 7x the cost per entry.
@@ -75,6 +86,9 @@ public interface ReadOnlyStore extends AutoCloseable {
 
     /** See {@link ElysiumKV#recoveredWatermark()}. Fixed at open, including across {@link #refresh()}. */
     OptionalLong recoveredWatermark();
+
+    /** See {@link ElysiumKV#rangeIsErased(byte[], byte[])}. Reads only, so a reader may ask it. */
+    boolean rangeIsErased(byte[] lower, byte[] upper);
 
     long pinsOutstanding();
 

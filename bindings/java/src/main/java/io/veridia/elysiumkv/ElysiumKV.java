@@ -238,6 +238,29 @@ public final class ElysiumKV implements ReadOnlyStore {
         Native.deleteRange(handle(), lower, upper);
     }
 
+    /**
+     * Whether a {@link #deleteRange} has finished travelling through the tree: <b>no file at any
+     * level still holds data in the band.</b>
+     *
+     * <p>Deletion in an LSM is a promise about the future — the tombstone is recorded now and the
+     * bytes go when compaction reaches them — so "has it actually gone?" usually has no answer.
+     * Here it does, from the manifest alone and with no reads.
+     *
+     * <p><b>Conservative.</b> A recorded key range is a hull, so a file can overlap the band while
+     * holding no key in it: {@code false} means "possibly still present" and carries no
+     * information, while {@code true} means every file that could have held one is gone. That is
+     * the direction that matters — an auditor accepts a receipt, not an absence of evidence.
+     *
+     * <p>A band hidden by {@link #truncateBelow} is <b>not</b> erased: the objects are there until
+     * the reclaim collects them, and unreadable is not the same as gone. And because it answers
+     * about files, a write made into the band after the deletion is a new write rather than a
+     * survival, and sits in the memtable until it is flushed.
+     */
+    @Override
+    public boolean rangeIsErased(byte[] lower, byte[] upper) {
+        return Native.rangeIsErased(handle(), lower, upper);
+    }
+
     // --- iteration -----------------------------------------------------------
 
     /** Half-open range scan; null bounds are unbounded. */
@@ -284,6 +307,30 @@ public final class ElysiumKV implements ReadOnlyStore {
     @Override
     public BatchedIterator batchedPrefixIterator(byte[] prefix) {
         long iter = Native.iterPrefix(handle(), prefix, prefix.length);
+        BatchedIterator batched = new BatchedIterator(this, iter, checked);
+        batchedIterators.add(batched);
+        return batched;
+    }
+
+    /**
+     * Half-open range scan, batched; null bounds are unbounded. Same native iterator as {@link
+     * #iterator(byte[], byte[])} — what differs is that entries are copied across in blocks rather
+     * than borrowed one at a time, which is where the 4–7x comes from.
+     */
+    @Override
+    public BatchedIterator batchedIterator(byte[] lo, byte[] hi) {
+        long iter = Native.iterCreate(handle(), lo, lo == null ? 0 : lo.length, hi,
+                                      hi == null ? 0 : hi.length);
+        BatchedIterator batched = new BatchedIterator(this, iter, checked);
+        batchedIterators.add(batched);
+        return batched;
+    }
+
+    /** The same batched range scan, descending. */
+    @Override
+    public BatchedIterator batchedReverseIterator(byte[] lo, byte[] hi) {
+        long iter = Native.iterCreateReverse(handle(), lo, lo == null ? 0 : lo.length, hi,
+                                             hi == null ? 0 : hi.length);
         BatchedIterator batched = new BatchedIterator(this, iter, checked);
         batchedIterators.add(batched);
         return batched;

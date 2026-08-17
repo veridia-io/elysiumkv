@@ -256,7 +256,7 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
 }
 
 Status SstReader::ensure_filter() {
-    std::lock_guard<std::mutex> lock(filter_mutex_);
+    std::lock_guard<std::mutex> lock(lazy_mutex_);
     if (filter_loaded_) return Status::Ok;
 
     auto filter = store_.get(name_, footer_.filter.offset, footer_.filter.length).get();
@@ -321,12 +321,24 @@ Result<bool> SstReader::range_deletes(Slice key) {
     return key < it.value();
 }
 
+/// **Decoded once per reader.** This is asked for once per carrying file per iterator
+/// construction and once per input per compaction, and it used to fetch the block and walk it
+/// every time. The reader is already where the index and the filter live; a file is immutable, so
+/// its tombstones are too.
+///
+/// Still returns a copy, because every caller takes ownership — the merging iterator holds one
+/// vector per child and the memtable path has no reader to share from. What this removes is the
+/// block fetch and the decode, not the caller's copy.
 Result<std::vector<RangeTombstone>> SstReader::range_tombstones() {
-    std::vector<RangeTombstone> out;
-    if (!has_range_tombstones()) return out;
+    if (!has_range_tombstones()) return std::vector<RangeTombstone>{};
+
+    std::lock_guard<std::mutex> lock(lazy_mutex_);
+    if (ranges_loaded_) return ranges_;
+
     auto block = load_block(footer_.range_del);
     if (!block) return std::unexpected(block.error());
 
+    std::vector<RangeTombstone> out;
     BlockIterator it(*block);
     for (it.seek_to_first(); it.valid(); it.next()) {
         const Slice lower = it.key();
@@ -335,7 +347,10 @@ Result<std::vector<RangeTombstone>> SstReader::range_tombstones() {
                                      std::string(upper.data(), upper.data() + upper.size())});
     }
     if (it.status() != Status::Ok) return std::unexpected(it.status());
-    return out;
+
+    ranges_ = std::move(out);
+    ranges_loaded_ = true;
+    return ranges_;
 }
 
 std::unique_ptr<InternalIterator> SstReader::iterator() {

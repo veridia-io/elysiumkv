@@ -805,6 +805,20 @@ void JNICALL options_configure_compaction(JNIEnv* env, jclass, jlong options, jd
     });
 }
 
+jboolean JNICALL range_is_erased(JNIEnv* env, jclass, jlong db, jbyteArray lower,
+                                 jbyteArray upper) {
+    return guard(env, [&]() -> jboolean {
+        ByteArrayCopy lower_bytes(env, lower, env->GetArrayLength(lower));
+        if (env->ExceptionCheck()) return JNI_FALSE;
+        ByteArrayCopy upper_bytes(env, upper, env->GetArrayLength(upper));
+        if (env->ExceptionCheck()) return JNI_FALSE;
+        int erased = 0;
+        check(env, elysiumkv_range_is_erased(as_db(db), lower_bytes.data(), lower_bytes.size(),
+                                             upper_bytes.data(), upper_bytes.size(), &erased));
+        return erased != 0 ? JNI_TRUE : JNI_FALSE;
+    }, JNI_FALSE);
+}
+
 void JNICALL options_configure_jitter(JNIEnv* env, jclass, jlong options, jdouble age_jitter,
                                       jdouble flush_interval_jitter) {
     guard_void(env, [&] {
@@ -1179,6 +1193,8 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(iter_create)},
     {const_cast<char*>("optionsConfigureCompaction"), const_cast<char*>("(JDJ)V"),
      reinterpret_cast<void*>(options_configure_compaction)},
+    {const_cast<char*>("rangeIsErased"), const_cast<char*>("(J[B[B)Z"),
+     reinterpret_cast<void*>(range_is_erased)},
     {const_cast<char*>("optionsConfigureJitter"), const_cast<char*>("(JDD)V"),
      reinterpret_cast<void*>(options_configure_jitter)},
     {const_cast<char*>("blobCacheStats"), const_cast<char*>("(J)[J"),

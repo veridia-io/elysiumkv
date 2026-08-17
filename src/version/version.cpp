@@ -66,6 +66,19 @@ std::vector<FileMetadata> Version::overlapping_half_open(int level, Slice lower,
     return result;
 }
 
+bool Version::any_file_holds(Slice lower, Slice upper) const {
+    if (!upper.empty() && !(lower < upper)) return false;   // empty band holds nothing
+    for (const auto& level : levels_) {
+        for (const FileMetadata& file : level) {
+            if (file.num_entries == 0) continue;   // carries tombstones and no keys
+            if (Slice::from(file.largest_key) < lower) continue;
+            if (!upper.empty() && !(Slice::from(file.smallest_key) < upper)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<FileMetadata> Version::overlapping_inclusive(int level, Slice first, Slice last) const {
     std::vector<FileMetadata> result;
     for (const FileMetadata& file : files_at(level)) {

@@ -77,7 +77,7 @@ public:
     /// path.
     size_t memory_bytes() const {
         return (index_block_ != nullptr ? index_block_->size() : 0) + footer_.filter.length +
-               name_.size() + sizeof(SstReader);
+               footer_.range_del.length + name_.size() + sizeof(SstReader);
     }
 
 private:
@@ -96,9 +96,14 @@ private:
     SstReaderOptions options_;
     Footer footer_;
     std::shared_ptr<const Block> index_block_;
-    std::mutex filter_mutex_;
+    /// Guards both lazily-built fields below. A reader is shared through the reader cache, so
+    /// every path that touches them acquires this first — which is what orders the single write
+    /// against every later read.
+    std::mutex lazy_mutex_;
     bool filter_loaded_ = false;
     Buffer filter_;
+    bool ranges_loaded_ = false;
+    std::vector<RangeTombstone> ranges_;
 };
 
 }  // namespace elysiumkv

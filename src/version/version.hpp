@@ -123,6 +123,18 @@ public:
     /// There is no "unbounded" sentinel here: an empty key is a key, not a flag.
     std::vector<FileMetadata> overlapping_inclusive(int level, Slice first, Slice last) const;
 
+    /// Whether any file at any level still holds data in `[lower, upper)`.
+    ///
+    /// **Data spans only, deliberately.** A file carrying a range tombstone over the band overlaps
+    /// it by its *effective* span while holding no keys there at all — matching on that would mean
+    /// the answer could never become "nothing left", because the tombstone is itself the thing
+    /// keeping the band deleted.
+    ///
+    /// Conservative in the safe direction: a span is a hull, so a file can overlap without holding
+    /// a single key inside the band. The answer is therefore "there might still be data here", and
+    /// `false` is the one that carries information.
+    bool any_file_holds(Slice lower, Slice upper) const;
+
     /// Every file in the version, in level order.
     std::vector<FileMetadata> all_files() const;
 
