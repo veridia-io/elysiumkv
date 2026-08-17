@@ -81,6 +81,7 @@ public:
     Status write(WriteBatch& batch) override;
     Status truncate_below(Slice key) override;
     Status delete_range(Slice lower, Slice upper) override;
+    Result<bool> range_is_erased(Slice lower, Slice upper) const override;
     /// **`mem_mutex_` must be held.** See `write_floor_` for why the Version is not consulted.
     Status check_below_truncation(Slice key) const;
 

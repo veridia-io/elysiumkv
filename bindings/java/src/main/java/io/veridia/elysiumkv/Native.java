@@ -213,6 +213,8 @@ final class Native {
 
     static native void deleteRange(long db, byte[] lower, byte[] upper);
 
+    static native boolean rangeIsErased(long db, byte[] lower, byte[] upper);
+
     static native void optionsConfigureCompaction(long options, double tombstoneDensityTrigger,
                                                   long tombstoneDensityMinEntries);
 

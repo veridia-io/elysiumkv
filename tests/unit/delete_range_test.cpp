@@ -700,6 +700,93 @@ TEST_F(DeleteRange, AFileInTheGapBetweenTwoRangesIsNotDropped) {
     }
 }
 
+// --- the erasure receipt -------------------------------------------------------
+
+/* **Deletion in an LSM is a promise about the future; this is the manifest saying the future
+ * arrived.** The tombstone is recorded now and the bytes go when compaction reaches them, so
+ * "has it actually gone?" normally has no answer. It has one here, from metadata alone.
+ */
+TEST_F(DeleteRange, TheReceiptTurnsTrueOnlyOnceTheFilesAreGone) {
+    for (int i = 0; i < 40; ++i) put(key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);          // one file spanning 0..39
+    for (int i = 40; i < 80; ++i) put(key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);          // a second spanning 40..79
+
+    // Covers the first file entirely and the second only in part.
+    const Slice lower = Slice::from(key_at(0));
+    const Slice upper = Slice::from(key_at(60));
+    ASSERT_EQ(db_->delete_range(lower, upper), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    Status status = Status::Ok;
+    engine().reclaim_dead_files_for_test(status);
+    ASSERT_EQ(status, Status::Ok);
+
+    // Every read in the band already answers "absent" — the tombstone is doing its job.
+    EXPECT_FALSE(db_->get(Slice::from(key_at(5))).has_value());
+    EXPECT_FALSE(db_->get(Slice::from(key_at(50))).has_value());
+
+    // **Recorded is not erased.** The second file still spans into the band, so its bytes may
+    // still hold keys there and the receipt withholds itself. That the reads say "absent" is
+    // exactly the confusion this predicate exists to refuse.
+    auto partial = db_->range_is_erased(lower, upper);
+    ASSERT_TRUE(partial.has_value());
+    EXPECT_FALSE(*partial) << "a file still spans the band, so nothing may be certified";
+
+    // The sub-band that the dropped file alone held is another matter: nothing spans it now.
+    auto whole = db_->range_is_erased(lower, Slice::from(key_at(40)));
+    ASSERT_TRUE(whole.has_value());
+    EXPECT_TRUE(*whole) << "the only file holding this band was dropped whole";
+}
+
+/* The file carrying the tombstone spans the band by its *effective* range while holding no key in
+ * it. Matching on that span would make the receipt unreachable — the tombstone is itself what
+ * keeps the band deleted, so it would forever be the reason to say "maybe something is left".
+ */
+TEST_F(DeleteRange, TheTombstoneCarrierDoesNotBlockItsOwnReceipt) {
+    put("zzz:keep", "v");   // outside the band, so a file survives to carry the tombstone
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    const Slice lower = Slice::from(std::string("key:000000"));
+    const Slice upper = Slice::from(std::string("key:000099"));
+    ASSERT_EQ(db_->delete_range(lower, upper), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    auto erased = db_->range_is_erased(lower, upper);
+    ASSERT_TRUE(erased.has_value());
+    EXPECT_TRUE(*erased) << "nothing ever held a key in the band, tombstone carrier included";
+}
+
+/* Unreadable is not erased. A floor hides the band from every read while the objects sit there
+ * until the reclaim collects them, and a receipt that counted that as gone would be the one kind
+ * of wrong answer this exists to avoid.
+ */
+TEST_F(DeleteRange, ATruncationFloorDoesNotIssueAReceipt) {
+    for (int i = 0; i < 40; ++i) put(key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    ASSERT_EQ(db_->truncate_below(Slice::from(key_at(20))), Status::Ok);
+    EXPECT_FALSE(db_->get(Slice::from(key_at(5))).has_value()) << "the floor hides it";
+
+    auto erased = db_->range_is_erased(Slice::from(key_at(0)), Slice::from(key_at(20)));
+    ASSERT_TRUE(erased.has_value());
+    EXPECT_FALSE(*erased) << "hidden by a floor is not the same as gone from the store";
+}
+
+/* An empty or inverted band holds nothing, matching what `delete_range` does with one. */
+TEST_F(DeleteRange, AnEmptyBandIsTriviallyErased) {
+    for (int i = 0; i < 20; ++i) put(key_at(i), "v");
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    auto empty = db_->range_is_erased(Slice::from(key_at(5)), Slice::from(key_at(5)));
+    ASSERT_TRUE(empty.has_value());
+    EXPECT_TRUE(*empty);
+
+    auto inverted = db_->range_is_erased(Slice::from(key_at(9)), Slice::from(key_at(2)));
+    ASSERT_TRUE(inverted.has_value());
+    EXPECT_TRUE(*inverted);
+}
+
 /* **Several real ranges in one batch, each with its own bounds.** The resolved bounds are held one
  * entry per operation and read back by the same index, so two ranges cannot land on each other's
  * bounds however many no-ops sit between them.

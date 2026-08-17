@@ -97,6 +97,51 @@ TEST(SstFilterTest, OpeningAReaderDoesNotFetchTheFilter) {
     EXPECT_GT(store.call_count(test::FaultInjectingBlobStore::Op::Get), at_open);
 }
 
+
+/// **The tombstone list is decoded once per reader.** It is asked for once per carrying file per
+/// iterator construction and once per input per compaction, and each call used to fetch the block
+/// and rebuild two strings per tombstone. A file is immutable, so its tombstones are too.
+TEST(SstFilterTest, TheRangeTombstoneListIsDecodedOnce) {
+    TempDir dir;
+    auto disk = std::make_shared<DiskBlobStore>(dir.path());
+    test::FaultInjectingBlobStore store(disk);
+
+    SstWriter writer({.bloom_bits_per_key = 10, .compression = Compression::None});
+    for (const Entry& e : sample(500)) {
+        writer.add(Slice::from(e.key), e.type, Slice::from(e.value));
+    }
+    for (int i = 0; i < 20; ++i) {
+        char lower[32];
+        char upper[32];
+        std::snprintf(lower, sizeof(lower), "zz:%06d", i * 10);
+        std::snprintf(upper, sizeof(upper), "zz:%06d", i * 10 + 5);
+        writer.add_range_tombstone(Slice::from(std::string_view(lower)),
+                                   Slice::from(std::string_view(upper)));
+    }
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(built->num_range_tombstones, 20u);
+    ASSERT_EQ(store.put("000000000002.sst", Slice::from(built->bytes)).get(), Status::Ok);
+
+    auto reader = SstReader::open(store, "000000000002.sst", built->bytes.size(), {});
+    ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+
+    auto first = (*reader)->range_tombstones();
+    ASSERT_TRUE(first.has_value()) << status_name(first.error());
+    EXPECT_EQ(first->size(), 20u);
+
+    const uint64_t after_first = store.call_count(test::FaultInjectingBlobStore::Op::Get);
+    auto again = (*reader)->range_tombstones();
+    ASSERT_TRUE(again.has_value()) << status_name(again.error());
+    ASSERT_EQ(again->size(), first->size()) << "the same reader must answer the same thing";
+    for (size_t i = 0; i < first->size(); ++i) {
+        EXPECT_EQ((*again)[i].lower, (*first)[i].lower);
+        EXPECT_EQ((*again)[i].upper, (*first)[i].upper);
+    }
+    EXPECT_EQ(store.call_count(test::FaultInjectingBlobStore::Op::Get), after_first)
+        << "the second ask re-read the block";
+}
+
 TEST_P(SstTest, PointLookupsFindEveryEntry) {
     const auto entries = sample(2000);
     const auto built = write(entries);

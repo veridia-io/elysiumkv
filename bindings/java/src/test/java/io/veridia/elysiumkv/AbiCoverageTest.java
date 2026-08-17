@@ -173,6 +173,7 @@ class AbiCoverageTest {
             // says so, since this test asserts on the declared surface rather than on behaviour.
             exercise("optionsConfigureCompaction");
             exercise("optionsConfigureJitter");
+            exercise("rangeIsErased");
             // Likewise — prepare() sets it whether or not a sink was configured, so the null path
             // is what every other test here already crosses. LoggerTest covers a real one.
             exercise("optionsSetLogger");

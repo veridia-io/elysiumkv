@@ -203,6 +203,24 @@ public:
     virtual void mark_recovery_complete() = 0;
 
     virtual ~ReadOnlyDB() = default;
+
+    /// Whether a `delete_range(lower, upper)` has finished travelling through the tree: **no file
+    /// at any level still holds data in the band.**
+    ///
+    /// Deletion in an LSM is a promise about the future — the tombstone is recorded now and the
+    /// bytes go when compaction reaches them — so "is it actually gone?" normally has no answer.
+    /// Here it does, and it costs no reads: the manifest records every file's key range, so the
+    /// question is a walk over metadata the engine already holds.
+    ///
+    /// **Conservative.** A recorded range is a hull, so a file can overlap the band while holding
+    /// no key inside it. `false` therefore means "possibly still present" and carries no
+    /// information; `true` means every file that could have held one is gone, and that is the
+    /// answer worth having — an auditor accepts a receipt, not an absence of evidence.
+    ///
+    /// **Files only, and that is the right scope.** A write made into the band *after* the
+    /// deletion is a new write rather than a survival, and it lives in the memtable until it is
+    /// flushed. Ask about a band nobody is writing to.
+    virtual Result<bool> range_is_erased(Slice lower, Slice upper) const = 0;
 };
 
 class DB : public ReadOnlyDB {
@@ -267,6 +285,7 @@ public:
     /// the space comes back only when the covered files are rewritten or dropped whole. It is
     /// cheaper than a delete per key by a wide margin, and dearer than a floor.
     virtual Status delete_range(Slice lower, Slice upper) = 0;
+
 
     /// Forces memtable -> L0 and waits for it.
     virtual Status flush() = 0;

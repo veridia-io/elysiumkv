@@ -1056,6 +1056,26 @@ elysiumkv_status elysiumkv_delete_range(elysiumkv_db* db, const uint8_t* lower, 
     });
 }
 
+elysiumkv_status elysiumkv_range_is_erased(elysiumkv_db* db, const uint8_t* lower,
+                                           size_t lower_len, const uint8_t* upper,
+                                           size_t upper_len, int* erased) {
+    return guard([&]() -> elysiumkv_status {
+        if (db == nullptr || erased == nullptr) {
+            return fail(Status::Config, "elysiumkv_range_is_erased: db and erased are required");
+        }
+        // Reads only, so a read-only handle answers it too — which is the handle an auditor is
+        // most likely to be holding.
+        auto result = db->reads()->range_is_erased(as_slice(lower, lower_len),
+                                                   as_slice(upper, upper_len));
+        if (!result) {
+            return fail(result.error(),
+                        std::string("range_is_erased: ") + std::string(status_name(result.error())));
+        }
+        *erased = *result ? 1 : 0;
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_truncate_below(elysiumkv_db* db, const uint8_t* key, size_t key_len) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_truncate_below: null db");

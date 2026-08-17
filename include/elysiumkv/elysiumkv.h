@@ -547,6 +547,24 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_delete_range(elysiumkv_db*, const uint8
                                            size_t lower_len, const uint8_t* upper,
                                            size_t upper_len);
 
+/* Whether a `delete_range(lower, upper)` has finished travelling through the tree: no file at any
+ * level still holds data in the band. Writes 1 or 0 to `erased`.
+ *
+ * Deletion in an LSM is a promise about the future — the tombstone is recorded now and the bytes go
+ * when compaction reaches them — so "has it actually gone?" normally has no answer. This one costs
+ * no reads: every file's key range is in the manifest already.
+ *
+ * **Conservative.** A recorded range is a hull, so a file can overlap the band while holding no key
+ * in it: 0 means "possibly still present" and carries no information, while 1 means every file that
+ * could have held one is gone. A band hidden by a truncation point is *not* erased — the objects
+ * are there until the reclaim collects them, and unreadable is not the same as gone.
+ *
+ * Answers about files, so a write made into the band after the deletion is a new write rather than
+ * a survival, and sits in the memtable until it is flushed. Available on a read-only handle. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_range_is_erased(elysiumkv_db*, const uint8_t* lower,
+                                           size_t lower_len, const uint8_t* upper,
+                                           size_t upper_len, int* erased);
+
 ELYSIUMKV_API elysiumkv_batch* elysiumkv_batch_create(void);
 ELYSIUMKV_API void elysiumkv_batch_destroy(elysiumkv_batch*);
 ELYSIUMKV_API void elysiumkv_batch_put(elysiumkv_batch*, const uint8_t* key, size_t key_len, const uint8_t* value,
