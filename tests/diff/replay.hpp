@@ -50,6 +50,16 @@ struct ReplayConfig {
     /// every answer must be identical to the same stream without it, which is the property. Only
     /// meaningful alongside a tier that bounds age.
     double jitter = 0.0;
+    /// `Options::max_compaction_bytes`. Zero leaves the engine default, which no replay ever
+    /// reaches. **Changes which files a compaction takes, and nothing about the answers** — the
+    /// budget trims an overlapping level's input set oldest-first, so every file left behind is
+    /// newer than the output. Get that direction wrong and reads return stale values, which is
+    /// exactly what the oracle sees.
+    size_t max_compaction_bytes = 0;
+    /// Distinct keys the op stream draws from; zero leaves the generator's default. A narrow
+    /// keyspace makes every operation land on top of another, which is what puts a *stale* value
+    /// under a newer one — without that there is nothing for a mis-ordered compaction to uncover.
+    int distinct_keys = 0;
     double tombstone_density_trigger = 0.0;
     /// ARCHITECTURE.md "A process-wide memory budget" — a shared `MemoryBudget` of this size, or none when zero.
     ///
