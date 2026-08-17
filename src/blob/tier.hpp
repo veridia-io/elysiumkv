@@ -19,6 +19,10 @@ struct ResolvedTiers {
     /// in. Several tiers may name the same store.
     std::map<std::string, std::shared_ptr<BlobStore>> stores;
 
+    /// `Options::age_jitter`, carried here because `placement()` is handed this table and
+    /// nothing else.
+    double age_jitter = 0.0;
+
     int last() const { return static_cast<int>(tiers.size()) - 1; }
     bool any_transient() const;
     /// Index of the tier whose store holds this file, or -1 when the store is
@@ -39,7 +43,21 @@ struct ResolvedTiers {
 /// - `Transient` tiers must form a prefix.
 /// - A `Transient` tier must set `max_age`, and `stall_age > max_age`.
 /// - No tier's store may be a `CacheBlobStore` at its innermost element.
-Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers);
+/// - `age_jitter` must be in `[0, 1]`.
+Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers, double age_jitter);
+
+/// A file's share of `Options::age_jitter` against a bound of `span_ms`.
+///
+/// **It only ever pulls the bound earlier.** For a `Transient` tier `max_age` is a durability
+/// exposure bound the engine promises, so spreading a migration past it would weaken a guarantee
+/// to smooth a graph.
+///
+/// **File number 0 means "not written yet"** and takes no jitter: a flush or compaction picks a
+/// tier for its output before the write settles a number, and a renumbering on a name collision
+/// would then move the bound underneath it. Those files sit on the exact bound until the first
+/// reconcile after they are in the manifest.
+uint64_t tier_age_jitter_ms(const ResolvedTiers& tiers, uint64_t file_number,
+                            uint64_t min_write_time_ms, uint64_t span_ms);
 
 /// ARCHITECTURE.md "A tier is not a level" — the placement function, verbatim:
 ///
@@ -60,8 +78,13 @@ Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers);
 /// and it is why freshly compacted output made from old data lands directly in a
 /// cold tier instead of being written hot and migrated straight back out.
 ///
+/// **Still monotone under jitter.** The offset is fixed per file, so the bounds a given file
+/// faces are fixed numbers and the first one it fits only ever moves colder as its age grows.
+/// Across files the bounds no longer line up, which is the entire point.
+///
 /// The last tier bounds nothing, so this always returns a valid index.
-int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t now_ms);
+int placement(const ResolvedTiers& tiers, uint64_t file_number, uint64_t min_write_time_ms,
+              uint64_t now_ms);
 
 }  // namespace elysiumkv
 

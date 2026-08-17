@@ -722,6 +722,26 @@ TEST_F(CApiTest, CompactionTuningCrossesTheAbi) {
     elysiumkv_options_destroy(options);
 }
 
+/// Same shape for the two jitters. Both default to zero, so a binding that never calls this is
+/// unchanged — which is the point of it being its own entry rather than two more positions on
+/// `elysiumkv_options_configure`.
+TEST_F(CApiTest, JitterTuningCrossesTheAbi) {
+    elysiumkv_options* options = elysiumkv_options_create();
+    ASSERT_NE(options, nullptr);
+
+    EXPECT_EQ(elysiumkv_options_configure_jitter(options, 0.25, 0.5), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_options_configure_jitter(options, 0.0, 0.0), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_options_configure_jitter(options, 1.0, 1.0), ELYSIUMKV_OK);
+
+    EXPECT_NE(elysiumkv_options_configure_jitter(options, 1.5, 0.0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_configure_jitter(options, 0.0, -0.1), ELYSIUMKV_OK);
+    // NaN passes every comparison it is asked, so it has to be refused by shape.
+    EXPECT_NE(elysiumkv_options_configure_jitter(options, std::nan(""), 0.0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_configure_jitter(nullptr, 0.25, 0.0), ELYSIUMKV_OK);
+
+    elysiumkv_options_destroy(options);
+}
+
 /// The chunked cache constructors, and that the plain ones still behave as they did.
 TEST_F(CApiTest, ChunkedCacheConstructorsCrossTheAbi) {
     void* base = elysiumkv_disk_blob_store_create(store_dir_.c_str(), "cache-delegate");

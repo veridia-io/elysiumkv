@@ -1,5 +1,7 @@
 #include "blob/tier.hpp"
 
+#include "util/jitter.hpp"
+
 namespace elysiumkv {
 
 bool ResolvedTiers::any_transient() const {
@@ -26,13 +28,24 @@ bool ResolvedTiers::store_is_discardable(const std::string& store_id) const {
     return named;
 }
 
-int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t now_ms) {
+uint64_t tier_age_jitter_ms(const ResolvedTiers& tiers, uint64_t file_number,
+                            uint64_t min_write_time_ms, uint64_t span_ms) {
+    if (file_number == 0) return 0;
+    return jitter_offset(file_number, min_write_time_ms,
+                         jitter_window_ms(span_ms, tiers.age_jitter));
+}
+
+int placement(const ResolvedTiers& tiers, uint64_t file_number, uint64_t min_write_time_ms,
+              uint64_t now_ms) {
     const uint64_t age_ms = now_ms > min_write_time_ms ? now_ms - min_write_time_ms : 0;
 
     for (size_t i = 0; i < tiers.tiers.size(); ++i) {
         const Tier& tier = tiers.tiers[i];
-        if (tier.max_age.has_value() && age_ms > static_cast<uint64_t>(tier.max_age->count())) {
-            continue;
+        if (tier.max_age.has_value()) {
+            const uint64_t span = static_cast<uint64_t>(tier.max_age->count());
+            const uint64_t bound =
+                    span - tier_age_jitter_ms(tiers, file_number, min_write_time_ms, span);
+            if (age_ms > bound) continue;
         }
         return static_cast<int>(i);
     }
@@ -41,11 +54,14 @@ int placement(const ResolvedTiers& tiers, uint64_t min_write_time_ms, uint64_t n
     return tiers.last();
 }
 
-Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers) {
+Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers, double age_jitter) {
     if (tiers.empty()) return std::unexpected(Status::Config);
+    // Written to reject NaN as well.
+    if (!(age_jitter >= 0.0) || age_jitter > 1.0) return std::unexpected(Status::Config);
 
     ResolvedTiers resolved;
     resolved.tiers = tiers;
+    resolved.age_jitter = age_jitter;
 
     const size_t last = tiers.size() - 1;
     for (size_t i = 0; i < tiers.size(); ++i) {

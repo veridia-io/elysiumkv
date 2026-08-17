@@ -290,7 +290,7 @@ Status DbImpl::compact_level(int level) {
         // lets a second call be a no-op. Elsewhere the file leaves the level
         // regardless, and the level being empty is the completion condition.
         if (bottom && file.compression == target.compression && file.num_tombstones == 0 &&
-            tier_for(file.min_write_time_ms).store->id() == file.store_id) {
+            tier_for(file.file_number, file.min_write_time_ms).store->id() == file.store_id) {
             continue;
         }
 
@@ -378,7 +378,7 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         for (const FileMetadata& file : version->files_at(0)) {
             const int tier = tiers_.tier_of_store(file.store_id);
             if (tier < 0) continue;
-            if (placement(tiers_, file.min_write_time_ms, now_ms()) <= tier) {
+            if (placement(tiers_, file.file_number, file.min_write_time_ms, now_ms()) <= tier) {
                 continue;
             }
             if (seed == nullptr || file.file_number < seed->file_number) seed = &file;
@@ -758,7 +758,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
 
         // Output made from old data *is* old, so it lands directly on a cold
         // tier rather than being written hot and migrated straight back out.
-        const Tier& tier = tier_for(min_write_time);
+        const Tier& tier = tier_for(/*file_number=*/0, min_write_time);
 
         auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
         if (!file_number) return file_number.error();

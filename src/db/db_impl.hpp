@@ -347,7 +347,10 @@ private:
     /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. It no longer
     /// depends on the file's size, so it no longer has to be evaluated after the bytes exist; the
     /// call sites simply have not been moved earlier, and nothing requires them to be.
-    const Tier& tier_for(uint64_t min_write_time_ms) const;
+    /// `flush_interval` with this memtable's share of `flush_interval_jitter` folded in.
+    uint64_t flush_interval_for(uint64_t created_ms) const;
+    /// `file_number` is 0 for output that has not been written yet, which takes no `age_jitter`.
+    const Tier& tier_for(uint64_t file_number, uint64_t min_write_time_ms) const;
     /// The store named in a file's metadata, or nullptr if the configuration no
     /// longer has it.
     BlobStore* store_for(const std::string& store_id) const;

@@ -111,6 +111,14 @@ INSTANTIATE_TEST_SUITE_P(
                      .compression = Compression::Zstd,
                      .split_stores = true,
                      .transient_band = true},
+        // The same transient band with the age trigger spread. Jitter decides *when* a file
+        // crosses to the colder tier, so every answer here must be identical to `TransientBand`
+        // — and if it is not, the offset has leaked into something it must not touch.
+        ReplayConfig{.name = "JitteredTransientBand",
+                     .compression = Compression::Zstd,
+                     .split_stores = true,
+                     .transient_band = true,
+                     .jitter = 0.25},
         // ARCHITECTURE.md "Caches chain" — the same oracle with a memory-over-disk chain in front of every tier. If a
         // cache is invisible to the engine, this cannot differ from `Zstd`.
         ReplayConfig{.name = "CachedChain", .compression = Compression::Zstd, .cached = true},

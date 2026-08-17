@@ -49,7 +49,7 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
 
         const FileMetadata* candidate = nullptr;
         for (const FileMetadata& file : contents.files) {
-            if (placement(tiers, file.min_write_time_ms, now_ms) <= tier_index) {
+            if (placement(tiers, file.file_number, file.min_write_time_ms, now_ms) <= tier_index) {
                 continue;
             }
             if (candidate == nullptr || file.min_write_time_ms < candidate->min_write_time_ms) {
@@ -58,7 +58,7 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
         }
         if (candidate != nullptr) {
             return Migration{*candidate, tier_index,
-                             placement(tiers, candidate->min_write_time_ms, now_ms),
+                             placement(tiers, candidate->file_number, candidate->min_write_time_ms, now_ms),
                              /*leaves_transient=*/true, /*capacity_eviction=*/false};
         }
 
@@ -88,7 +88,7 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
     //    optimisation, and starving it costs money rather than correctness.
     for (const auto& [tier_index, contents] : by_tier) {
         for (const FileMetadata& file : contents.files) {
-            const int target = placement(tiers, file.min_write_time_ms, now_ms);
+            const int target = placement(tiers, file.file_number, file.min_write_time_ms, now_ms);
             if (target > tier_index) {
                 return Migration{file, tier_index, target, false, false};
             }
