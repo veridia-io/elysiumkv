@@ -805,6 +805,14 @@ void JNICALL options_configure_compaction(JNIEnv* env, jclass, jlong options, jd
     });
 }
 
+void JNICALL options_configure_jitter(JNIEnv* env, jclass, jlong options, jdouble age_jitter,
+                                      jdouble flush_interval_jitter) {
+    guard_void(env, [&] {
+        check(env, elysiumkv_options_configure_jitter(as_options(options), age_jitter,
+                                                      flush_interval_jitter));
+    });
+}
+
 /* --- the logger sink ------------------------------------------------------
  *
  * Attaches this thread to the JVM on first use and detaches when the thread ends, rather than per
@@ -1171,6 +1179,8 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(iter_create)},
     {const_cast<char*>("optionsConfigureCompaction"), const_cast<char*>("(JDJ)V"),
      reinterpret_cast<void*>(options_configure_compaction)},
+    {const_cast<char*>("optionsConfigureJitter"), const_cast<char*>("(JDD)V"),
+     reinterpret_cast<void*>(options_configure_jitter)},
     {const_cast<char*>("blobCacheStats"), const_cast<char*>("(J)[J"),
      reinterpret_cast<void*>(blob_cache_stats)},
     {const_cast<char*>("optionsSetLogger"),

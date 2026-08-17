@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -546,8 +547,8 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     EXPECT_LE(buffer[24], 1u) << "requires_recovery is a 0/1 byte";
     for (size_t i = 25; i < 32; ++i) EXPECT_EQ(buffer[i], 0u) << "header padding at " << i;
 
-    // The two appended fields, at the offsets metrics-spec.md fixed once so that whichever
-    // feature landed second would not move the first.
+    // The two appended fields, at the offsets FORMAT.md §7 fixes so that whichever feature
+    // landed second would not move the first.
     EXPECT_LE(buffer[208], 1u) << "watermark_present is a 0/1 byte";
     EXPECT_EQ(buffer[208], 0u) << "no watermark has been set on this store";
     for (size_t i = 209; i < 216; ++i) EXPECT_EQ(buffer[i], 0u) << "watermark padding at " << i;
@@ -718,6 +719,26 @@ TEST_F(CApiTest, CompactionTuningCrossesTheAbi) {
     EXPECT_NE(elysiumkv_options_configure_compaction(options, 1.5, 0), ELYSIUMKV_OK);
     EXPECT_NE(elysiumkv_options_configure_compaction(options, -0.1, 0), ELYSIUMKV_OK);
     EXPECT_NE(elysiumkv_options_configure_compaction(nullptr, 0.5, 0), ELYSIUMKV_OK);
+
+    elysiumkv_options_destroy(options);
+}
+
+/// Same shape for the two jitters. Both default to zero, so a binding that never calls this is
+/// unchanged — which is the point of it being its own entry rather than two more positions on
+/// `elysiumkv_options_configure`.
+TEST_F(CApiTest, JitterTuningCrossesTheAbi) {
+    elysiumkv_options* options = elysiumkv_options_create();
+    ASSERT_NE(options, nullptr);
+
+    EXPECT_EQ(elysiumkv_options_configure_jitter(options, 0.25, 0.5), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_options_configure_jitter(options, 0.0, 0.0), ELYSIUMKV_OK);
+    EXPECT_EQ(elysiumkv_options_configure_jitter(options, 1.0, 1.0), ELYSIUMKV_OK);
+
+    EXPECT_NE(elysiumkv_options_configure_jitter(options, 1.5, 0.0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_configure_jitter(options, 0.0, -0.1), ELYSIUMKV_OK);
+    // NaN passes every comparison it is asked, so it has to be refused by shape.
+    EXPECT_NE(elysiumkv_options_configure_jitter(options, std::nan(""), 0.0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_configure_jitter(nullptr, 0.25, 0.0), ELYSIUMKV_OK);
 
     elysiumkv_options_destroy(options);
 }

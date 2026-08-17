@@ -3,6 +3,7 @@
 #include "sst/format.hpp"
 
 #include "compact/merging_iterator.hpp"
+#include "util/jitter.hpp"
 #include "compact/picker.hpp"
 #include "sst/sst_writer.hpp"
 
@@ -273,8 +274,11 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
                                 bool read_only) {
     auto config = resolve_levels(options.levels);
     if (!config) return std::unexpected(config.error());
-    auto tiers = resolve_tiers(options.tiers);
+    auto tiers = resolve_tiers(options.tiers, options.age_jitter);
     if (!tiers) return std::unexpected(tiers.error());
+    if (!(options.flush_interval_jitter >= 0.0) || options.flush_interval_jitter > 1.0) {
+        return std::unexpected(Status::Config);
+    }
     if (options.manifest_catalog == nullptr) return std::unexpected(Status::Config);
 
     // ARCHITECTURE.md "A tier is not a level" — `open` is guarded rather than merely documented. Adding a Transient
@@ -315,8 +319,8 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
     return result;
 }
 
-const Tier& DbImpl::tier_for(uint64_t min_write_time_ms) const {
-    const int index = placement(tiers_, min_write_time_ms, options_.clock());
+const Tier& DbImpl::tier_for(uint64_t file_number, uint64_t min_write_time_ms) const {
+    const int index = placement(tiers_, file_number, min_write_time_ms, options_.clock());
     return tiers_.tiers[static_cast<size_t>(index)];
 }
 
@@ -682,7 +686,17 @@ bool DbImpl::memtable_flush_due(bool force) const {
     const uint64_t now = now_ms();
     const uint64_t born = mem_->creation_time_ms();
     if (now <= born) return false;   // a clock that went backwards is not evidence of age
-    return now - born >= static_cast<uint64_t>(options_.flush_interval->count());
+    return now - born >= flush_interval_for(born);
+}
+
+uint64_t DbImpl::flush_interval_for(uint64_t created_ms) const {
+    const uint64_t interval = static_cast<uint64_t>(options_.flush_interval->count());
+    const uint64_t window = jitter_window_ms(interval, options_.flush_interval_jitter);
+    if (window == 0) return interval;
+    // Symmetric, so the span is 2 × window wide and the offset is subtracted back off its middle.
+    // Seeded on the creation time alone: a memtable has no number, and it never outlives the
+    // process, so there is nothing for a reopen to re-cluster.
+    return interval - window + jitter_offset(created_ms, 0, 2 * window + 1);
 }
 
 Status DbImpl::freeze_and_flush_inline(bool force) {
@@ -929,7 +943,12 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
         // when it outgrows the tier it is on. Size mismatches are not time-driven — they are
         // true the moment the file exists, and the epoch covers them.
         if (tier.max_age.has_value()) {
-            consider(file.min_write_time_ms + static_cast<uint64_t>(tier.max_age->count()));
+            // The same offset `placement()` will apply, re-derived rather than remembered. If the
+            // two disagreed the store would wake at a deadline placement no longer calls due, or
+            // sleep straight past one that came early.
+            const uint64_t span = static_cast<uint64_t>(tier.max_age->count());
+            consider(file.min_write_time_ms + span
+                     - tier_age_jitter_ms(tiers_, file.file_number, file.min_write_time_ms, span));
         }
         // The stall valve is a published predicate, so its crossing has to open the gate too or
         // the flag would go stale on a store that has stopped being written to.
@@ -1063,7 +1082,7 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     if (built->num_entries == 0 && built->num_range_tombstones == 0) return Status::Ok;
 
     // ARCHITECTURE.md "A tier is not a level" — placement from the memtable's age alone.
-    const Tier& tier = tier_for(memtable->creation_time_ms());
+    const Tier& tier = tier_for(/*file_number=*/0, memtable->creation_time_ms());
 
     auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
     if (!file_number) return file_number.error();
@@ -1561,7 +1580,7 @@ Stats DbImpl::stats() const {
             if (oldest_write == 0 || file.min_write_time_ms < oldest_write) {
                 oldest_write = file.min_write_time_ms;
             }
-            if (placement(tiers_, file.min_write_time_ms, now) > index) {
+            if (placement(tiers_, file.file_number, file.min_write_time_ms, now) > index) {
                 ++tier_stats.files_pending_migration;
             }
         }

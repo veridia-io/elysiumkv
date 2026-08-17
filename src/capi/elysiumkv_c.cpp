@@ -484,6 +484,26 @@ elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_options* optio
     });
 }
 
+elysiumkv_status elysiumkv_options_configure_jitter(elysiumkv_options* options, double age_jitter,
+                                                    double flush_interval_jitter) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config, "elysiumkv_options_configure_jitter: null options");
+        }
+        // Written to reject NaN as well, which would otherwise pass every comparison and reach
+        // the engine as a window of unpredictable width.
+        if (!(age_jitter >= 0.0) || age_jitter > 1.0 ||
+            !(flush_interval_jitter >= 0.0) || flush_interval_jitter > 1.0) {
+            return fail(Status::Config,
+                        "elysiumkv_options_configure_jitter: both jitters must be a fraction "
+                        "between 0 and 1");
+        }
+        options->options.age_jitter = age_jitter;
+        options->options.flush_interval_jitter = flush_interval_jitter;
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_options_set_logger(elysiumkv_options* options,
                                         const elysiumkv_logger_vtable* vtable, int min_level) {
     return guard([&]() -> elysiumkv_status {

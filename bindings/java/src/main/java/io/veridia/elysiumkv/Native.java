@@ -216,6 +216,9 @@ final class Native {
     static native void optionsConfigureCompaction(long options, double tombstoneDensityTrigger,
                                                   long tombstoneDensityMinEntries);
 
+    static native void optionsConfigureJitter(long options, double ageJitter,
+                                              double flushIntervalJitter);
+
     static native void optionsSetLogger(long options, LoggerBridge sink, int minLevel);
 
     static native long[] blobCacheStats(long store);

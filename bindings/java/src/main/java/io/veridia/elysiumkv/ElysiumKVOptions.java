@@ -22,6 +22,8 @@ public final class ElysiumKVOptions implements AutoCloseable {
     private long obsoleteRetentionMs;
     private long orphanRetentionMs;
     private long orphanSweepIntervalMs;
+    private double ageJitter;
+    private double flushIntervalJitter;
     private double tombstoneDensityTrigger;
     private LoggerBridge loggerBridge;
     private int minLogLevel = ElysiumKVLogger.Level.INFO.ordinal();
@@ -269,6 +271,37 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Spreads each file's tier {@code maxAgeMs} crossing across {@code [maxAge * (1 - j), maxAge]}.
+     * Zero, the default, keeps it exact; outside {@code [0, 1]} is a config error at open.
+     *
+     * <p><b>Earlier only.</b> A transient tier's age bound is an exposure window the engine
+     * promises, so a file may cross early but never late.
+     *
+     * <p>Stores drift apart on their own and this is for the times they do not: a rebuild stamps
+     * everything it replays within the same few minutes, so the whole store crosses together and
+     * migrates as one burst. For a store rebuilt on partition assignment that repeats every
+     * rebalance. The offset is derived from the file rather than rolled, so a reopen recomputes it
+     * instead of re-clustering what it just spread.
+     */
+    public ElysiumKVOptions ageJitter(double fraction) {
+        ageJitter = fraction;
+        return this;
+    }
+
+    /**
+     * Spreads {@link #flushIntervalMs} across {@code [interval * (1 - j), interval * (1 + j)]}, per
+     * memtable. Zero, the default, keeps it exact.
+     *
+     * <p>Both directions, unlike {@link #ageJitter}: a late flush costs replay on restart and
+     * breaks no promise. What it smooths is compaction queue depth — instances opened together
+     * flush together, and their L0 files reach the compactor as one wave.
+     */
+    public ElysiumKVOptions flushIntervalJitter(double fraction) {
+        flushIntervalJitter = fraction;
+        return this;
+    }
+
     /** Flushes the scalars in one call and hands back the native handle. */
     long prepare() {
         Native.optionsConfigure(handle(), catalogHandle, budgetHandle, memtableBytes, blockBytes,
@@ -279,6 +312,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
                                 orphanRetentionMs, orphanSweepIntervalMs);
         // A second call rather than more positions on the first: the C ABI keeps these apart so
         // that adding a knob does not break every existing caller of the other.
+        Native.optionsConfigureJitter(handle(), ageJitter, flushIntervalJitter);
         Native.optionsConfigureCompaction(handle(), tombstoneDensityTrigger,
                                           tombstoneDensityMinEntries);
         Native.optionsSetLogger(handle(), loggerBridge, minLogLevel);

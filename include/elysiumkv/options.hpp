@@ -162,6 +162,32 @@ struct Options {
     /// how much recent data you are willing to lose, not from a latency target.
     std::optional<Duration> flush_interval;
 
+    /// Spreads the flush interval across `[interval × (1 − j), interval × (1 + j)]`, per memtable.
+    /// Zero, the default, keeps it exact. `Status::Config` outside `[0, 1]`.
+    ///
+    /// **Both directions, unlike `age_jitter`.** A late flush costs replay on restart and breaks
+    /// no promise, so there is no reason to only pull it earlier.
+    ///
+    /// What it smooths is compaction queue depth: instances opened together flush together, and
+    /// the L0 files they produce arrive at the compactor as one wave.
+    double flush_interval_jitter = 0.0;
+
+    /// Spreads each file's tier `max_age` crossing across `[max_age × (1 − j), max_age]`, per
+    /// file. Zero, the default, keeps it exact. `Status::Config` outside `[0, 1]`.
+    ///
+    /// **Earlier only.** A `Transient` tier's `max_age` is an exposure bound the engine promises,
+    /// so a file may cross early but never late.
+    ///
+    /// Stores normally drift apart on their own, and this is for the times they do not: a rebuild
+    /// stamps `min_write_time_ms` on everything it replays within the same few minutes, so the
+    /// whole store crosses together and migrates as one burst. That repeats after every rebalance
+    /// for an embedder that rebuilds on assignment.
+    ///
+    /// The offset is derived from the file's number and write time, not rolled, so it survives a
+    /// reopen instead of re-clustering the files it just spread. `stall_age` is deliberately left
+    /// exact — it is an alarm, and blurring it would only make the alarm harder to read.
+    double age_jitter = 0.0;
+
     /// How often the maintenance coordinator reconciles: it evaluates every background
     /// policy — flush, compaction, migration off a transient tier, capacity eviction,
     /// obsolete-object collection — against current state and the clock, and dispatches what

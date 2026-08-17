@@ -196,6 +196,28 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_
                                                      double tombstone_density_trigger,
                                                      uint64_t tombstone_density_min_entries);
 
+/* Spreads the two age triggers so instances that reached the same state at the same moment do not
+ * act on it at the same moment. Both are fractions in [0, 1]; zero, the default, keeps the trigger
+ * exact. Anything outside that range is ELYSIUMKV_CONFIG.
+ *
+ * Stores drift apart on their own, and this is for the times they do not: a rebuild stamps every
+ * file it replays within the same few minutes, so the whole store crosses `max_age` together and
+ * migrates as one burst instead of a trickle. For an embedder that rebuilds on assignment that
+ * repeats after every rebalance.
+ *
+ * `age_jitter` applies per file, and only ever fires it **earlier** — a transient tier's `max_age`
+ * is an exposure bound the engine promises, so a file may cross early but never late. The offset is
+ * derived from the file's number and write time rather than rolled, so a reopen recomputes it
+ * instead of re-clustering what it just spread. A tier's `stall_age` is deliberately left exact:
+ * it is an alarm, and blurring it only makes the alarm harder to read.
+ *
+ * `flush_interval_jitter` applies per memtable and fires either way, since a late flush costs
+ * replay on restart and breaks no promise. What it smooths is compaction queue depth — instances
+ * opened together flush together, and their L0 files reach the compactor as one wave. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_jitter(elysiumkv_options*,
+                                                     double age_jitter,
+                                                     double flush_interval_jitter);
+
 /* --- diagnostics -----------------------------------------------------------
  *
  * The engine has no logger of its own and nothing here is persisted; `write` is the only way it

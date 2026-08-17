@@ -1,6 +1,7 @@
 #include "diff/replay.hpp"
 
 #include "diff/oracle.hpp"
+#include "blob/tier.hpp"
 #include "db/db_impl.hpp"
 #include "support/test_db.hpp"
 #include "support/watchdog.hpp"
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -116,6 +118,7 @@ public:
         if (config.cached) {
             cache_every_tier(options_, store_.path() / "cache", config.cache_fetch_granularity);
         }
+        options_.age_jitter = config.jitter;
         options_.tombstone_density_trigger = config.tombstone_density_trigger;
         // Low, because the streams are short: the engine default of 1024 entries would keep the
         // trigger from ever arming and the config would test nothing.
@@ -174,6 +177,13 @@ public:
             return DiffFailure{ops.size(),
                                "the tombstone-density trigger never fired, so this configuration "
                                "tested nothing: raise the delete rate or lower the trigger"};
+        }
+
+        // And for jitter: a configuration whose files all took the same offset spread nothing.
+        if (config_.jitter > 0.0 && distinct_jitter_offsets() < 2) {
+            return DiffFailure{ops.size(),
+                               "the age jitter gave every file the same offset, so this "
+                               "configuration spread nothing: raise the write volume"};
         }
 
         if (budget_ != nullptr && sheds_seen_ + db_->stats().budget_sheds == 0) {
@@ -491,6 +501,24 @@ private:
     /// ARCHITECTURE.md "The differential oracle" — an iterator advanced across a forced flush. A flush changes where
     /// the data lives, never what it says.
     DbImpl& engine() { return *static_cast<DbImpl*>(db_.get()); }
+
+    /// How many *different* age offsets the live files were given. One means the window is
+    /// there and nothing landed in it.
+    size_t distinct_jitter_offsets() {
+        auto tiers = resolve_tiers(options_.tiers, options_.age_jitter);
+        if (!tiers.has_value()) return 0;
+        std::set<uint64_t> offsets;
+        auto version = engine().current_version();
+        for (const FileMetadata& file : version->all_files()) {
+            const int at = tiers->tier_of_store(file.store_id);
+            if (at < 0) continue;
+            const Tier& tier = tiers->tiers[static_cast<size_t>(at)];
+            if (!tier.max_age.has_value()) continue;
+            offsets.insert(tier_age_jitter_ms(*tiers, file.file_number, file.min_write_time_ms,
+                                              static_cast<uint64_t>(tier.max_age->count())));
+        }
+        return offsets.size();
+    }
 
     /// ARCHITECTURE.md "Versions are immutable snapshots" — the failure this component exists to prevent: an iterator reading a
     /// file that compaction unlinked mid-scan. Silent, load-dependent, and it

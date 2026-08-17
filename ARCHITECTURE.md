@@ -300,6 +300,13 @@ max_age                                    the bound you configure
   + the migration itself                   read, upload, commit the manifest edit
 ```
 
+`Options::age_jitter` spreads the first term across `[max_age × (1 − j), max_age]`, per file, and
+**only ever earlier** — the bound is a promise, so a file may cross ahead of it but never behind.
+It is for the one case where stores do not drift apart on their own: a rebuild stamps everything it
+replays within the same few minutes, so the whole store crosses together and migrates as one burst.
+The offset is derived from the file rather than rolled, which is what lets the crossing time and the
+maintenance deadline below agree on it.
+
 The third term is the one to size against, not the first: it is bounded by `max_compaction_bytes`
 over throughput, which at the 400 MiB default and 50 MB/s is roughly sixteen seconds. Note what that
 conversion assumes — **a byte bound turned into a time bound using an assumption about your
@@ -338,6 +345,11 @@ affordable — and it is not free naively, because picking a migration walks eve
 So a gate: a *maintenance epoch* that changes on any predicate-relevant non-clock event, plus the
 earliest future time at which a time-driven predicate could change. Unchanged epoch and no transition
 passed means nothing can have become due, and the tick costs two comparisons.
+
+That gate is why `age_jitter` is derived and not rolled: the transition time and the placement
+decision are computed at different moments by different code, and a rolled offset would let them
+disagree — waking at a deadline placement no longer calls due, or sleeping past one that came
+early.
 
 **The gate is itself a push dependency**, and honesty about that matters more than the mechanism. It
 is much narrower than what it replaced — every predicate must declare what invalidates it, checked in

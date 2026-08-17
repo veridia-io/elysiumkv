@@ -511,10 +511,12 @@ class FlushIntervalTest : public ::testing::Test {
 protected:
     void SetUp() override { now_.store(1'000'000); }
 
-    Options options_with_interval(std::optional<Duration> interval, BackgroundMode mode) {
+    Options options_with_interval(std::optional<Duration> interval, BackgroundMode mode,
+                                  double jitter = 0.0) {
         Options options = make_options(store_, Compression::None);
         options.background = mode;
         options.flush_interval = interval;
+        options.flush_interval_jitter = jitter;
         // Far above anything one small write reaches, so size can never be the reason a flush
         // happened — the test would otherwise pass without the feature existing.
         options.memtable_bytes = 64u << 20;
@@ -596,6 +598,58 @@ TEST_F(FlushIntervalTest, InlineModeAppliesTheIntervalOnTheNextWrite) {
     ASSERT_EQ(db->put(Slice::from(std::string("k2")), Slice::from(std::string("v"))), Status::Ok);
     EXPECT_EQ(l0_files(*db), 1) << "the write that follows an elapsed interval flushes";
     EXPECT_TRUE(db->get(Slice::from(std::string("k1"))).has_value());
+}
+
+/// `flush_interval_jitter` spreads the interval so that instances opened together stop flushing
+/// together — their L0 files reach the compactor as a wave otherwise. Inline mode, so the clock
+/// is the only thing that moves and the boundary can be probed exactly.
+///
+/// Both directions, unlike the tier bound: a late flush costs replay on restart and breaks no
+/// promise, so there is no reason to only pull it earlier.
+TEST_F(FlushIntervalTest, JitterKeepsTheFlushInsideItsBand) {
+    auto opened = DB::open_with_result(options_with_interval(std::chrono::milliseconds(1000),
+                                                             BackgroundMode::Inline, 0.5));
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    auto db = std::move(opened->db);
+
+    ASSERT_EQ(db->put(Slice::from(std::string("k1")), Slice::from(std::string("v"))), Status::Ok);
+
+    now_.fetch_add(499);
+    ASSERT_EQ(db->put(Slice::from(std::string("k2")), Slice::from(std::string("v"))), Status::Ok);
+    EXPECT_EQ(l0_files(*db), 0) << "the band opens at 500 ms and nothing may flush before it";
+
+    now_.fetch_add(1001);   // 1500 ms in: past the far end of the band
+    ASSERT_EQ(db->put(Slice::from(std::string("k3")), Slice::from(std::string("v"))), Status::Ok);
+    EXPECT_EQ(l0_files(*db), 1) << "the band closes at 1500 ms and the flush is overdue";
+    EXPECT_TRUE(db->get(Slice::from(std::string("k1"))).has_value());
+}
+
+/// The negative control for it. Same interval, no jitter: the crossing is the exact interval,
+/// which is what a jittered store must be measurably different from.
+TEST_F(FlushIntervalTest, WithoutJitterTheIntervalIsExact) {
+    auto opened = DB::open_with_result(options_with_interval(std::chrono::milliseconds(1000),
+                                                             BackgroundMode::Inline));
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    auto db = std::move(opened->db);
+
+    ASSERT_EQ(db->put(Slice::from(std::string("k1")), Slice::from(std::string("v"))), Status::Ok);
+
+    now_.fetch_add(999);
+    ASSERT_EQ(db->put(Slice::from(std::string("k2")), Slice::from(std::string("v"))), Status::Ok);
+    EXPECT_EQ(l0_files(*db), 0) << "one millisecond short is short";
+
+    now_.fetch_add(1);
+    ASSERT_EQ(db->put(Slice::from(std::string("k3")), Slice::from(std::string("v"))), Status::Ok);
+    EXPECT_EQ(l0_files(*db), 1);
+}
+
+/// A fraction outside `[0, 1]` is a mistake rather than an intent, and open is where it is
+/// caught — a window wider than the interval would schedule a flush before the memtable exists.
+TEST_F(FlushIntervalTest, AnOutOfRangeJitterIsRejectedAtOpen) {
+    auto opened = DB::open_with_result(options_with_interval(std::chrono::milliseconds(1000),
+                                                             BackgroundMode::Inline, 1.5));
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error(), Status::Config);
 }
 
 }  // namespace

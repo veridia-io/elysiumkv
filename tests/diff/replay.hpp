@@ -46,6 +46,10 @@ struct ReplayConfig {
     /// the same stream without it — a trigger that fired on the wrong file, or dropped a live key
     /// while reclaiming a tombstone, is a difference the oracle sees and a picker unit test does
     /// not, because the unit test never replays the compaction it asked for.
+    /// `Options::age_jitter`. **Changes when a file crosses to a colder tier, and nothing else** —
+    /// every answer must be identical to the same stream without it, which is the property. Only
+    /// meaningful alongside a tier that bounds age.
+    double jitter = 0.0;
     double tombstone_density_trigger = 0.0;
     /// ARCHITECTURE.md "A process-wide memory budget" — a shared `MemoryBudget` of this size, or none when zero.
     ///
