@@ -348,6 +348,43 @@ std::future<Result<std::vector<uint64_t>>> S3ManifestCatalog::list_edits(uint64_
     return make_ready_future(Result<std::vector<uint64_t>>(std::move(seqs)));
 }
 
+std::future<Result<std::vector<uint64_t>>> S3ManifestCatalog::list_generations() {
+    const std::string prefix = impl_->key("gen-");
+
+    std::vector<uint64_t> generations;
+    std::string token;
+    do {
+        Aws::S3::Model::ListObjectsV2Request request;
+        request.SetBucket(impl_->options.bucket);
+        request.SetPrefix(prefix);
+        // One entry per generation instead of one per object: the contents are irrelevant here,
+        // and a long-lived store holds a thousand edits per generation.
+        request.SetDelimiter("/");
+        if (!token.empty()) request.SetContinuationToken(token);
+
+        auto outcome = impl_->client->ListObjectsV2(request);
+        if (!outcome.IsSuccess()) {
+            return make_ready_future(Result<std::vector<uint64_t>>(std::unexpected(Status::Io)));
+        }
+        for (const auto& common : outcome.GetResult().GetCommonPrefixes()) {
+            const std::string& name = common.GetPrefix();
+            const size_t dash = name.rfind("gen-");
+            if (dash == std::string::npos) continue;
+            uint64_t generation = 0;
+            const char* begin = name.data() + dash + 4;
+            const char* end = name.data() + name.size();
+            if (std::from_chars(begin, end, generation).ec == std::errc()) {
+                generations.push_back(generation);
+            }
+        }
+        token = outcome.GetResult().GetIsTruncated()
+                    ? outcome.GetResult().GetNextContinuationToken()
+                    : std::string();
+    } while (!token.empty());
+
+    return make_ready_future(Result<std::vector<uint64_t>>(std::move(generations)));
+}
+
 std::future<Status> S3ManifestCatalog::delete_generation(uint64_t generation) {
     // Scoped by the generation's own prefix, so it cannot reach another
     // generation's objects however the naming evolves.

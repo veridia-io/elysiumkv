@@ -2235,6 +2235,8 @@ Status DbImpl::sweep_orphans() {
             reclaimed += collectable.size();
         }
     }
+    reclaimed += sweep_stale_generations(now);
+
     // One line per sweep rather than one per store: the number an operator watches is how much
     // this store is leaking, and a sweep that reclaimed nothing is the ordinary case and silent.
     if (reclaimed != 0) {
@@ -2242,6 +2244,65 @@ Status DbImpl::sweep_orphans() {
                            " object(s) unreferenced for at least ", retention, " ms");
     }
     return Status::Ok;
+}
+
+/// **Nothing else reclaims a manifest generation.** The roll writes the new snapshot, installs the
+/// pointer, then deletes the previous generation — so a crash between the last two leaves that
+/// generation's snapshot and up to `manifest_edits_per_generation` edits behind for ever. The
+/// orphan sweep lists blob stores only, and the catalog has no listing operation it is required to
+/// provide. On DynamoDB that is dead items, on S3 dead objects, and neither shows up anywhere.
+///
+/// **"Below the live pointer" is a positive statement**, unlike an unreferenced object: the pointer
+/// is authoritative about generations, so nothing has to be inferred from absence and the sweep's
+/// usual argument about a concurrent writer does not arise. What does arise is a *reader*, which
+/// may be part way through loading a generation this is about to delete — four round trips against
+/// a manifest that moves — so the same `obsolete_retention` that defers deleting an object on a
+/// reader's behalf defers this too. A reader that loses the race retries and lands on the live
+/// generation; the window is what keeps that rare rather than routine.
+uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
+    const uint64_t live = versions_->generation();
+    if (live == 0) return 0;
+
+    auto listed = options_.manifest_catalog->list_generations().get();
+    std::vector<uint64_t> candidates;
+    if (listed) {
+        for (const uint64_t generation : *listed) {
+            if (generation < live) candidates.push_back(generation);
+        }
+    } else if (listed.error() == Status::Unsupported) {
+        // **The fallback, and its limit stated rather than discovered.** Without a listing the only
+        // way to find a generation is to ask for it, so this probes a short window below the live
+        // one. That covers what a crash during a roll leaves — the previous generation — and
+        // cannot see a leak from further back.
+        constexpr uint64_t kProbeWindow = 4;
+        for (uint64_t back = 1; back <= kProbeWindow && back <= live; ++back) {
+            const uint64_t generation = live - back;
+            if (generation == 0) break;
+            if (options_.manifest_catalog->get_snapshot(generation).get().has_value()) {
+                candidates.push_back(generation);
+            }
+        }
+    } else {
+        return 0;   // failure to look is not evidence of absence
+    }
+
+    const auto retention = static_cast<uint64_t>(options_.obsolete_retention.value_or(Duration(0)).count());
+    std::map<uint64_t, uint64_t> still_present;
+    uint64_t reclaimed = 0;
+    for (const uint64_t generation : candidates) {
+        const auto previous = stale_generation_first_seen_.find(generation);
+        const uint64_t first_seen = previous == stale_generation_first_seen_.end() ? now
+                                                                                  : previous->second;
+        if (now >= first_seen && now - first_seen >= retention) {
+            if (options_.manifest_catalog->delete_generation(generation).get() == Status::Ok) {
+                ++reclaimed;
+            }
+        } else {
+            still_present.emplace(generation, first_seen);
+        }
+    }
+    stale_generation_first_seen_ = std::move(still_present);
+    return reclaimed;
 }
 
 Status DbImpl::verify_stores_and_discard() {

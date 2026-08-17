@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <system_error>
 
@@ -31,6 +32,22 @@ bool parse_current(const std::string& text, CurrentFile& out) {
     if (ec1 != std::errc() || after_generation == end || *after_generation != ' ') return false;
     auto [after_token, ec2] = std::from_chars(after_generation + 1, end, out.token);
     return ec2 == std::errc();
+}
+
+/// Strict: every character a digit, and no overflow. A name that is not ours must be left alone
+/// rather than guessed at.
+bool parse_u64(const std::string& text, uint64_t& out) {
+    if (text.empty()) return false;
+    uint64_t value = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') return false;
+        if (value > (std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(c - '0')) / 10) {
+            return false;
+        }
+        value = value * 10 + static_cast<uint64_t>(c - '0');
+    }
+    out = value;
+    return true;
 }
 
 std::string generation_name(uint64_t generation) {
@@ -177,6 +194,26 @@ std::future<Status> DiskManifestCatalog::put_edit(uint64_t generation, uint64_t 
 
 std::future<GetResult> DiskManifestCatalog::get_edit(uint64_t generation, uint64_t seq) {
     return make_ready_future(read_object(generation_dir(generation) / edit_name(seq)));
+}
+
+std::future<Result<std::vector<uint64_t>>> DiskManifestCatalog::list_generations() {
+    std::error_code ec;
+    fs::directory_iterator it(directory_ / "manifest", ec);
+    if (ec) {
+        // No manifest directory is no generations, not a failure: the store may not exist yet.
+        return make_ready_future(Result<std::vector<uint64_t>>(std::vector<uint64_t>{}));
+    }
+
+    std::vector<uint64_t> generations;
+    for (const fs::directory_entry& entry : it) {
+        if (!entry.is_directory()) continue;   // CURRENT is a file
+        const std::string name = entry.path().filename().string();
+        if (name.size() != 12) continue;
+        uint64_t generation = 0;
+        if (!parse_u64(name, generation)) continue;   // not ours to reason about
+        generations.push_back(generation);
+    }
+    return make_ready_future(Result<std::vector<uint64_t>>(std::move(generations)));
 }
 
 std::future<Result<std::vector<uint64_t>>> DiskManifestCatalog::list_edits(uint64_t generation) {

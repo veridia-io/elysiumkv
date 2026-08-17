@@ -59,6 +59,14 @@ public:
     std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override;
     std::future<Status> delete_generation(uint64_t generation) override;
 
+    // **`list_generations` is deliberately not overridden here.** The sort key is
+    // `gen#{generation}#edit#{seq}`, so the generation varies in the middle and no prefix query
+    // selects snapshots alone — enumerating would read every edit item, up to
+    // `manifest_edits_per_generation` of them per generation, and DynamoDB charges for items read
+    // rather than returned. The engine's fallback probes a short window below the live pointer
+    // with one `GetItem` each, which finds what a crash during a roll leaves and costs almost
+    // nothing. A leak from further back stays.
+
     ~DynamoManifestCatalog() override;
 
     DynamoManifestCatalog(const DynamoManifestCatalog&) = delete;
