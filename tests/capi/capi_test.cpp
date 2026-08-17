@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -546,8 +547,8 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     EXPECT_LE(buffer[24], 1u) << "requires_recovery is a 0/1 byte";
     for (size_t i = 25; i < 32; ++i) EXPECT_EQ(buffer[i], 0u) << "header padding at " << i;
 
-    // The two appended fields, at the offsets metrics-spec.md fixed once so that whichever
-    // feature landed second would not move the first.
+    // The two appended fields, at the offsets FORMAT.md §7 fixes so that whichever feature
+    // landed second would not move the first.
     EXPECT_LE(buffer[208], 1u) << "watermark_present is a 0/1 byte";
     EXPECT_EQ(buffer[208], 0u) << "no watermark has been set on this store";
     for (size_t i = 209; i < 216; ++i) EXPECT_EQ(buffer[i], 0u) << "watermark padding at " << i;

@@ -417,7 +417,7 @@ private:
     const ResolvedLevel& level_config(int level) const;
     uint64_t now_ms() const { return options_.clock(); }
 
-    // --- diagnostics (docs/logger-spec.md)
+    // --- diagnostics
     bool logger_enabled(LogLevel level) const {
         return options_.logger != nullptr && options_.logger->write != nullptr &&
                level >= options_.min_log_level;
