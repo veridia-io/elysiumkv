@@ -4,6 +4,7 @@
 #include "version/version_edit.hpp"
 
 #include <map>
+#include <optional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,11 +18,13 @@ class Version {
 public:
     Version() = default;
     Version(std::vector<std::vector<FileMetadata>> levels, uint64_t next_file_number,
-            std::map<int, std::string> compaction_pointers, std::string truncation_point = {})
+            std::map<int, std::string> compaction_pointers, std::string truncation_point = {},
+            std::optional<WatermarkFloor> watermark_floor = std::nullopt)
         : levels_(std::move(levels)),
           next_file_number_(next_file_number),
           compaction_pointers_(std::move(compaction_pointers)),
-          truncation_point_(std::move(truncation_point)) {
+          truncation_point_(std::move(truncation_point)),
+          watermark_floor_(watermark_floor) {
         carries_ranges_.resize(levels_.size(), false);
         for (size_t level = 0; level < levels_.size(); ++level) {
             for (const FileMetadata& file : levels_[level]) {
@@ -61,6 +64,23 @@ public:
     /// which already pins a Version for its lifetime, keeps reading the world as it was when it
     /// started — the same rule that keeps its files alive.
     const std::string& truncation_point() const { return truncation_point_; }
+
+    /// **How far this store can still certify its embedder's log, when the files alone would
+    /// over-report it.**
+    ///
+    /// Recovery normally answers that from the files: with nothing discarded, `max(high)` over
+    /// them is the newest established watermark and every write below it is still in some file.
+    /// That argument has a premise — *no state was lost* — and a discard falsifies it permanently,
+    /// while `anything_discarded` only ever describes the recovery that observed it. The discard
+    /// is itself a manifest edit that removes the lost files, so by the *next* open there is no
+    /// lost set left to reason from and `max(high)` is taken again, reporting a frontier the store
+    /// can no longer support. Writes above the true floor lived only in the discarded files.
+    ///
+    /// So the one number the loss produced is written down in the same edit that removes them.
+    /// Monotone, and raised by each file flushed afterwards to that file's `high`: raising rather
+    /// than clearing is what makes a *partial* replay safe, since a crash after re-materialising
+    /// only part of the gap must not restore the old, higher answer.
+    std::optional<WatermarkFloor> watermark_floor() const { return watermark_floor_; }
     bool truncated(Slice key) const {
         return !truncation_point_.empty() && key < Slice::from(truncation_point_);
     }
@@ -149,6 +169,7 @@ private:
     uint64_t next_file_number_ = 1;
     std::map<int, std::string> compaction_pointers_;
     std::string truncation_point_;
+    std::optional<WatermarkFloor> watermark_floor_;
 };
 
 }  // namespace elysiumkv

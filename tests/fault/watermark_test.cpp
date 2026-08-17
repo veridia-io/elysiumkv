@@ -520,6 +520,257 @@ TEST_F(WatermarkTest, ADiscardRollsBackBelowTheLostFilesLowerBound) {
            "reporting a surviving file's watermark (50) would be safe but needlessly low";
 }
 
+/* **Does the rollback survive the restart that follows it?** `resume_after` branches on
+ * `anything_discarded`, which is derived from the files present at *this* recovery. A later
+ * recovery that discards nothing takes `max(high)` over survivors — and the justification for that
+ * is "no state was lost", which the earlier discard falsified.
+ *
+ * The existing discard cases all have a survivor whose `high` sits *below* the rollback position,
+ * so they cannot see this. Here a durable file certified to 140 outlives a transient file that
+ * covered 81..100, and the question is what the second reopen reports.
+ */
+TEST_F(WatermarkTest, ARollbackIsNotForgottenByTheNextReopen) {
+    Options options = transient_options();
+    {
+        auto db = open(options);
+        ASSERT_NE(db, nullptr);
+
+        // An old durable file, certified low.
+        ASSERT_EQ(db->set_watermark(10), Status::Ok);
+        write(*db, 0, 60, "old");
+        ASSERT_EQ(db->set_watermark(20), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+        now_ += 300'000;
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        rotate_memtable(*db);
+
+        // The file that will be lost: a disjoint key range, so a later compaction need not take it.
+        ASSERT_EQ(db->set_watermark(80), Status::Ok);
+        write(*db, 1000, 40, "lost");
+        ASSERT_EQ(db->set_watermark(100), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+
+        // A younger file overlapping the *old* one, so compacting it down produces an output
+        // placed by the old file's age — durable — while carrying this file's high.
+        ASSERT_EQ(db->set_watermark(120), Status::Ok);
+        write(*db, 0, 60, "young");
+        ASSERT_EQ(db->set_watermark(140), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+
+    }
+
+    wipe(store_.store(0));
+    std::optional<uint64_t> after_discard;
+    {
+        auto reopened = open(options);
+        ASSERT_NE(reopened, nullptr);
+        ASSERT_GT(discarded_files_, 0u) << "nothing was discarded, so this proves nothing";
+        after_discard = reopened->recovered_watermark();
+        ASSERT_TRUE(after_discard.has_value());
+        EXPECT_EQ(*after_discard, 80u) << "the lost file's lower bound, which is correct";
+    }
+
+    auto again = open(options);
+    ASSERT_NE(again, nullptr);
+    ASSERT_TRUE(again->recovered_watermark().has_value());
+    EXPECT_LE(*again->recovered_watermark(), *after_discard)
+        << "the frontier moved forward across a restart that added nothing: reported "
+        << *again->recovered_watermark() << " having rolled back to " << *after_discard
+        << ". Writes at 81..100 lived only in the discarded file";
+}
+
+/* **A partial replay earns nothing.** The floor stands until the embedder says its replay is
+ * finished, so a crash part-way through comes back to exactly where the loss left it and repeats
+ * the work. That costs a replay of ground already covered; crediting the progress instead would
+ * mean trusting files that are themselves sitting on the tier that just failed.
+ */
+TEST_F(WatermarkTest, APartialReplayLeavesTheFloorWhereTheLossPutIt) {
+    Options options = transient_options();
+    {
+        auto db = open(options);
+        ASSERT_NE(db, nullptr);
+        ASSERT_EQ(db->set_watermark(10), Status::Ok);
+        write(*db, 0, 60, "old");
+        ASSERT_EQ(db->set_watermark(20), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+        now_ += 300'000;
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        rotate_memtable(*db);
+
+        ASSERT_EQ(db->set_watermark(80), Status::Ok);
+        write(*db, 1000, 40, "lost");
+        ASSERT_EQ(db->set_watermark(100), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+
+        ASSERT_EQ(db->set_watermark(120), Status::Ok);
+        write(*db, 0, 60, "young");
+        ASSERT_EQ(db->set_watermark(140), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+    }
+
+    wipe(store_.store(0));
+    {
+        auto reopened = open(options);
+        ASSERT_NE(reopened, nullptr);
+        ASSERT_GT(discarded_files_, 0u);
+        ASSERT_EQ(*reopened->recovered_watermark(), 80u);
+
+        // Part of the gap re-materialised, and then the process dies without declaring the
+        // replay complete.
+        write(*reopened, 1000, 40, "replayed");
+        ASSERT_EQ(reopened->set_watermark(90), Status::Ok);
+        ASSERT_EQ(reopened->flush(), Status::Ok);
+    }
+
+    auto again = open(options);
+    ASSERT_NE(again, nullptr);
+    ASSERT_TRUE(again->recovered_watermark().has_value());
+    EXPECT_EQ(*again->recovered_watermark(), 80u)
+        << "an unfinished replay earns no credit; the gap is replayed from the start again";
+}
+
+/* And the floor goes when the embedder says the replay is done — durably, or the next open would
+ * pin the frontier at the loss for ever and replay the same ground on every restart.
+ */
+TEST_F(WatermarkTest, DeclaringTheReplayCompleteRemovesTheFloorForGood) {
+    Options options = transient_options();
+    {
+        auto db = open(options);
+        ASSERT_NE(db, nullptr);
+        ASSERT_EQ(db->set_watermark(10), Status::Ok);
+        write(*db, 0, 60, "old");
+        ASSERT_EQ(db->set_watermark(20), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+        now_ += 300'000;
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        rotate_memtable(*db);
+
+        ASSERT_EQ(db->set_watermark(80), Status::Ok);
+        write(*db, 1000, 40, "lost");
+        ASSERT_EQ(db->set_watermark(100), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+
+        ASSERT_EQ(db->set_watermark(120), Status::Ok);
+        write(*db, 0, 60, "young");
+        ASSERT_EQ(db->set_watermark(140), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+    }
+
+    wipe(store_.store(0));
+    {
+        auto reopened = open(options);
+        ASSERT_NE(reopened, nullptr);
+        ASSERT_GT(discarded_files_, 0u);
+        ASSERT_EQ(*reopened->recovered_watermark(), 80u);
+
+        write(*reopened, 1000, 40, "replayed");
+        ASSERT_EQ(reopened->set_watermark(200), Status::Ok);
+        ASSERT_EQ(reopened->flush(), Status::Ok);
+        ASSERT_EQ(reopened->mark_recovery_complete(), Status::Ok);
+    }
+
+    auto again = open(options);
+    ASSERT_NE(again, nullptr);
+    ASSERT_TRUE(again->recovered_watermark().has_value());
+    EXPECT_EQ(*again->recovered_watermark(), 200u)
+        << "with the gap declared filled the files speak for themselves again";
+}
+
+/* **The replay is written to the tier that just failed.** After a discard the embedder
+ * re-materialises the gap, and everything it writes is newly written — so it is the *youngest*
+ * data in the store and lands squarely on the transient tier. Lose that tier again before the
+ * replay has aged off it, and the replay goes with it.
+ *
+ * The floor cannot be monotone upward for this reason. The first replay certified 90 and raised it
+ * there; the second loss took the file that justified 90, so the floor has to come back down to
+ * what the surviving data still supports. A floor that only rose would certify a position whose
+ * evidence had been destroyed twice, and the durable survivor's `high` of 140 is sitting right
+ * there ready to be believed.
+ */
+TEST_F(WatermarkTest, LosingTheReplayItselfRollsTheFloorBackDown) {
+    Options options = transient_options();
+    {
+        auto db = open(options);
+        ASSERT_NE(db, nullptr);
+
+        // A durable survivor certified far above anything that will be lost.
+        ASSERT_EQ(db->set_watermark(10), Status::Ok);
+        write(*db, 0, 60, "old");
+        ASSERT_EQ(db->set_watermark(20), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+        now_ += 300'000;
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        rotate_memtable(*db);
+
+        ASSERT_EQ(db->set_watermark(80), Status::Ok);
+        write(*db, 1000, 40, "lost");
+        ASSERT_EQ(db->set_watermark(100), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+
+        ASSERT_EQ(db->set_watermark(120), Status::Ok);
+        write(*db, 0, 60, "young");
+        ASSERT_EQ(db->set_watermark(140), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);   // lifts high=140 onto the durable survivor
+    }
+
+    // First loss.
+    wipe(store_.store(0));
+    {
+        auto reopened = open(options);
+        ASSERT_NE(reopened, nullptr);
+        ASSERT_GT(discarded_files_, 0u);
+        ASSERT_TRUE(reopened->recovered_watermark().has_value());
+        ASSERT_EQ(*reopened->recovered_watermark(), 80u);
+
+        // The embedder replays part of the gap and flushes. This lands on the transient tier.
+        write(*reopened, 1000, 40, "replayed");
+        ASSERT_EQ(reopened->set_watermark(90), Status::Ok);
+        ASSERT_EQ(reopened->flush(), Status::Ok);
+    }
+
+    // Second loss, before the replay ever aged off the tier it was written to.
+    discarded_files_ = 0;
+    wipe(store_.store(0));
+    {
+        auto twice = open(options);
+        ASSERT_NE(twice, nullptr);
+        ASSERT_GT(discarded_files_, 0u) << "the replay must be what is lost this time";
+        ASSERT_TRUE(twice->recovered_watermark().has_value());
+        EXPECT_EQ(*twice->recovered_watermark(), 80u)
+            << "the replay is gone, so the frontier is back where the first loss left it";
+    }
+
+    // And the reopen after that must not recover the 90 the lost replay had certified, nor the
+    // durable survivor's 140.
+    auto again = open(options);
+    ASSERT_NE(again, nullptr);
+    ASSERT_TRUE(again->recovered_watermark().has_value());
+    EXPECT_EQ(*again->recovered_watermark(), 80u)
+        << "a floor that only ever rose would report 90 here, certifying data lost twice";
+}
+
+/* **Why there is no scenario case for "the loss certifies nothing".** A file with no lower bound
+ * can only be the first one ever written — a memtable that predates every `set_watermark` — so it
+ * is also the oldest, and the oldest is what migrates off a transient tier first. For it to be
+ * *discarded* it must still be on that tier, and then no older file exists to have survived onto
+ * the durable one; a compaction that could carry its data to safety consumes it. So the state is
+ * reachable, but never alongside a survivor whose `high` could over-report, which is the only
+ * thing the floor protects against.
+ *
+ * It is still recorded rather than left absent, because "no loss recorded" and "a loss that
+ * certifies nothing" have opposite meanings for the next open, and the encoding should not make
+ * that distinction depend on an argument about tier ordering. The round trip is pinned in
+ * `WireFormat`; the monotone raise is pinned above.
+ */
+
 // The `w_high`-is-unsafe case stated on its own, because it is the specific mistake the interval
 // exists to prevent and the control is the rule that takes the high.
 TEST_F(WatermarkTest, TheLostFilesUpperBoundWouldOverReport) {

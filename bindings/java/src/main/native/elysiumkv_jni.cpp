@@ -1047,8 +1047,8 @@ jint JNICALL stats_snapshot(JNIEnv* env, jclass, jlong db, jbyteArray out) {
                  jint{0});
 }
 
-void JNICALL mark_recovery_complete(JNIEnv*, jclass, jlong db) {
-    elysiumkv_mark_recovery_complete(as_db(db));
+void JNICALL mark_recovery_complete(JNIEnv* env, jclass, jlong db) {
+    guard_void(env, [&] { check(env, elysiumkv_mark_recovery_complete(as_db(db))); });
 }
 
 // --- watermark ----------------------------------------------------------------

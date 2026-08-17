@@ -267,7 +267,7 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     const std::string content = framed.substr(0, content_len);
 
     size_t at = 0;
-    EXPECT_EQ(take_varint(content, at), 5u) << "format_version";
+    EXPECT_EQ(take_varint(content, at), 6u) << "format_version";
     EXPECT_EQ(take_varint(content, at), 4243u) << "next_file_number";
     ASSERT_EQ(take_varint(content, at), 1u) << "added_count";
 
@@ -298,7 +298,75 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     EXPECT_EQ(take_string(content, at), "mmm");
 
     EXPECT_EQ(take_string(content, at), "ttt") << "truncation_point";
+    EXPECT_EQ(take_varint(content, at), 0u) << "watermark floor state: none recorded";
+    EXPECT_EQ(take_varint(content, at), 0u) << "watermark floor position";
     EXPECT_EQ(at, content.size()) << "no unaccounted bytes in the record";
+}
+
+/// An edit's instruction about the floor has **three** meanings, and they are not interchangeable:
+/// almost every edit says nothing, a discard installs a floor, and the embedder declaring its
+/// replay finished removes one. Collapsing "say nothing" into "clear" would have every ordinary
+/// flush quietly discharge a loss.
+TEST(WireFormat, TheFloorInstructionsThreeMeaningsRoundTrip) {
+    struct Case {
+        VersionEdit::FloorUpdate update;
+        WatermarkFloor floor;
+    };
+    const Case cases[] = {
+        {VersionEdit::FloorUpdate::Silent, {}},
+        {VersionEdit::FloorUpdate::Set, WatermarkFloor{std::optional<uint64_t>(0)}},
+        {VersionEdit::FloorUpdate::Set, WatermarkFloor{std::optional<uint64_t>(4242)}},
+        {VersionEdit::FloorUpdate::Set, WatermarkFloor{std::nullopt}},
+        {VersionEdit::FloorUpdate::Clear, {}},
+    };
+
+    for (const Case& c : cases) {
+        VersionEdit edit;
+        edit.next_file_number = 7;
+        edit.floor_update = c.update;
+        edit.watermark_floor = c.floor;
+        auto decoded = decode_version_edit(Slice::from(encode_version_edit(edit)));
+        ASSERT_TRUE(decoded.has_value());
+        EXPECT_EQ(decoded->floor_update, c.update);
+        if (c.update == VersionEdit::FloorUpdate::Set) {
+            EXPECT_EQ(decoded->watermark_floor, c.floor);
+        }
+    }
+}
+
+/// The snapshot carries the resulting state, where **zero is a valid position** — so neither
+/// "certifies nothing" nor "no loss recorded" can be inferred from the value.
+TEST(WireFormat, TheWatermarkFloorsStatesRoundTripInASnapshot) {
+    const std::optional<WatermarkFloor> states[] = {
+        std::nullopt,
+        WatermarkFloor{std::optional<uint64_t>(0)},
+        WatermarkFloor{std::optional<uint64_t>(4242)},
+        WatermarkFloor{std::nullopt},
+    };
+    for (const auto& floor : states) {
+        VersionSnapshot snapshot;
+        snapshot.next_file_number = 7;
+        snapshot.watermark_floor = floor;
+        auto back = decode_version_snapshot(Slice::from(encode_version_snapshot(snapshot)));
+        ASSERT_TRUE(back.has_value());
+        EXPECT_EQ(back->watermark_floor, floor);
+    }
+}
+
+/// **It never rises.** A replay's own files are the youngest in the store and sit on the tier that
+/// just failed, so crediting them would certify a position the next loss could destroy again. It
+/// only ever comes down, and is removed in one step when the replay is declared complete.
+TEST(WireFormat, TheWatermarkFloorOnlyEverFalls) {
+    WatermarkFloor floor{std::optional<uint64_t>(140)};
+
+    floor.lower_to(200);
+    EXPECT_EQ(*floor.position, 140u) << "a loss above the floor tells us nothing new";
+    floor.lower_to(80);
+    EXPECT_EQ(*floor.position, 80u);
+    floor.lower_to(std::nullopt);
+    EXPECT_FALSE(floor.position.has_value()) << "nothing certifiable is absorbing";
+    floor.lower_to(50);
+    EXPECT_FALSE(floor.position.has_value());
 }
 
 TEST(WireFormat, ManifestSnapshotIsZstdFramedAndRoundTrips) {

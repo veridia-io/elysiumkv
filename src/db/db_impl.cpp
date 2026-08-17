@@ -403,6 +403,20 @@ void DbImpl::adopt_recovered_watermark() {
     }
     recovered_watermark_ = recovery_watermark_.resume_after();
 
+    // **A loss recorded by an earlier recovery still binds this one.** `resume_after` reasons from
+    // the files present now, and with nothing discarded it trusts `max(high)` over them — an
+    // argument whose premise is that no state was ever lost. The discard that falsified it also
+    // erased the evidence, so the floor is what carries it forward. See `Version::watermark_floor`.
+    if (auto floor = versions_->current()->watermark_floor()) {
+        if (!floor->position.has_value()) {
+            recovered_watermark_ = std::nullopt;
+        } else if (recovered_watermark_.has_value()) {
+            recovered_watermark_ = std::min(*recovered_watermark_, *floor->position);
+        } else {
+            recovered_watermark_ = floor->position;
+        }
+    }
+
     // The recovered position is an established watermark: the embedder resumes strictly after it,
     // so every write this run accepts is at a later position. Seeding the live memtable with it
     // is what stops each restart from minting a file with no lower bound — a file that would
@@ -1180,6 +1194,9 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     file.watermark = memtable->watermark();
 
     VersionEdit edit;
+    // **A flush does not touch the floor**, deliberately — see `WatermarkFloor::lower_to`. Files
+    // written during a replay are the youngest data in the store and sit on the tier that just
+    // failed, so crediting them would certify a position the next loss could destroy again.
     edit.added.push_back(std::move(file));
     if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) return status;
 
@@ -1818,6 +1835,23 @@ std::shared_ptr<SkiplistMemtable> DbImpl::new_memtable() {
     return memtable;
 }
 
+Status DbImpl::mark_recovery_complete() {
+    requires_recovery_.store(false);
+
+    // A reader never discarded anything — `verify_stores_and_discard` refuses to on a read-only
+    // instance — so it has no floor to remove and no authority to write one away.
+    if (read_only_) return Status::Ok;
+    if (!versions_->current()->watermark_floor().has_value()) return Status::Ok;
+
+    // **Cleared outright rather than raised to what the replay reached.** The floor exists because
+    // the files over-report after a loss; the embedder saying its replay is done is the one signal
+    // that they no longer do. Anything short of that leaves it standing, so a crash mid-replay
+    // repeats the replay rather than half-crediting it.
+    VersionEdit edit;
+    edit.floor_update = VersionEdit::FloorUpdate::Clear;
+    return versions_->apply(std::move(edit));
+}
+
 Status DbImpl::set_watermark(uint64_t position) {
     if (read_only_) return Status::Config;
     if (unusable_.load()) return Status::Unusable;
@@ -2306,6 +2340,20 @@ Status DbImpl::verify_stores_and_discard() {
             // recovery time — precisely because those files are what was lost.
             recovery_watermark_.observe_discarded(file.watermark);
         }
+
+        // **The one number the loss produced, written down in the edit that erases its evidence.**
+        // After this edit the discarded files are gone from the manifest, so the next open has no
+        // lost set to reason from and would fall back to `max(high)` over survivors — which is
+        // sound only while nothing has ever been lost. See `Version::watermark_floor`.
+        //
+        // Recorded even when the loss certifies *nothing* — a discarded file with no lower bound
+        // at all. Leaving that unrecorded would be indistinguishable from "no loss has happened",
+        // which is exactly the state that sends the next open back to trusting `max(high)`.
+        WatermarkFloor floor = versions_->current()->watermark_floor().value_or(
+            WatermarkFloor{recovery_watermark_.discarded_lower_bound()});
+        floor.lower_to(recovery_watermark_.discarded_lower_bound());
+        edit.floor_update = VersionEdit::FloorUpdate::Set;
+        edit.watermark_floor = floor;
         if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) return status;
 
         discarded_stores_.push_back(store_id);

@@ -200,7 +200,18 @@ public:
     virtual std::optional<uint64_t> recovered_watermark() const = 0;
 
     virtual Stats stats() const = 0;
-    virtual void mark_recovery_complete() = 0;
+    /// **The embedder declaring its replay finished.** Discharges `requires_recovery`, and
+    /// removes the watermark floor a discard installed — from that point the files cover the gap
+    /// again and recovery may go back to reading its frontier from them.
+    ///
+    /// Returns a `Status` because clearing the floor is a manifest write: the whole value of the
+    /// floor is that it survives a crash, so removing it has to as well. A failure here leaves the
+    /// floor in place, which costs a repeated replay and loses nothing.
+    ///
+    /// **Call it only when the replay is complete.** Calling it early tells the engine that a gap
+    /// it knows about has been filled when it has not, which is the one lie this mechanism cannot
+    /// detect.
+    virtual Status mark_recovery_complete() = 0;
 
     virtual ~ReadOnlyDB() = default;
 

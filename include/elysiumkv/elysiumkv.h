@@ -697,7 +697,7 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_stats_snapshot(const elysiumkv_db*, uin
                                                   size_t* out_bytes);
 
 /* Clears requires_recovery after a discard (ARCHITECTURE.md "A tier is not a level"). The only way to clear it. */
-ELYSIUMKV_API void elysiumkv_mark_recovery_complete(elysiumkv_db*);
+ELYSIUMKV_API elysiumkv_status elysiumkv_mark_recovery_complete(elysiumkv_db*);
 
 /* --- watermark --------------------------------------------------------------
  *
