@@ -346,7 +346,7 @@ class AbiCoverageTest {
         Path abandonDir = dir.resolve("abandon");
         Files.createDirectories(abandonDir);
         try (TestSupport support = new TestSupport(abandonDir)) {
-            ElysiumKV db = ElysiumKV.open(support.options());
+            ElysiumKV db = support.own(ElysiumKV.open(support.options()));
             db.put("k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8));
             exercise("closeWithoutFlush");
             db.closeWithoutFlush();
