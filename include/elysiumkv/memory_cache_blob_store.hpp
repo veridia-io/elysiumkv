@@ -64,6 +64,7 @@ public:
     size_t cached_bytes() const;
     uint64_t hits() const override;
     uint64_t misses() const override;
+    void invalidate(std::string_view name) override;
 
     struct Impl;
 

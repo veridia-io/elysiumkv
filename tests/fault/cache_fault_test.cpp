@@ -9,6 +9,8 @@
 
 #include "fault/fault_injecting_blob_store.hpp"
 
+#include "sst/sst_reader.hpp"
+#include "sst/sst_writer.hpp"
 #include "support/test_db.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
@@ -19,7 +21,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -142,6 +146,86 @@ TEST_F(CacheFaultTest, AFailedPutCachesNothing) {
 /// A whole database over the chain, with the store below failing and recovering. ARCHITECTURE.md "A tier is not a level" — a
 /// store that cannot answer is not a store that lost data — and a cache in the way must
 /// not change that verdict either way.
+/// **A rotted cache is not a corrupt store.** Only the block layer runs the checksum, so a cached
+/// copy that was truncated or flipped surfaced as `Status::Corrupt` for the *store* while the
+/// authoritative object was untouched — which sends an operator to a restore for a healthy store,
+/// and breaks the promise the cache design rests on: a cache may be absent, never wrong.
+///
+/// **A test double rather than `DiskCacheBlobStore`**, deliberately. That one is checked by
+/// `verify_cache_hit`, which re-fetches every hit and aborts on a mismatch — so under the debug and
+/// sanitizer presets it catches the rot itself and this path is never reached. It is compiled out
+/// in release, which is precisely where the repair below is the only thing standing between a bad
+/// chunk and a false corruption report.
+TEST_F(CacheFaultTest, ACorruptCachedBlockIsRepairedFromTheAuthority) {
+    /// Serves the delegate's bytes with one flipped, until it is told to forget the object.
+    class RottingCache final : public CacheBlobStore {
+    public:
+        explicit RottingCache(std::shared_ptr<BlobStore> delegate)
+            : delegate_(std::move(delegate)) {}
+
+        BlobStore& delegate() override { return *delegate_; }
+        size_t max_cache_bytes() const override { return 0; }
+        bool cache_on_write() const override { return false; }
+        uint64_t hits() const override { return 0; }
+        uint64_t misses() const override { return 0; }
+
+        void invalidate(std::string_view) override {
+            ++invalidations;
+            rotting = false;   // forgetting the bad copy is what invalidation means
+        }
+
+        std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
+            auto bytes = delegate_->get(name, offset, len).get();
+            if (rotting && bytes && !bytes->empty()) {
+                (*bytes)[bytes->size() / 2] ^= 0xFF;
+            }
+            return make_ready_future(std::move(bytes));
+        }
+        std::future<Status> put(std::string_view name, Slice bytes) override {
+            return delegate_->put(name, bytes);
+        }
+        std::future<Status> remove(std::string_view name) override {
+            return delegate_->remove(name);
+        }
+        std::future<ListResult> list(std::string_view prefix) override {
+            return delegate_->list(prefix);
+        }
+
+        bool rotting = false;
+        int invalidations = 0;
+
+    private:
+        std::shared_ptr<BlobStore> delegate_;
+    };
+
+    SstWriter writer({.bloom_bits_per_key = 10, .compression = Compression::None});
+    for (int i = 0; i < 2000; ++i) {
+        char key[32];
+        std::snprintf(key, sizeof(key), "key:%06d", i);
+        writer.add(Slice::from(std::string_view(key)), ValueType::Put,
+                   Slice::from(std::string(64, 'v')));
+    }
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(local_->put("000000000001.sst", Slice::from(built->bytes)).get(), Status::Ok);
+
+    auto cache = std::make_shared<RottingCache>(local_);
+    auto reader = SstReader::open(*cache, "000000000001.sst", built->bytes.size(),
+                                  {.block_bytes = 512});
+    ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+
+    // Warm, so the footer and index are resident: those are read outside `load_block` and are a
+    // different path. What is under test is a data block.
+    ASSERT_TRUE((*reader)->get(Slice::from(std::string("key:000000"))).has_value());
+
+    cache->rotting = true;
+    auto found = (*reader)->get(Slice::from(std::string("key:001000")));
+    ASSERT_TRUE(found.has_value())
+        << "a rotted cache reported the store as " << status_name(found.error());
+    EXPECT_TRUE(found->has_value()) << "the authority holds this key, so the retry must find it";
+    EXPECT_GT(cache->invalidations, 0) << "the bad copy must be forgotten, not merely bypassed";
+}
+
 TEST_F(CacheFaultTest, ADatabaseOverACachedChainSurvivesAnOutage) {
     auto catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
     Options options;

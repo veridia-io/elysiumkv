@@ -216,10 +216,37 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
 
     auto raw = store_.get(name_, handle.offset, handle.length).get();
     if (!raw) return std::unexpected(raw.error());
-    if (raw->size() != handle.length) return std::unexpected(Status::Corrupt);
 
-    auto content = unframe_block(Slice::from(*raw), max_uncompressed());
-    if (!content) return std::unexpected(content.error());
+    auto content = raw->size() == handle.length
+                       ? unframe_block(Slice::from(*raw), max_uncompressed())
+                       : Result<Buffer>(std::unexpected(Status::Corrupt));
+    if (!content) {
+        // **A rotted cache file is not a corrupt store.** The bytes may have come from a disk
+        // cache whose chunk was truncated or flipped, and the authoritative object is untouched —
+        // so reporting `Corrupt` here sends an operator to a restore for a healthy store. The
+        // range cache already treats a *missing* entry as costing latency and nothing else;
+        // silent corruption went past that door because only this layer runs the checksum.
+        //
+        // A cache is allowed to be absent and not to be wrong, so every layer is told to forget
+        // the object and the read is retried against the authority. If that fails too, the store
+        // really is damaged and the original status stands.
+        BlobStore& authority = authoritative_store(store_);
+        if (&authority != &store_) {
+            for (BlobStore* layer = &store_;;) {
+                CacheBlobStore* cache = layer->as_cache();
+                if (cache == nullptr) break;
+                cache->invalidate(name_);
+                layer = &cache->delegate();
+            }
+
+            auto retried = authority.get(name_, handle.offset, handle.length).get();
+            if (retried && retried->size() == handle.length) {
+                auto fresh = unframe_block(Slice::from(*retried), max_uncompressed());
+                if (fresh) content = std::move(fresh);
+            }
+        }
+        if (!content) return std::unexpected(content.error());
+    }
 
     auto block = std::make_shared<const Block>(std::move(*content));
     if (options_.block_cache != nullptr) {

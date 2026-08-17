@@ -112,6 +112,14 @@ public:
     virtual uint64_t hits() const = 0;
     virtual uint64_t misses() const = 0;
 
+    /// Drops whatever this layer holds for `name`, **without touching the delegate**.
+    ///
+    /// Not `remove`, which deletes the object itself. This is for the one case where a cached copy
+    /// is known to be wrong while the authoritative object is fine: a chunk file that rotted or was
+    /// truncated. A cache is allowed to be absent and not allowed to be wrong, so the recovery is
+    /// to forget and re-read.
+    virtual void invalidate(std::string_view name) = 0;
+
     std::string id() const override {
         return const_cast<CacheBlobStore*>(this)->delegate().id();
     }

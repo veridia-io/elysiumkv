@@ -146,6 +146,7 @@ TEST_F(ConfigValidationTest, ACacheAsATiersInnermostStoreIsRejected) {
         bool cache_on_write() const override { return false; }
         uint64_t hits() const override { return 0; }
         uint64_t misses() const override { return 0; }
+        void invalidate(std::string_view) override {}
         std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
             return delegate_->get(name, offset, len);
         }
