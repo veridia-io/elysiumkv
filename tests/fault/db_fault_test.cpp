@@ -437,6 +437,65 @@ TEST_F(DbFaultTest, OpenLeavesAnotherWritersObjectsAlone) {
 // Reclamation still exists — it moved. Deleting at open rested on a *single instantaneous*
 // observation, which cannot tell a dead writer's residue from a live writer's just-committed file;
 // the sweep rests on a sustained one. So this asserts the capability, on the trigger it now has.
+/* **A crash between the pointer install and the delete leaks a generation for ever.** Rolling
+ * writes the new snapshot, compare-and-sets the pointer, then deletes the previous generation —
+ * and nothing else ever looks at the catalog. The orphan sweep lists blob stores only, so on
+ * DynamoDB that is dead items and on S3 dead objects, invisible in `Stats` either way.
+ *
+ * Unlike an unreferenced object this needs no inference from absence: the pointer is authoritative
+ * about generations, so "below the live one" is a positive statement. What it does need is the
+ * reader window, because a reader takes four round trips to load a generation and may be part way
+ * through one that is about to go.
+ */
+TEST_F(DbFaultTest, AGenerationLeftByACrashIsReclaimedBySweep) {
+    Options reclaiming = options();
+    reclaiming.orphan_sweep_interval = Duration(1);
+    reclaiming.obsolete_retention = Duration(60'000);
+    reclaiming.orphan_retention = Duration(60'000);
+    reclaiming.background = BackgroundMode::Inline;
+
+    Oracle oracle;
+    auto opened = DB::open(reclaiming);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    auto db = std::move(*opened);
+    fill(*db, oracle, 50, "v1");
+    ASSERT_EQ(db->flush(), Status::Ok);
+
+    auto& engine = static_cast<DbImpl&>(*db);
+    const uint64_t live = engine.current_generation_for_test();
+    ASSERT_GT(live, 0u);
+
+    // Exactly what a crash between the CAS and the delete leaves: the previous generation's
+    // snapshot, still sitting there with nothing pointing at it.
+    DiskManifestCatalog planted(dir_.path());
+    ASSERT_EQ(planted.put_snapshot(live - 1, Slice::from(std::string("leaked"))).get(), Status::Ok);
+    {
+        auto before = planted.list_generations().get();
+        ASSERT_TRUE(before.has_value());
+        EXPECT_NE(std::find(before->begin(), before->end(), live - 1), before->end());
+    }
+
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+    {
+        auto seen_once = planted.list_generations().get();
+        ASSERT_TRUE(seen_once.has_value());
+        EXPECT_NE(std::find(seen_once->begin(), seen_once->end(), live - 1), seen_once->end())
+            << "one observation is not a sustained one; a reader may still be loading it";
+    }
+
+    now_.fetch_add(120'000);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+    {
+        auto after = planted.list_generations().get();
+        ASSERT_TRUE(after.has_value());
+        EXPECT_EQ(std::find(after->begin(), after->end(), live - 1), after->end())
+            << "past the reader window and below the live pointer, so it goes";
+        EXPECT_NE(std::find(after->begin(), after->end(), live), after->end())
+            << "and the live generation is untouched";
+    }
+    expect_matches(*db, oracle);
+}
+
 TEST_F(DbFaultTest, ReclamationHappensOnTheSweepRatherThanAtOpen) {
     Options reclaiming = options();
     reclaiming.orphan_sweep_interval = Duration(1);

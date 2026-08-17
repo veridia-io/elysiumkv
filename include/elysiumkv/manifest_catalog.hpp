@@ -50,6 +50,21 @@ public:
     virtual std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) = 0;
     virtual std::future<Status> delete_generation(uint64_t generation) = 0;
 
+    /// Every generation this catalog holds, in any order.
+    ///
+    /// **Optional.** The default reports `Status::Unsupported`, and the engine falls back to
+    /// probing a bounded window below the live pointer — which finds the generation a crash
+    /// between the pointer install and the delete leaves behind, and cannot find an older one. A
+    /// catalog that can enumerate cheaply should, because that is what makes the reclaim complete
+    /// rather than merely usual.
+    ///
+    /// Not a pure virtual, deliberately: an embedder's own catalog compiled against an earlier
+    /// header keeps working, and leaks at worst the generations the fallback already covers.
+    virtual std::future<Result<std::vector<uint64_t>>> list_generations() {
+        return make_ready_future(
+            Result<std::vector<uint64_t>>(std::unexpected(Status::Unsupported)));
+    }
+
     virtual ~ManifestCatalog() = default;
 };
 

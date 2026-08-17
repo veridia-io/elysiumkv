@@ -136,6 +136,7 @@ public:
     // --- internals a test may need that the public Stats deliberately omits
     uint64_t flush_count() const { return flushes_.load(); }
     uint64_t pending_deletions() const { return versions_->pending_deletions(); }
+    uint64_t current_generation_for_test() const { return versions_->generation(); }
     /// ARCHITECTURE.md "Open and recovery" names the file in the failure; this carries the text until the C ABI
     /// gives it a home in `elysiumkv_last_error` (ARCHITECTURE.md "The ABI boundary").
     const std::string& last_error() const { return last_error_; }
@@ -374,6 +375,8 @@ private:
     /// and `obsolete_retention` of their own, and letting the sweep at them would undercut the
     /// reader window.
     Status sweep_orphans();
+    /// Reclaims generations a crash left below the live pointer. Returns how many went.
+    uint64_t sweep_stale_generations(uint64_t now);
     /// Whether the writer has rolled past the generation this instance holds — the discriminator
     /// between "my version is too old" and "this object is genuinely lost".
     bool manifest_has_advanced() const;
@@ -386,6 +389,8 @@ private:
     /// `BlobStore` with a modification time, which every binding-supplied implementation would
     /// have to serve.
     std::map<std::string, std::map<std::string, uint64_t>> orphan_first_seen_;
+    /// Generation → when it was first seen below the live pointer. Guarded by `sweep_mutex_`.
+    std::map<uint64_t, uint64_t> stale_generation_first_seen_;
     /// Written by the maintenance executor when it sweeps, read by the coordinator when it
     /// computes the next time-driven deadline. **Two threads, so atomic** — it is a deadline, not a
     /// lock, and a stale read costs at most one extra tick.

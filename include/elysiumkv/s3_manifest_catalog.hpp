@@ -39,6 +39,9 @@ public:
     std::future<GetResult> get_edit(uint64_t generation, uint64_t seq) override;
     std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override;
     std::future<Status> delete_generation(uint64_t generation) override;
+    /// Listed with a delimiter, so it costs one page of common prefixes rather than a page per
+    /// object — the generations, not their contents.
+    std::future<Result<std::vector<uint64_t>>> list_generations() override;
 
     ~S3ManifestCatalog() override;
 

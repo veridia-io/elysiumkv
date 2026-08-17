@@ -29,6 +29,9 @@ public:
     std::future<GetResult> get_edit(uint64_t generation, uint64_t seq) override;
     std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override;
     std::future<Status> delete_generation(uint64_t generation) override;
+    /// Enumerated from the directory, so a generation left behind by a crash at any point in this
+    /// store's history is found — not only a recent one.
+    std::future<Result<std::vector<uint64_t>>> list_generations() override;
 
     const std::filesystem::path& directory() const { return directory_; }
 
