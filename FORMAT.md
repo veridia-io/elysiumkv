@@ -295,13 +295,19 @@ Header — `kStatsHeaderBytes = 240`:
 | 224 | `memtable_tombstones` | uint64 |
 | 232 | `background_failures` | uint64 |
 
-The 23 scalars, in order from offset 32: `memtable_bytes`, `memtable_age_ms`, `compactions`,
-`compaction_bytes_read`, `compaction_bytes_written`, `migrations`, `migration_bytes`,
-`stalled_total_ms`, `stall_count`, `block_cache_hits`, `block_cache_misses`, `block_cache_bytes`,
-`pins_outstanding`, `reader_cache_hits`, `reader_cache_misses`, `reader_cache_bytes`, `open_readers`,
-`memory_budget_used`, `memory_budget_total`, `budget_sheds`, `flushes` (offset 192),
-`durable_watermark` (offset 200), `memtable_entries` (offset 216), `memtable_tombstones`
-(offset 224), `background_failures` (offset 232).
+The **22** scalars in the contiguous run at offset 32, in order: `memtable_bytes`,
+`memtable_age_ms`, `compactions`, `compaction_bytes_read`, `compaction_bytes_written`,
+`migrations`, `migration_bytes`, `stalled_total_ms`, `stall_count`, `block_cache_hits`,
+`block_cache_misses`, `block_cache_bytes`, `pins_outstanding`, `reader_cache_hits`,
+`reader_cache_misses`, `reader_cache_bytes`, `open_readers`, `memory_budget_used`,
+`memory_budget_total`, `budget_sheds`, `flushes` (offset 192), `durable_watermark` (offset 200).
+That run ends at 208, where `watermark_present` begins.
+
+Three more uint64 scalars follow the flag and its padding, and are **not** part of that run:
+`memtable_entries` (216), `memtable_tombstones` (224), `background_failures` (232). Twenty-five in
+total; the run is twenty-two. Count from the table above, which is keyed by offset and is the
+normative part — the prose here previously said "23" and then listed 25, which is the mistake a
+decoder author would inherit.
 
 `flushes`, `durable_watermark`, `memtable_entries`, `memtable_tombstones` and
 `background_failures` were **appended without a version bump**, and so were the level record's `entries` and `tombstones` — which is what the

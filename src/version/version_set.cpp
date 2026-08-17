@@ -280,7 +280,20 @@ void VersionSet::collect_obsolete() {
     collect_obsolete_locked();
 }
 
+size_t VersionSet::tracked_versions() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return live_versions_.size();
+}
+
 void VersionSet::collect_obsolete_locked() {
+    // **Prune before the early return, not after it.** This is the only place expired entries
+    // leave `live_versions_`, and a flush-only edit deletes nothing — so a store that never
+    // compacts (a single configured level makes the picker return nothing at all) grew the vector
+    // by one entry per flush forever, each retained `weak_ptr` also holding a control block alive.
+    std::erase_if(live_versions_, [](const std::weak_ptr<const Version>& weak) {
+        return weak.expired();
+    });
+
     if (deleter_ == nullptr || pending_deletions_.empty()) return;
 
     // Every file number any live version still references. An iterator holding a

@@ -63,6 +63,27 @@ TEST_F(VersionSetTest, AnEmptyStoreHasNoPointer) {
     EXPECT_TRUE(versions->current()->all_files().empty());
 }
 
+/// **A store that never deletes must not accumulate version slots.** Every install appends a
+/// `weak_ptr`, and the only place that pruned them sat behind an early return taken whenever
+/// nothing is pending — which a flush-only edit always is. A single configured level makes the
+/// picker decline outright, so this is a reachable configuration and not a contrived one.
+TEST_F(VersionSetTest, InstallsThatDeleteNothingDoNotAccumulateVersionSlots) {
+    auto versions = make();
+    ASSERT_EQ(versions->create(), Status::Ok);
+
+    for (int i = 0; i < 200; ++i) {
+        VersionEdit edit;
+        edit.added.push_back(file(0, versions->allocate_file_number()));
+        ASSERT_EQ(versions->apply(std::move(edit)), Status::Ok);
+    }
+
+    ASSERT_EQ(versions->pending_deletions(), 0u) << "nothing was deleted, which is the premise";
+    versions->collect_obsolete();
+    // Only the current version is still held; the other 200 expired as each install replaced them.
+    EXPECT_LE(versions->tracked_versions(), 2u)
+        << "expired version slots were never pruned on a store that deletes nothing";
+}
+
 TEST_F(VersionSetTest, EditsSurviveReopen) {
     {
         auto versions = make();
