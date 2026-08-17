@@ -65,11 +65,16 @@ protected:
 };
 
 
-/// **Opening a reader must not fetch the bloom filter.** Only `get` consults it, and a compaction
-/// opens a reader per input — so an eager load was a third round trip and, at ten bits per key,
-/// about 1.25 MB per million entries transferred and thrown away on every merge. Against a remote
-/// store the round trip is the expensive half.
-TEST(SstFilterTest, OpeningAReaderDoesNotFetchTheFilter) {
+/// **Opening a reader costs one round trip.** It used to cost three: the footer, then the index,
+/// then the bloom filter. The filter went first — only `get` consults it, and a compaction opens a
+/// reader per input, so an eager load moved about 1.25 MB per million entries and threw it away.
+/// Then the footer and the index collapsed into one speculative tail read, which the file layout
+/// allows because they are adjacent at the end (FORMAT.md §5).
+///
+/// The count is the assertion rather than a timing, because it is the thing that is true on every
+/// machine: against a remote store each of those was a round trip, and `reader_cache_bytes` was
+/// documented as generous *because* evicting a reader cost three of them.
+TEST(SstFilterTest, OpeningAReaderCostsOneRoundTrip) {
     TempDir dir;
     auto disk = std::make_shared<DiskBlobStore>(dir.path());
     test::FaultInjectingBlobStore store(disk);
@@ -87,8 +92,8 @@ TEST(SstFilterTest, OpeningAReaderDoesNotFetchTheFilter) {
     ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
 
     const uint64_t at_open = store.call_count(test::FaultInjectingBlobStore::Op::Get);
-    EXPECT_EQ(at_open - before_open, 2u)
-        << "the footer tail and the index block, and nothing else";
+    EXPECT_EQ(at_open - before_open, 1u)
+        << "one tail read carrying the footer and the index, and nothing else";
 
     // And it is still there when something actually asks: lazy, not dropped.
     auto found = (*reader)->get(Slice::from(std::string("user:00000042")));

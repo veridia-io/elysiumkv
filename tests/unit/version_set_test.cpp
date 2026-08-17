@@ -312,6 +312,123 @@ TEST_F(VersionSetTest, AnEditThatCannotBePersistedChangesNothing) {
 //
 // An occupied edit address cannot mean anything else. `next_seq_` is engine-owned
 // and monotonic, so this instance has never written where it is about to write.
+// --- a reader against a manifest that moves ------------------------------------
+
+/// Rolls the manifest **behind the reader's back**, at a chosen step of its load. Loading is four
+/// round trips and a roll is one compare-and-set, so every one of those gaps is reachable in
+/// production; two of them used to be visible to a perfectly healthy reader.
+///
+/// The roll is performed by a real `VersionSet` with `edits_per_generation = 1` rather than by
+/// copying the snapshot by hand — a hand-copied one would not have the previous generation's edits
+/// folded into it, so the reader would legitimately load *less* than before and the test would be
+/// measuring the double rather than the engine.
+class RollingCatalog final : public ManifestCatalog {
+public:
+    enum class When { WhileReadingTheSnapshot, WhileListingTheEdits };
+
+    RollingCatalog(ManifestCatalog& inner, When when) : inner_(inner), when_(when) {}
+
+    Result<std::optional<Entry>> read() override { return inner_.read(); }
+    Result<std::optional<Entry>> compare_and_set(std::optional<Entry> expected,
+                                                 uint64_t generation) override {
+        return inner_.compare_and_set(std::move(expected), generation);
+    }
+    std::future<Status> put_snapshot(uint64_t generation, Slice bytes) override {
+        return inner_.put_snapshot(generation, bytes);
+    }
+    std::future<Status> put_edit(uint64_t generation, uint64_t seq, Slice bytes) override {
+        return inner_.put_edit(generation, seq, bytes);
+    }
+    std::future<GetResult> get_edit(uint64_t generation, uint64_t seq) override {
+        return inner_.get_edit(generation, seq);
+    }
+    std::future<Status> delete_generation(uint64_t generation) override {
+        return inner_.delete_generation(generation);
+    }
+
+    std::future<GetResult> get_snapshot(uint64_t generation) override {
+        if (when_ == When::WhileReadingTheSnapshot) roll_once();
+        return inner_.get_snapshot(generation);
+    }
+
+    std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override {
+        if (when_ == When::WhileListingTheEdits) roll_once();
+        return inner_.list_edits(generation);
+    }
+
+    int rolls = 0;
+
+private:
+    /// Once only, so the reader's retry has something stable to land on. A writer that rolled
+    /// forever would be the `Stale` case, which is tested separately.
+    void roll_once() {
+        if (rolls > 0) return;
+        ++rolls;
+        VersionSet roller(inner_, /*edits_per_generation=*/1,
+                          [](const std::vector<FileMetadata>&) {
+                              return std::vector<FileMetadata>{};
+                          });
+        if (roller.recover() != Status::Ok) return;
+        VersionEdit nudge;
+        nudge.added.push_back(file(0, roller.allocate_file_number()));
+        (void)roller.apply(std::move(nudge));
+    }
+
+    ManifestCatalog& inner_;
+    When when_;
+};
+
+/// **A roll under a reader is not a damaged store.** The pointer named a generation, the writer
+/// rolled and deleted it, and the snapshot came back absent — which was reported as `Corrupt`,
+/// sending an operator to a restore for a store with nothing wrong with it.
+TEST_F(VersionSetTest, AGenerationRolledWhileTheSnapshotIsReadIsNotCorruption) {
+    {
+        auto writer = make();
+        ASSERT_EQ(writer->create(), Status::Ok);
+        VersionEdit edit;
+        edit.added.push_back(file(0, writer->allocate_file_number()));
+        ASSERT_EQ(writer->apply(std::move(edit)), Status::Ok);
+    }
+
+    DiskManifestCatalog inner(dir_.path());
+    RollingCatalog rolling(inner, RollingCatalog::When::WhileReadingTheSnapshot);
+    VersionSet reader(rolling, 1000, recorder());
+
+    EXPECT_EQ(reader.recover(), Status::Ok) << "the reader did nothing wrong";
+    EXPECT_GT(rolling.rolls, 0) << "no roll happened, so this configuration tested nothing";
+    EXPECT_GT(reader.current()->file_count(0), 0u) << "and it landed on real content";
+}
+
+/// **The half that was silent.** The snapshot read wins the race and `list_edits` loses; a missing
+/// generation directory lists as *no edits* rather than as an error, so the snapshot installed with
+/// none of its edits replayed, `recover` returned `Ok`, and the reader's view moved backwards.
+TEST_F(VersionSetTest, AGenerationRolledWhileTheEditsAreListedDoesNotMoveAReaderBackwards) {
+    {
+        auto writer = make();
+        ASSERT_EQ(writer->create(), Status::Ok);
+        for (int i = 0; i < 3; ++i) {
+            VersionEdit edit;
+            edit.added.push_back(file(0, writer->allocate_file_number()));
+            ASSERT_EQ(writer->apply(std::move(edit)), Status::Ok);
+        }
+    }
+
+    DiskManifestCatalog plain(dir_.path());
+    VersionSet before(plain, 1000, recorder());
+    ASSERT_EQ(before.recover(), Status::Ok);
+    const size_t seen = before.current()->file_count(0);
+    ASSERT_EQ(seen, 3u) << "three edits, three files";
+
+    DiskManifestCatalog inner(dir_.path());
+    RollingCatalog rolling(inner, RollingCatalog::When::WhileListingTheEdits);
+    VersionSet reader(rolling, 1000, recorder());
+
+    ASSERT_EQ(reader.recover(), Status::Ok);
+    EXPECT_GT(rolling.rolls, 0) << "no roll happened, so this configuration tested nothing";
+    EXPECT_GE(reader.current()->file_count(0), seen)
+        << "the reader installed a snapshot with its edits missing and went backwards";
+}
+
 TEST_F(VersionSetTest, AnEditAddressTakenByAnotherWriterFencesTheInstance) {
     auto ours = make(/*edits_per_generation=*/1000);
     ASSERT_EQ(ours->create(), Status::Ok);

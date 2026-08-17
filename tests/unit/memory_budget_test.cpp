@@ -26,6 +26,97 @@ namespace elysiumkv {
 namespace test {
 namespace {
 
+
+/// **The largest transient allocation the engine makes was the one the budget could not see.** A
+/// flush materialises a whole output file before sending it, and a migration reads a whole file in
+/// before writing it out — neither was charged, in a design whose central argument is that
+/// per-instance sizing multiplies by instance count. Two concurrent 400 MiB migrations were
+/// 800 MiB nothing was counting.
+///
+/// Sampled from inside the `put` that the charge is held across, because that is the only moment
+/// it exists: an inline flush begins and ends inside the caller's `put`, so a budget read taken
+/// afterwards sees the charge already released and cannot tell the fix from its absence.
+///
+/// Charged over the limit rather than refused. Declining would leave files on a transient tier
+/// past the age the engine promises to move them within, which turns a memory decision into a
+/// durability one.
+TEST(MemoryBudgetTest, AWholeFileCopyIsChargedWhileItIsHeld) {
+    class SamplingStore final : public BlobStore {
+    public:
+        SamplingStore(std::shared_ptr<BlobStore> delegate, std::shared_ptr<MemoryBudget> budget)
+            : delegate_(std::move(delegate)), budget_(std::move(budget)) {}
+
+        std::string id() const override { return delegate_->id(); }
+        std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
+            return delegate_->get(name, offset, len);
+        }
+        std::future<Status> put(std::string_view name, Slice bytes) override {
+            // Paired per call, not maxed independently: taking the largest budget reading and the
+            // largest write separately lets one charged write vouch for an uncharged one.
+            if (budget_->used() < bytes.size()) ++uncharged;
+            put_bytes = std::max(put_bytes, bytes.size());
+            ++writes;
+            return delegate_->put(name, bytes);
+        }
+        std::future<Status> remove(std::string_view name) override {
+            return delegate_->remove(name);
+        }
+        std::future<ListResult> list(std::string_view prefix) override {
+            return delegate_->list(prefix);
+        }
+
+        int uncharged = 0;
+        int writes = 0;
+        size_t put_bytes = 0;
+
+    private:
+        std::shared_ptr<BlobStore> delegate_;
+        std::shared_ptr<MemoryBudget> budget_;
+    };
+
+    // **Measured on the migration rather than on the flush.** A flush's output is built from the
+    // memtable that produced it, so the arena is charged at the same moment and is the larger of
+    // the two — the arena alone satisfies any comparison against the output, and the test cannot
+    // tell the charge from its absence. A migration copies a file long after its memtable is gone,
+    // so what the budget holds during the write is the copy and almost nothing else.
+    TestStore backing(2);
+    auto budget = std::make_shared<MemoryBudget>(256u << 20);
+    auto sampling = std::make_shared<SamplingStore>(backing.store(1), budget);
+
+    std::atomic<uint64_t> now{1'000'000};
+    Options options = make_transient_options(backing, Duration(1000), Duration(10'000));
+    options.background = BackgroundMode::Inline;
+    options.memory_budget = budget;
+    options.clock = [&now] { return now.load(std::memory_order_relaxed); };
+    options.tiers[1].store = sampling;   // the cold tier is where a migration writes
+
+    auto opened = DB::open_with_result(options);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    auto db = std::move(opened->db);
+
+    for (int i = 0; i < 2000; ++i) {
+        char key[32];
+        std::snprintf(key, sizeof(key), "key:%08d", i);
+        ASSERT_EQ(db->put(Slice::from(std::string_view(key)), Slice::from(std::string(256, 'v'))),
+                  Status::Ok);
+    }
+    ASSERT_EQ(db->flush(), Status::Ok);
+
+    // Age the files past the transient tier's bound, then let maintenance move them.
+    now.fetch_add(60'000);
+    ASSERT_EQ(static_cast<DbImpl*>(db.get())->compact_until_quiet(), Status::Ok);
+
+    ASSERT_GT(sampling->writes, 0) << "nothing migrated, so this configuration tested nothing";
+    EXPECT_EQ(sampling->uncharged, 0)
+        << sampling->uncharged << " of " << sampling->writes
+        << " writes held a buffer the budget was not counting";
+
+    // Released, not merely charged. A transient charge that leaked would shrink the budget for
+    // good, which for a process running dozens of instances is the failure that matters.
+    EXPECT_LT(budget->used(), sampling->put_bytes);
+}
+
+
 TEST(MemoryBudgetTest, AnUnconditionalChargeReportsTheOverage) {
     MemoryBudget budget(1000);
     EXPECT_TRUE(budget.try_acquire_over(600));

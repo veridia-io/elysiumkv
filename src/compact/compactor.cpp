@@ -18,6 +18,7 @@
 #include "compact/migrator.hpp"
 #include "compact/picker.hpp"
 #include "sst/sst_writer.hpp"
+#include "util/budget_charge.hpp"
 
 #include <algorithm>
 #include <map>
@@ -481,6 +482,10 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     if (!bytes) return bytes.error();
     if (bytes->size() != migration.file.file_bytes) return Status::Corrupt;
 
+    // A whole file in memory, held until the copy lands — the largest transient allocation the
+    // engine makes, and the budget could not see it.
+    const BudgetCharge charged(options_.memory_budget, bytes->size());
+
     auto file_number = write_new_sst(*target.store, Slice::from(*bytes));
     if (!file_number) return file_number.error();
 
@@ -760,6 +765,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         // tier rather than being written hot and migrated straight back out.
         const Tier& tier = tier_for(/*file_number=*/0, min_write_time);
 
+        const BudgetCharge output_charged(options_.memory_budget, built->bytes.size());
         auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
         if (!file_number) return file_number.error();
         compaction_bytes_written_.fetch_add(built->bytes.size(), std::memory_order_relaxed);

@@ -1,3 +1,4 @@
+#include "fault/fault_injecting_blob_store.hpp"
 #include "support/temp_dir.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
@@ -136,6 +137,115 @@ void BM_PrefixScan(benchmark::State& state) {
         benchmark::Counter(static_cast<double>(scanned), benchmark::Counter::kAvgIterations);
 }
 BENCHMARK(BM_PrefixScan)->Arg(100000)->Arg(1000000);
+
+// --- the remote path ------------------------------------------------------------
+//
+// **Every benchmark above measures local disk, and the design target is object storage.** That gap
+// is not a nicety: a change that triples the number of round trips a read costs passes all of them,
+// because on local disk a round trip is a syscall. The engine's read cost against S3 is round
+// trips, so that is what these count.
+//
+// `gets_per_op` is the number to watch, and it is deterministic — a timing under injected latency
+// is the same statement with noise added, and is here so the cost is legible in wall-clock terms
+// too. Latency is an argument in microseconds rather than a fixed 30 ms because a realistic S3
+// figure makes each iteration so slow that the harness gathers no samples.
+
+/// Local disk behind a latency injector, with the caches sized so reads actually reach it: a
+/// benchmark whose working set fits in the block cache measures the cache.
+class RemoteishStore {
+public:
+    RemoteishStore(int keys, std::chrono::microseconds latency) {
+        std::filesystem::create_directories(dir_.path() / "store");
+        auto disk = std::make_shared<DiskBlobStore>(dir_.path() / "store", "bench");
+        disk->set_sync_writes(false);
+        store_ = std::make_shared<test::FaultInjectingBlobStore>(disk);
+
+        Options options;
+        options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
+        options.memtable_bytes = 32u << 20;
+        options.background = BackgroundMode::Inline;
+        // Small enough that a reader is evicted between lookups, so the cost of *opening* one is
+        // in the measurement — which is the cost C2 is about.
+        options.reader_cache_bytes = 64u << 10;
+
+        LevelOptions l0;
+        l0.max_files = 100;
+        LevelOptions l1;
+        options.levels = {{0, l0}, {1, l1}};
+        options.tiers = {Tier{.store = store_, .durability = Durability::Durable}};
+
+        db_ = std::move(*DB::open(options));
+        const std::string value(100, 'v');
+        for (int i = 0; i < keys; ++i) {
+            (void)db_->put(Slice::from(key_at(i)), Slice::from(value));
+        }
+        (void)db_->flush();
+
+        // Injected only once the store is built: charging the build would measure nothing useful
+        // and would take minutes.
+        store_->set_latency(latency);
+    }
+
+    DB& db() { return *db_; }
+    uint64_t gets() const {
+        return store_->call_count(test::FaultInjectingBlobStore::Op::Get);
+    }
+
+private:
+    test::TempDir dir_;
+    std::shared_ptr<test::FaultInjectingBlobStore> store_;
+    std::unique_ptr<DB> db_;
+};
+
+void BM_RemotePointLookup(benchmark::State& state) {
+    constexpr int kKeys = 200000;
+    RemoteishStore store(kKeys, std::chrono::microseconds(state.range(0)));
+
+    std::mt19937 rng(1234);
+    std::uniform_int_distribution<int> pick(0, kKeys - 1);
+
+    const uint64_t before = store.gets();
+    const uint64_t opens_before = store.db().stats().reader_cache_misses;
+    int64_t lookups = 0;
+    for (auto _ : state) {
+        auto found = store.db().get(Slice::from(key_at(pick(rng))));
+        benchmark::DoNotOptimize(found);
+        ++lookups;
+    }
+    const uint64_t spent = store.gets() - before;
+    const uint64_t opens = store.db().stats().reader_cache_misses - opens_before;
+    const auto per = static_cast<double>(lookups ? lookups : 1);
+
+    // **The gate.** Round trips per lookup, independent of the machine and of the injected
+    // latency. Reported beside the number of readers opened, because the two together are what
+    // make the figure explicable: a lookup costs one read per reader it has to open plus one per
+    // data block it has to fetch, and a configuration where the reader cache absorbs the opens is
+    // measuring the cache rather than the read path.
+    state.counters["gets_per_op"] = benchmark::Counter(static_cast<double>(spent) / per);
+    state.counters["opens_per_op"] = benchmark::Counter(static_cast<double>(opens) / per);
+}
+BENCHMARK(BM_RemotePointLookup)->Arg(0)->Arg(200)->Unit(benchmark::kMicrosecond);
+
+void BM_RemotePrefixScan(benchmark::State& state) {
+    constexpr int kKeys = 200000;
+    RemoteishStore store(kKeys, std::chrono::microseconds(state.range(0)));
+
+    const uint64_t before = store.gets();
+    int64_t scans = 0;
+    for (auto _ : state) {
+        auto it = store.db().prefix_iterator(Slice::from(std::string("cluster:000123:")));
+        int64_t seen = 0;
+        while (it->next()) ++seen;
+        benchmark::DoNotOptimize(seen);
+        ++scans;
+    }
+    const uint64_t spent = store.gets() - before;
+
+    // A scan opens every candidate file up front (C3), so this counter is where that shows.
+    state.counters["gets_per_scan"] =
+        benchmark::Counter(static_cast<double>(spent) / static_cast<double>(scans ? scans : 1));
+}
+BENCHMARK(BM_RemotePrefixScan)->Arg(0)->Arg(200)->Unit(benchmark::kMicrosecond);
 
 /// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
 ///
