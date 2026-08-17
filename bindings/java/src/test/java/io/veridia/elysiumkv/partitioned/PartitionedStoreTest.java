@@ -799,4 +799,50 @@ class PartitionedStoreTest {
         assertThrows(PartitionNotAssignedException.class, () -> store.stage(0, put("k", "v")));
         assertFalse(store.assignment().contains(0));
     }
+
+    @Test
+    void statsReportTheMaterialisedPositionAndTheEngineUnderneath() {
+        store = open(8);
+        store.assign(Arrays.asList(0, 1));
+
+        assertTrue(store.stats().get(0).materializedThrough().isEmpty(),
+                "nothing applied yet, so there is no position to report");
+
+        store.stage(0, put("k", "v"));
+        store.commit(log::commitTransaction);
+
+        PartitionedStore.PartitionStats zero = store.stats().get(0);
+        assertTrue(zero.materializedThrough().isPresent());
+        assertEquals(0L, zero.materializedThrough().getAsLong(),
+                "the position is the changelog offset the apply covered");
+        assertFalse(zero.behind());
+        assertNotNull(zero.engine(), "the engine's own counters come through");
+        assertTrue(zero.engine().entryCount() >= 1);
+
+        assertTrue(store.stats().get(1).materializedThrough().isEmpty(),
+                "a partition nothing was staged into has not moved");
+    }
+
+    /** The flag an alarm would watch: a partition out of service says so here. */
+    @Test
+    void statsReportAPartitionThatIsBehind() {
+        store = open(8);
+        store.assign(Collections.singletonList(0));
+        store.stage(0, put("k", "v"));
+        store.discardUnknown();
+
+        assertTrue(store.stats().get(0).behind());
+
+        store.repair(Collections.singletonList(0));
+        assertFalse(store.stats().get(0).behind());
+    }
+
+    @Test
+    void statsCoverOnlyHeldPartitions() {
+        store = open(8);
+        store.assign(Arrays.asList(0, 1));
+        store.revoke(Collections.singletonList(1));
+
+        assertEquals(Collections.singleton(0), store.stats().keySet());
+    }
 }

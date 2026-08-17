@@ -2,6 +2,7 @@ package io.veridia.elysiumkv.partitioned;
 
 import io.veridia.elysiumkv.ElysiumKV;
 import io.veridia.elysiumkv.ElysiumKVOptions;
+import io.veridia.elysiumkv.ElysiumKVStats;
 import io.veridia.elysiumkv.OpenResult;
 import io.veridia.elysiumkv.RetryableException;
 import io.veridia.elysiumkv.WriteBatch;
@@ -168,6 +169,69 @@ public final class PartitionedStore<K> implements AutoCloseable {
             }
         }
         return result;
+    }
+
+    /**
+     * What each held partition is doing, for an embedder's instruments.
+     *
+     * <p><b>{@code materializedThrough} is the one to graph.</b> The design's invariant is that a
+     * store may only ever lag the log; against the log's end offset this says by how much, which is
+     * the difference between believing that and showing it.
+     *
+     * <p>A partition whose stats cannot be read is omitted rather than reported as zero: this runs
+     * on whatever thread collects metrics while another may be closing the store, and a snapshot
+     * that arrives a moment too late is worth nothing.
+     */
+    public Map<Integer, PartitionStats> stats() {
+        List<Partition> held;
+        synchronized (partitions) {
+            held = new ArrayList<>(partitions.values());
+        }
+        // Outside the lock: stats() is O(files), and holding it would block a rebalance.
+        Map<Integer, PartitionStats> out = new TreeMap<>();
+        for (Partition partition : held) {
+            try {
+                out.put(partition.id, new PartitionStats(partition.id, partition.behind,
+                        partition.materializedThrough(), partition.db.stats()));
+            } catch (RuntimeException closing) {
+                // Skipped, deliberately — see above.
+            }
+        }
+        return out;
+    }
+
+    /** One partition's position and the engine's own counters underneath it. */
+    public static final class PartitionStats {
+        private final int partition;
+        private final boolean behind;
+        private final OptionalLong materializedThrough;
+        private final ElysiumKVStats engine;
+
+        PartitionStats(int partition, boolean behind, OptionalLong materializedThrough,
+                       ElysiumKVStats engine) {
+            this.partition = partition;
+            this.behind = behind;
+            this.materializedThrough = materializedThrough;
+            this.engine = engine;
+        }
+
+        public int partition() {
+            return partition;
+        }
+
+        /** True while this partition may lag the log, so it is not served. */
+        public boolean behind() {
+            return behind;
+        }
+
+        /** The changelog offset this store has materialised, empty before the first apply. */
+        public OptionalLong materializedThrough() {
+            return materializedThrough;
+        }
+
+        public ElysiumKVStats engine() {
+            return engine;
+        }
     }
 
     /**
