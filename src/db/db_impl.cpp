@@ -935,7 +935,10 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
     // sweep. Exactly the defect this whole loop exists to have fixed, one policy later.
     if (options_.orphan_sweep_interval.has_value()) consider(next_sweep_ms_.load());
 
-    for (const FileMetadata& file : version.all_files()) {
+    // Iterated in place: `all_files()` returns a vector of `FileMetadata`, each carrying seven
+    // strings, and this runs on every version install rather than on the clock.
+    for (const auto& level : version.levels()) {
+      for (const FileMetadata& file : level) {
         const int index = tiers_.tier_of_store(file.store_id);
         if (index < 0) continue;
         const Tier& tier = tiers_.tiers[static_cast<size_t>(index)];
@@ -955,6 +958,7 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
         if (tier.durability == Durability::Transient && tier.stall_age.has_value()) {
             consider(file.min_write_time_ms + static_cast<uint64_t>(tier.stall_age->count()));
         }
+      }
     }
     return earliest;
 }
@@ -963,14 +967,26 @@ void DbImpl::publish_transient_stall(const Version& version, uint64_t now) {
     // Computed unconditionally, pin or no pin: `transient_stalled()` is where the override is
     // applied, so this keeps the real value fresh and unpinning is correct immediately rather than
     // at the next tick.
+    // One pass over the files, keyed by store. The tiers used to be the outer loop with
+    // `all_files()` inside it, so a store on four tiers copied every file's metadata four times —
+    // and this runs at the rate of background work, not of the clock.
+    //
+    // Keyed by store id rather than by tier index because several tiers may name one store, and
+    // each of them has to see that store's oldest file.
+    std::map<std::string, uint64_t> oldest_by_store;
+    for (const auto& level : version.levels()) {
+        for (const FileMetadata& file : level) {
+            uint64_t& oldest = oldest_by_store[file.store_id];
+            if (oldest == 0 || file.min_write_time_ms < oldest) oldest = file.min_write_time_ms;
+        }
+    }
+
     bool stalled = false;
     for (const Tier& tier : tiers_.tiers) {
         if (tier.durability != Durability::Transient || !tier.stall_age.has_value()) continue;
-        uint64_t oldest = 0;
-        for (const FileMetadata& file : version.all_files()) {
-            if (file.store_id != tier.store->id()) continue;
-            if (oldest == 0 || file.min_write_time_ms < oldest) oldest = file.min_write_time_ms;
-        }
+        const auto found = oldest_by_store.find(tier.store->id());
+        if (found == oldest_by_store.end()) continue;
+        const uint64_t oldest = found->second;
         if (oldest != 0 && now > oldest &&
             now - oldest > static_cast<uint64_t>(tier.stall_age->count())) {
             stalled = true;
@@ -1572,8 +1588,12 @@ Stats DbImpl::stats() const {
         TierStats tier_stats;
         tier_stats.tier = index;
 
+        // Iterated in place. This is inside a per-tier loop and `stats()` is the one call an
+        // operator is told to make continuously, so a copy of every file's metadata per tier per
+        // scrape is paid at the scrape rate, times the number of instances in the process.
         uint64_t oldest_write = 0;
-        for (const FileMetadata& file : version->all_files()) {
+        for (const auto& level : version->levels()) {
+          for (const FileMetadata& file : level) {
             if (file.store_id != tier.store->id()) continue;
             ++tier_stats.file_count;
             tier_stats.bytes += file.file_bytes;
@@ -1583,6 +1603,7 @@ Stats DbImpl::stats() const {
             if (placement(tiers_, file.file_number, file.min_write_time_ms, now) > index) {
                 ++tier_stats.files_pending_migration;
             }
+          }
         }
         if (tier.max_bytes.has_value() && tier_stats.bytes > *tier.max_bytes &&
             tier_stats.files_pending_migration == 0) {
@@ -1627,7 +1648,8 @@ Stats DbImpl::stats() const {
         bool transient_low_missing = false;
         bool any_transient = false;
         std::optional<uint64_t> high;
-        for (const FileMetadata& file : version->all_files()) {
+        for (const auto& level : version->levels()) {
+          for (const FileMetadata& file : level) {
             accumulate_max(high, file.watermark.high);
             if (!tiers_.store_is_discardable(file.store_id)) continue;
             any_transient = true;
@@ -1636,6 +1658,7 @@ Stats DbImpl::stats() const {
             } else {
                 transient_low_missing = true;
             }
+          }
         }
         if (!any_transient) {
             stats.durable_watermark = high;
@@ -2006,38 +2029,6 @@ Result<uint64_t> DbImpl::write_new_sst(BlobStore& store, Slice bytes) {
     return std::unexpected(Status::Fenced);
 }
 
-void DbImpl::collect_orphans(const std::map<std::string, std::vector<std::string>>& listings) {
-    auto version = versions_->current();
-    // File numbers are never reused (ARCHITECTURE.md "The manifest is snapshots plus edits"), so a name identifies an object
-    // outright — no store qualifier needed.
-    std::set<std::string> referenced;
-    for (const FileMetadata& file : version->all_files()) {
-        referenced.insert(sst_object_name(file.file_number));
-    }
-
-    for (const auto& [store_id, names] : listings) {
-        BlobStore* store = store_for(store_id);
-        if (store == nullptr) continue;
-
-        std::vector<std::string> orphans;
-        for (const std::string& name : names) {
-            if (!name.ends_with(".sst")) continue;
-            if (referenced.count(name) != 0) continue;
-            // Nothing references it: the residue of a flush or compaction that
-            // died before its edit was durable (ARCHITECTURE.md "Open and recovery").
-            orphans.push_back(name);
-        }
-        // One call per store, like collection after a compaction. A store that
-        // crashed mid-compaction can have dozens of these, and open is exactly
-        // when a round trip per object is least welcome.
-        if (!orphans.empty()) {
-            (void)store->remove_many(orphans).get();
-            log_event(LogLevel::Info, LogEvent::OrphansReclaimed, "reclaimed ", orphans.size(),
-                      " unreferenced object(s) from store '", store_id, "'");
-        }
-    }
-}
-
 /// See `VersionSet::manifest_advanced`. On a path that has already failed, so its cost is moot.
 bool DbImpl::manifest_has_advanced() const { return versions_->manifest_advanced(); }
 
@@ -2057,6 +2048,10 @@ Status DbImpl::classify_read_failure(Status status) const {
 
 Status DbImpl::sweep_orphans() {
     if (read_only_ || !options_.orphan_sweep_interval.has_value()) return Status::Ok;
+
+    // Declared before the guard, so both destruct after it and the sink never runs under a lock.
+    DeferredLine fence_line(this);
+    DeferredLine reclaimed_line(this);
 
     // One sweep at a time. In production only the maintenance executor calls this, so the lock is
     // never contended — it is here because `sweep_orphans_for_test` lets a test call it too, and a
@@ -2078,8 +2073,9 @@ Status DbImpl::sweep_orphans() {
     // slow CI runner failing a test that passes locally because the sweep never overlapped anything.
     if (versions_->manifest_advanced()) {
         versions_->mark_fenced();
-        log_event(LogLevel::Error, LogEvent::Fenced,
-                  "fenced: the manifest moved under this writer, so another process owns the store");
+        fence_line.set(LogLevel::Error, LogEvent::Fenced,
+                       "fenced: the manifest moved under this writer, so another process owns "
+                       "the store");
         return Status::Fenced;
     }
 
@@ -2088,6 +2084,7 @@ Status DbImpl::sweep_orphans() {
     const uint64_t now = now_ms();
     const auto retention = static_cast<uint64_t>(options_.orphan_retention.count());
 
+    size_t reclaimed = 0;
     for (const auto& [store_id, store] : tiers_.stores) {
         auto names = authoritative_store(*store).bulk_view().list("").get();
         if (!names) {
@@ -2120,7 +2117,14 @@ Status DbImpl::sweep_orphans() {
 
         if (!collectable.empty()) {
             (void)store->remove_many(collectable).get();
+            reclaimed += collectable.size();
         }
+    }
+    // One line per sweep rather than one per store: the number an operator watches is how much
+    // this store is leaking, and a sweep that reclaimed nothing is the ordinary case and silent.
+    if (reclaimed != 0) {
+        reclaimed_line.set(LogLevel::Info, LogEvent::OrphansReclaimed, "reclaimed ", reclaimed,
+                           " object(s) unreferenced for at least ", retention, " ms");
     }
     return Status::Ok;
 }

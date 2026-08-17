@@ -126,6 +126,9 @@ public:
     uint64_t generation() const;
     /// Files awaiting collection — a live iterator is the usual reason.
     size_t pending_deletions() const;
+    /// How many version slots are being tracked, expired ones included. Only a test cares:
+    /// the interesting property is that this stays bounded on a store that never deletes.
+    size_t tracked_versions() const;
 
     /// The same count, readable **without taking `mutex_`** — which matters because the
     /// maintenance coordinator asks every tick and that mutex is held across manifest writes

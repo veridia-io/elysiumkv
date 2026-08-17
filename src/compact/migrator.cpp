@@ -13,15 +13,19 @@ struct TierContents {
 
 std::map<int, TierContents> group_by_tier(const Version& version, const ResolvedTiers& tiers) {
     std::map<int, TierContents> by_tier;
-    for (const FileMetadata& file : version.all_files()) {
-        // Level 0 is never migrated: a fresh file number would reorder its
-        // positional recency (ARCHITECTURE.md "Positional recency"). Those files leave their tier by compaction.
-        if (file.level == 0) continue;
-        const int tier = tiers.tier_of_store(file.store_id);
-        if (tier < 0) continue;  // a store no longer in the configuration
-        TierContents& contents = by_tier[tier];
-        contents.files.push_back(file);
-        contents.bytes += file.file_bytes;
+    // Iterated in place: this already copies the files it keeps, and `all_files()` copied every
+    // file in the version first — including the L0 ones this drops immediately.
+    for (const auto& level : version.levels()) {
+        for (const FileMetadata& file : level) {
+            // Level 0 is never migrated: a fresh file number would reorder its
+            // positional recency (ARCHITECTURE.md "Positional recency"). Those files leave their tier by compaction.
+            if (file.level == 0) continue;
+            const int tier = tiers.tier_of_store(file.store_id);
+            if (tier < 0) continue;  // a store no longer in the configuration
+            TierContents& contents = by_tier[tier];
+            contents.files.push_back(file);
+            contents.bytes += file.file_bytes;
+        }
     }
     return by_tier;
 }

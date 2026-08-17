@@ -360,10 +360,6 @@ private:
     /// `Durable` store is corruption; missing from a `Transient` store discards
     /// every file on that store; any `Io` is neither, and must not discard.
     Status verify_stores_and_discard();
-    /// Objects no version references: the residue of a compaction or flush that
-    /// died before its edit was durable.
-    void collect_orphans(const std::map<std::string, std::vector<std::string>>& listings);
-
     /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
     /// been **continuously unreferenced for `orphan_retention`**.
     ///

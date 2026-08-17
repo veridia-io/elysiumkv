@@ -329,18 +329,20 @@ TEST_F(DbFaultTest, CollectingObsoleteObjectsIsOneBulkCall) {
 }
 
 // ARCHITECTURE.md "The manifest is snapshots plus edits", ARCHITECTURE.md "Open and recovery" — **an orphan from a crashed write must not make the store
-// unwritable**, and it is `collect_orphans` at open that ensures it.
+// unwritable**, and two mechanisms together ensure it: open steps the file-number counter over
+// what the stores already hold, and a write that still collides renumbers rather than fencing.
 //
 // The hazard is worth spelling out because it is not obvious that anything saves
 // you. A crash between an SST `put` and the manifest edit recording it leaves an
-// object no edit mentions; the edit never landed, so recovery restores
+// object no edit mentions; the edit never landed, so recovery would otherwise restore
 // `next_file_number` to the value that object already used, and the next flush
-// would put at a name that exists. Write-once refuses that — correctly, and now
-// with `Status::Fenced` — and the counter returns to the same number on every
-// subsequent open, so the store would be unwritable forever.
+// would put at a name that exists. Write-once refuses that, and the counter would return to
+// the same number on every subsequent open, so the store would be unwritable forever.
 //
-// Open collecting unreferenced objects is what breaks that cycle, and this had no
-// test. The object planted here is exactly what such a crash leaves behind.
+// **Deleting the orphan at open is what this used to rely on, and that is gone** — open destroys
+// nothing, because an unreferenced object is indistinguishable from a concurrent writer's
+// in-flight one. Stepping over it costs nothing and needs no such judgement. The object planted
+// here is exactly what such a crash leaves behind.
 TEST_F(DbFaultTest, AnOrphanFromACrashedWriteDoesNotBlockTheNextFlush) {
     Oracle oracle;
     {

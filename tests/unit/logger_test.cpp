@@ -1,3 +1,4 @@
+#include "db/db_impl.hpp"
 #include "fault/fault_injecting_blob_store.hpp"
 #include "support/test_db.hpp"
 #include "elysiumkv/db.hpp"
@@ -5,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -61,6 +63,45 @@ void put_until_flush(DB& db, int count, const std::string& prefix = "k") {
         const std::string key = prefix + std::to_string(i);
         ASSERT_EQ(db.put(Slice::from(key), Slice::from(std::string(512, 'v'))), Status::Ok);
     }
+}
+
+/// `OrphansReclaimed` is in the published event enum and was emitted from a function nothing
+/// called, so it had never once fired. The sweep that does the deleting is the one that has to
+/// report it — an operator watching for the event would otherwise conclude reclamation never runs,
+/// which is indistinguishable from the store leaking.
+TEST(LoggerTest, TheSweepReportsWhatItReclaimed) {
+    TestStore store;
+    Recorder recorder;
+    std::atomic<uint64_t> now{1'000'000};
+
+    Options options = make_options(store);
+    // Inline, so the sweeps this test asks for are the only ones that happen.
+    options.background = BackgroundMode::Inline;
+    options.orphan_sweep_interval = Duration(1);
+    options.orphan_retention = Duration(60'000);
+    options.clock = [&now] { return now.load(std::memory_order_relaxed); };
+    options.logger = recorder.sink();
+    options.min_log_level = LogLevel::Debug;
+
+    auto opened = DB::open(options);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    auto db = std::move(*opened);
+    put_until_flush(*db, 40);
+    ASSERT_EQ(db->flush(), Status::Ok);
+
+    ASSERT_EQ(store.store(0)->put("000000004242.sst",
+                                  Slice::from(std::string_view("residue"))).get(),
+              Status::Ok);
+
+    auto& engine = static_cast<DbImpl&>(*db);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+    EXPECT_FALSE(recorder.saw(LogEvent::OrphansReclaimed))
+        << "one observation is not a sustained one, so there was nothing to report yet";
+
+    now.fetch_add(120'000);
+    ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
+    EXPECT_TRUE(recorder.saw(LogEvent::OrphansReclaimed))
+        << "the sweep deleted an object and said nothing about it";
 }
 
 TEST(LoggerTest, SaysNothingWhenNoLoggerIsConfigured) {
