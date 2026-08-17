@@ -615,6 +615,7 @@ Status DbImpl::run_compaction(const Compaction& compaction, DeferredLine& line) 
     }
 
     if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) {
+        background_failures_.fetch_add(1, std::memory_order_relaxed);
         line.set(LogLevel::Warn, LogEvent::CompactionFailed, "L", compaction.level, "->L",
                  compaction.output_level, " could not be installed: ", status_name(status));
         return status;

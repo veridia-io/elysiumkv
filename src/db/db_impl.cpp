@@ -659,6 +659,7 @@ bool DbImpl::run_one_flush(Status& status) {
         // actually happened — compaction included.
         note_generation_roll();
     } else {
+        background_failures_.fetch_add(1, std::memory_order_relaxed);
         log_event(LogLevel::Warn, LogEvent::BackgroundFailure, "flush failed: ",
                   status_name(status),
                   is_retryable(status) ? ", will retry" : ", terminal");
@@ -1637,6 +1638,7 @@ Stats DbImpl::stats() const {
     stats.migration_bytes = migration_bytes_.load();
     stats.stalled_total = Duration(stalled_total_ms_.load());
     stats.stall_count = stalls_.load();
+    stats.background_failures = background_failures_.load();
     stats.block_cache_bytes = block_cache_->approximate_bytes();
     if (options_.memory_budget != nullptr) {
         stats.memory_budget_used = options_.memory_budget->used();

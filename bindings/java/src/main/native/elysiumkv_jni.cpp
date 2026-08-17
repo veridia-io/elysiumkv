@@ -855,6 +855,21 @@ void logger_write(void* context, int level, int event, const char* message, size
     env->DeleteLocalRef(text);
 }
 
+jlongArray JNICALL blob_cache_stats(JNIEnv* env, jclass, jlong store) {
+    return guard(env, [&]() -> jlongArray {
+        uint64_t hits = 0;
+        uint64_t misses = 0;
+        if (!check(env, elysiumkv_blob_cache_stats(as_pointer(store), &hits, &misses))) {
+            return nullptr;
+        }
+        jlongArray out = env->NewLongArray(2);
+        if (out == nullptr) return nullptr;
+        jlong values[2] = {static_cast<jlong>(hits), static_cast<jlong>(misses)};
+        env->SetLongArrayRegion(out, 0, 2, values);
+        return out;
+    }, static_cast<jlongArray>(nullptr));
+}
+
 void JNICALL options_set_logger(JNIEnv* env, jclass, jlong options, jobject sink, jint min_level) {
     guard_void(env, [&] {
         if (sink == nullptr) {
@@ -1156,6 +1171,8 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(iter_create)},
     {const_cast<char*>("optionsConfigureCompaction"), const_cast<char*>("(JDJ)V"),
      reinterpret_cast<void*>(options_configure_compaction)},
+    {const_cast<char*>("blobCacheStats"), const_cast<char*>("(J)[J"),
+     reinterpret_cast<void*>(blob_cache_stats)},
     {const_cast<char*>("optionsSetLogger"),
      const_cast<char*>("(JLio/veridia/elysiumkv/LoggerBridge;I)V"),
      reinterpret_cast<void*>(options_set_logger)},

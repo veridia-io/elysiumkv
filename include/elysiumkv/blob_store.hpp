@@ -108,6 +108,9 @@ public:
     virtual BlobStore& delegate() = 0;
     virtual size_t max_cache_bytes() const = 0;
     virtual bool cache_on_write() const = 0;
+    /// A miss against a remote delegate is a round trip, so the ratio is read latency.
+    virtual uint64_t hits() const = 0;
+    virtual uint64_t misses() const = 0;
 
     std::string id() const override {
         return const_cast<CacheBlobStore*>(this)->delegate().id();

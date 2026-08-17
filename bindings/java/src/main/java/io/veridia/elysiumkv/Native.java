@@ -218,6 +218,8 @@ final class Native {
 
     static native void optionsSetLogger(long options, LoggerBridge sink, int minLevel);
 
+    static native long[] blobCacheStats(long store);
+
     static native long iterCreateReverse(long db, byte[] lo, int loLength, byte[] hi, int hiLength);
 
     static native long iterPrefixReverse(long db, byte[] prefix, int prefixLength);

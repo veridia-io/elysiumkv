@@ -554,6 +554,7 @@ private:
     std::atomic<bool> requires_recovery_{false};
     std::atomic<uint64_t> flushes_{0};
     std::atomic<uint64_t> stalls_{0};
+    std::atomic<uint64_t> background_failures_{0};
     std::atomic<uint64_t> budget_sheds_{0};
     std::atomic<uint64_t> stalled_total_ms_{0};
     /// Written by step 7's compactor; reported from now so the shape of Stats

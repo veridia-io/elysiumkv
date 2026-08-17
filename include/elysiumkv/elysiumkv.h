@@ -371,6 +371,16 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_disk_cache_blob_store_create_chunked(vo
                                                                 size_t fetch_granularity,
                                                                 void** out);
 
+/* Hits and misses of a caching blob store — one made by any of the four calls above.
+ *
+ * The hit rate is what says whether a cache in front of a remote store is earning its space: a
+ * miss there is a round trip, so this is read latency rather than a curiosity. The engine's own
+ * block-cache counters in elysiumkv_stats are a different layer and answer a different question.
+ *
+ * ELYSIUMKV_CONFIG when the handle is not a caching store. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_blob_cache_stats(void* store, uint64_t* hits,
+                                                    uint64_t* misses);
+
 /* --- remote seams (ARCHITECTURE.md "The ABI boundary", ARCHITECTURE.md "Ownership is one compare-and-set") --------------------------------------------
  *
  * S3 and DynamoDB, which is what makes a cold tier actually cold. Absent unless

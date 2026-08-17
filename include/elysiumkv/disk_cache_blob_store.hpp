@@ -59,8 +59,8 @@ public:
     void set_verify_against_delegate(bool verify);
 
     size_t cached_bytes() const;
-    uint64_t hits() const;
-    uint64_t misses() const;
+    uint64_t hits() const override;
+    uint64_t misses() const override;
 
     struct Impl;
 

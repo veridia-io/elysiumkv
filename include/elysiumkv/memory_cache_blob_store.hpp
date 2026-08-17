@@ -62,8 +62,8 @@ public:
     /// Bytes currently held. Diagnostics and tests — a cache whose hit rate cannot be
     /// observed cannot be sized.
     size_t cached_bytes() const;
-    uint64_t hits() const;
-    uint64_t misses() const;
+    uint64_t hits() const override;
+    uint64_t misses() const override;
 
     struct Impl;
 

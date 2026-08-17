@@ -276,12 +276,12 @@ size of each record type, so a decoder built against an older layout locates the
 and skips fields it does not know. **Locate records by the declared sizes, never by summing the
 fields you happen to know.**
 
-Header — `kStatsHeaderBytes = 232`:
+Header — `kStatsHeaderBytes = 240`:
 
 | Offset | Field | Type |
 | --- | --- | --- |
 | 0 | `format_version` | uint32 (1) |
-| 4 | `header_bytes` | uint32 (232) |
+| 4 | `header_bytes` | uint32 (240) |
 | 8 | `level_record_bytes` | uint32 (48) |
 | 12 | `tier_record_bytes` | uint32 (32) |
 | 16 | `level_count` | uint32 |
@@ -293,17 +293,18 @@ Header — `kStatsHeaderBytes = 232`:
 | 209 | *padding* | 7 bytes, zero |
 | 216 | `memtable_entries` | uint64 |
 | 224 | `memtable_tombstones` | uint64 |
+| 232 | `background_failures` | uint64 |
 
-The 22 scalars, in order from offset 32: `memtable_bytes`, `memtable_age_ms`, `compactions`,
+The 23 scalars, in order from offset 32: `memtable_bytes`, `memtable_age_ms`, `compactions`,
 `compaction_bytes_read`, `compaction_bytes_written`, `migrations`, `migration_bytes`,
 `stalled_total_ms`, `stall_count`, `block_cache_hits`, `block_cache_misses`, `block_cache_bytes`,
 `pins_outstanding`, `reader_cache_hits`, `reader_cache_misses`, `reader_cache_bytes`, `open_readers`,
 `memory_budget_used`, `memory_budget_total`, `budget_sheds`, `flushes` (offset 192),
 `durable_watermark` (offset 200), `memtable_entries` (offset 216), `memtable_tombstones`
-(offset 224).
+(offset 224), `background_failures` (offset 232).
 
-`flushes`, `durable_watermark`, `memtable_entries` and `memtable_tombstones` were **appended without
-a version bump**, and so were the level record's `entries` and `tombstones` — which is what the
+`flushes`, `durable_watermark`, `memtable_entries`, `memtable_tombstones` and
+`background_failures` were **appended without a version bump**, and so were the level record's `entries` and `tombstones` — which is what the
 self-describing header is for: a decoder that locates records at `header_bytes` and steps by
 `level_record_bytes` skips fields it does not know, and seven earlier scalars arrived the same way.
 The level record growing is the first time the *record* size has moved rather than the header, and it

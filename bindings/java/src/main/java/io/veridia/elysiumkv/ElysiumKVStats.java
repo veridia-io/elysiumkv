@@ -126,6 +126,7 @@ public final class ElysiumKVStats {
     private final long flushes;
     private final long memtableEntries;
     private final long memtableTombstones;
+    private final long backgroundFailures;
     private final long durableWatermark;
     private final boolean watermarkPresent;
     private final List<Level> levels;
@@ -166,6 +167,7 @@ public final class ElysiumKVStats {
         flushes = headerBytes > 192 ? readLong(buffer, 192) : 0L;
         memtableEntries = headerBytes > 216 ? readLong(buffer, 216) : 0L;
         memtableTombstones = headerBytes > 224 ? readLong(buffer, 224) : 0L;
+        backgroundFailures = headerBytes > 232 ? readLong(buffer, 232) : 0L;
         durableWatermark = headerBytes > 200 ? readLong(buffer, 200) : 0L;
         watermarkPresent = headerBytes > 208 && buffer[208] != 0;
 
@@ -271,6 +273,13 @@ public final class ElysiumKVStats {
 
     /** How many of {@link #memtableEntries()} are deletes. */
     public long memtableTombstones() { return memtableTombstones; }
+
+    /**
+     * Background operations that failed — a flush or a compaction — counted even where the engine
+     * retried and succeeded. A store working through a degraded object store otherwise looks
+     * exactly like a healthy one.
+     */
+    public long backgroundFailures() { return backgroundFailures; }
 
     /**
      * An <strong>upper bound</strong> on the number of distinct live keys — {@code records -

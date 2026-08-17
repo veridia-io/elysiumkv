@@ -144,6 +144,8 @@ TEST_F(ConfigValidationTest, ACacheAsATiersInnermostStoreIsRejected) {
         BlobStore& delegate() override { return *delegate_; }
         size_t max_cache_bytes() const override { return 0; }
         bool cache_on_write() const override { return false; }
+        uint64_t hits() const override { return 0; }
+        uint64_t misses() const override { return 0; }
         std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
             return delegate_->get(name, offset, len);
         }

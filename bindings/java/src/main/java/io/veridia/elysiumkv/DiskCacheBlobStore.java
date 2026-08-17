@@ -75,4 +75,17 @@ public final class DiskCacheBlobStore extends BlobStore {
         return Native.diskCacheBlobStoreCreateChunked(directory, delegate.handle(), maxCacheBytes,
                                                       cacheOnWrite, fetchGranularity);
     }
+
+    /** Reads that the cache served without touching the delegate. */
+    public long hits() {
+        return Native.blobCacheStats(handle())[0];
+    }
+
+    /**
+     * Reads that fell through to the delegate. Against a remote store each one is a round trip, so
+     * the ratio against {@link #hits()} is read latency rather than a curiosity.
+     */
+    public long misses() {
+        return Native.blobCacheStats(handle())[1];
+    }
 }

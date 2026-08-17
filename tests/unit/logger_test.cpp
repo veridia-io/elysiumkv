@@ -216,5 +216,34 @@ TEST(LoggerTest, CompactionIsReportedFromABackgroundThread) {
     }
 }
 
+/// The counter beside the log line: a log can be filtered or sampled, and an alert cannot fire on
+/// one. This is what tells a dashboard the store is working through a degraded backend.
+TEST(LoggerTest, ARetryableBackgroundFailureIsCounted) {
+    TestStore store;
+    auto faulty = std::make_shared<FaultInjectingBlobStore>(store.store(0));
+    faulty->add_rule({.op = FaultInjectingBlobStore::Op::Put,
+                      .name_contains = ".sst",
+                      .first_match = 0,
+                      .match_count = 1,
+                      .status = Status::Io});
+
+    Options options = make_options(store);
+    options.tiers = {Tier{.store = faulty, .durability = Durability::Durable}};
+
+    auto db = DB::open(options);
+    ASSERT_TRUE(db.has_value());
+    EXPECT_EQ((*db)->stats().background_failures, 0u);
+
+    put_until_flush(**db, 200);
+    (void)(*db)->flush();
+    EXPECT_EQ((*db)->stats().background_failures, 1u)
+        << "the failure the engine then retries past is the one nothing else records";
+
+    put_until_flush(**db, 200, "second");
+    ASSERT_EQ((*db)->flush(), Status::Ok);
+    EXPECT_EQ((*db)->stats().background_failures, 1u)
+        << "a successful flush must not inflate it";
+}
+
 }  // namespace
 }  // namespace elysiumkv::test

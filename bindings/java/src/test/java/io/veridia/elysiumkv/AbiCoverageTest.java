@@ -146,6 +146,10 @@ class AbiCoverageTest {
                          new MemoryCacheBlobStore(disk, budget, 1 << 20, false)) {
                 assertNotNull(memory);
 
+                exercise("blobCacheStats");
+                assertEquals(0, disk.hits() + disk.misses());
+                assertEquals(0, memory.hits() + memory.misses());
+
                 // The chunked pair, which take a fetch granularity. Built over the same delegate:
                 // what is asserted here is that the JNI signatures are right, which nothing but a
                 // call establishes — behaviour belongs to the C++ cache tests.

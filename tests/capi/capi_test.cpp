@@ -540,7 +540,7 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     const uint32_t level_count = u32(16);
     const uint32_t tier_count = u32(20);
 
-    EXPECT_EQ(header_bytes, 232u);
+    EXPECT_EQ(header_bytes, 240u);
     EXPECT_EQ(level_record_bytes, 48u);
     EXPECT_EQ(tier_record_bytes, 32u);
     EXPECT_LE(buffer[24], 1u) << "requires_recovery is a 0/1 byte";
