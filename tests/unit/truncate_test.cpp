@@ -3,7 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace elysiumkv::test {
@@ -121,6 +123,55 @@ TEST_F(Truncate, AWriteBelowTheFloorIsRefused) {
 
     // At or above the floor is ordinary.
     EXPECT_EQ(db_->put(Slice::from(key_at(10)), Slice::from(std::string("fresh"))), Status::Ok);
+}
+
+/// **`truncate_below` races `put`, and two application threads through one handle are supported.**
+/// The floor used to be read on the way into `put`, before `check_entry_size` and before
+/// `throttle_writes` — which *blocks* — so the window between deciding a write was legal and
+/// applying it was not small at all. A write could pass the check, wait out a stall, and land
+/// under a floor published long before it, returning `Ok` for a key that could never be read back.
+///
+/// The distinguishing case only exists inside the lock, so what this pins from outside is the
+/// property that survives it: every outcome is `Ok` or `Config`, nothing below the final floor is
+/// readable, and the invariants hold. Its real value is under TSan, which is where the publication
+/// and its rollback are actually examined.
+TEST_F(Truncate, ConcurrentWritesAndTruncationsStayConsistent) {
+    for (int i = 0; i < 400; ++i) put(key_at(i), "seed");
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> refused{0};
+    std::atomic<int> accepted{0};
+
+    std::thread writer([&] {
+        for (int round = 0; !stop.load() && round < 4000; ++round) {
+            const Status status =
+                db_->put(Slice::from(key_at(round % 400)), Slice::from(std::string("w")));
+            if (status == Status::Ok) {
+                accepted.fetch_add(1);
+            } else if (status == Status::Config) {
+                refused.fetch_add(1);
+            } else {
+                ADD_FAILURE() << "a racing put must be Ok or Config, got " << status_name(status);
+                return;
+            }
+        }
+    });
+
+    for (int floor = 1; floor <= 200; floor += 1) {
+        ASSERT_EQ(db_->truncate_below(Slice::from(key_at(floor))), Status::Ok);
+    }
+    stop.store(true);
+    writer.join();
+
+    EXPECT_GT(accepted.load(), 0) << "the writer never got through, so this proved nothing";
+    EXPECT_GT(refused.load(), 0) << "the floor never overtook the writer, so this proved nothing";
+
+    // Nothing below the final floor survives, whoever won any individual race.
+    for (int i = 0; i < 200; ++i) {
+        EXPECT_EQ(db_->get(Slice::from(key_at(i))).error(), Status::NotFound)
+            << "key " << i << " is below the floor and still readable";
+    }
+    EXPECT_EQ(static_cast<DbImpl*>(db_.get())->check_invariants(), Status::Ok);
 }
 
 /// A batch lands whole or not at all, so one key under the floor refuses all of it.

@@ -211,6 +211,11 @@ std::future<Status> DiskCacheBlobStore::put(std::string_view name, Slice bytes) 
     return make_ready_future(Status::Ok);
 }
 
+void DiskCacheBlobStore::invalidate(std::string_view name) {
+    std::lock_guard<std::mutex> lock(impl_->mutex_);
+    impl_->core.invalidate(name);
+}
+
 std::future<Status> DiskCacheBlobStore::remove(std::string_view name) {
     {
         std::lock_guard<std::mutex> lock(impl_->mutex_);

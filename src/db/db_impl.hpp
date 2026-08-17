@@ -81,6 +81,7 @@ public:
     Status write(WriteBatch& batch) override;
     Status truncate_below(Slice key) override;
     Status delete_range(Slice lower, Slice upper) override;
+    /// **`mem_mutex_` must be held.** See `write_floor_` for why the Version is not consulted.
     Status check_below_truncation(Slice key) const;
 
     std::unique_ptr<Iterator> iterator() override;
@@ -475,6 +476,21 @@ private:
     std::unique_ptr<VersionSet> versions_;
 
     mutable std::mutex mem_mutex_;
+    /// The floor a write is refused against, **guarded by `mem_mutex_`** and published by
+    /// `truncate_below` *before* its manifest edit rather than after.
+    ///
+    /// The Version carries the authoritative point for *reads*, and that has to stay where it is —
+    /// an iterator pins a Version and must keep seeing the world as it was. But a writer cannot
+    /// read the floor from there and stay correct: `truncate_below` cannot hold `mem_mutex_` across
+    /// its manifest write without stalling every writer on an object-store round trip, so a check
+    /// against the Version could pass, the floor advance, and the write land underneath it and
+    /// still return `Ok` — the one outcome `truncate_below`'s contract rules out by construction.
+    ///
+    /// Publishing under the memtable lock makes the two orderings the only two there are: a write
+    /// that reaches the memtable first happened *before* the truncation and is hidden by the read
+    /// clamp, which is what truncation means; one that arrives after sees the new floor and is
+    /// refused. Rolled back if the edit does not land.
+    std::string write_floor_;
     std::condition_variable flush_scheduled_;
     std::condition_variable flush_finished_;
     std::shared_ptr<SkiplistMemtable> mem_;

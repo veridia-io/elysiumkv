@@ -185,6 +185,11 @@ std::future<Status> MemoryCacheBlobStore::put(std::string_view name, Slice bytes
     return make_ready_future(Status::Ok);
 }
 
+void MemoryCacheBlobStore::invalidate(std::string_view name) {
+    std::lock_guard<std::mutex> lock(impl_->mutex_);
+    impl_->core.invalidate(name);
+}
+
 std::future<Status> MemoryCacheBlobStore::remove(std::string_view name) {
     // Invalidate first: if the delegate's delete fails the object still exists and a
     // later read repopulates, which costs a round trip. The other order can leave an

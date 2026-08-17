@@ -384,6 +384,8 @@ Status DbImpl::recover() {
 
     if (Status verified = verify_stores_and_discard(); verified != Status::Ok) return verified;
     adopt_recovered_watermark();
+    // No lock: nothing else can reach this instance until `open` returns.
+    write_floor_ = versions_->current()->truncation_point();
     return Status::Ok;
 }
 
@@ -450,13 +452,15 @@ Status check_entry_size(Slice key, Slice value) {
 
 Status DbImpl::put(Slice key, Slice value) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
-    if (Status status = check_below_truncation(key); status != Status::Ok) return status;
     if (Status status = check_entry_size(key, value); status != Status::Ok) return status;
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
         ELYSIUMKV_LOCK_AUDIT();
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
+        // Checked here rather than on the way in, so that the floor cannot advance between the
+        // check and the write — see `write_floor_`.
+        if (Status status = check_below_truncation(key); status != Status::Ok) return status;
         mem_->put(key, value);
     }
     return maybe_freeze_memtable(false);
@@ -498,13 +502,13 @@ Status DbImpl::delete_range(Slice lower, Slice upper) {
 
 Status DbImpl::remove(Slice key) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
-    if (Status status = check_below_truncation(key); status != Status::Ok) return status;
     if (Status status = check_entry_size(key, Slice()); status != Status::Ok) return status;
     if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
         ELYSIUMKV_LOCK_AUDIT();
         if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
+        if (Status status = check_below_truncation(key); status != Status::Ok) return status;
         mem_->remove(key);
     }
     return maybe_freeze_memtable(false);
@@ -519,17 +523,30 @@ Status DbImpl::remove(Slice key) {
 /// and then could not be read back, which is the one outcome worth ruling out by construction.
 /// A caller that wants to delete a range and keep writing into it wants `delete_range`, not this.
 Status DbImpl::check_below_truncation(Slice key) const {
-    return versions_->current()->truncated(key) ? Status::Config : Status::Ok;
+    return !write_floor_.empty() && key < Slice::from(write_floor_) ? Status::Config : Status::Ok;
 }
 
 Status DbImpl::truncate_below(Slice key) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
     if (key.empty()) return Status::Ok;      // nothing sorts below the empty key
 
+    // **Published before the edit, under the memtable lock.** That is what makes the refusal
+    // airtight: from here on every writer sees the new floor, and any write already in the
+    // memtable happened before the truncation and is hidden by the read clamp, which is what a
+    // truncation means. Holding the lock across the manifest write instead would stall every
+    // writer on an object-store round trip.
+    //
     // Monotone, and the check is here rather than only in `Version::apply` so that a repeated call
     // costs no manifest write at all. Idempotence is the property that makes this safe to drive
     // from a loop that does not track what it already asked for.
-    if (!(versions_->current()->truncation_point() < key.to_string())) return Status::Ok;
+    std::string previous_floor;
+    {
+        std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
+        if (!(Slice::from(write_floor_) < key)) return Status::Ok;
+        previous_floor = write_floor_;
+        write_floor_ = key.to_string();
+    }
 
     // **The memtables are deliberately left alone.** The read clamp hides keys below the point
     // wherever they live, memtable included, so touching them would change no answer — and it is
@@ -539,7 +556,15 @@ Status DbImpl::truncate_below(Slice key) {
     // afterwards for a fraction of the cost.
     VersionEdit edit;
     edit.truncation_point = key.to_string();
-    if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) return status;
+    if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) {
+        // The floor was published on the strength of an edit that did not land, so it goes back —
+        // unless another call has since moved it further, in which case that one owns it now and
+        // its own failure path will do the same.
+        std::lock_guard<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
+        if (write_floor_ == key.to_string()) write_floor_ = previous_floor;
+        return status;
+    }
 
     // Whole files below the point are now unreadable and can go without a rewrite. Left to the
     // maintenance loop rather than done here: it already owns file removal and its retention
@@ -554,10 +579,11 @@ Status DbImpl::write(WriteBatch& batch) {
     // unit, so discovering an oversized entry halfway through would leave the
     // store holding half of it.
     //
-    // The floor is read once here rather than per operation, so every range in the batch is clamped
-    // against the same one — a batch is a unit, and a floor that moved underneath it halfway
-    // through would make it a sequence again.
-    const std::string floor = versions_->current()->truncation_point();
+    // The floor is read once, under `mem_mutex_` and below, so every range in the batch is clamped
+    // against the same one and the refusal uses that same one — a batch is a unit, and a floor
+    // that moved underneath it halfway through would make it a sequence again. It used to be read
+    // here while `check_below_truncation` re-read the Version per operation, so within one batch
+    // the clamp and the refusal could already disagree.
     // Each op's resolved range, or nothing for an op that is not one or deletes nothing.
     //
     // **One entry per op rather than one per range**, indexed by the same loop variable below. A
@@ -565,6 +591,19 @@ Status DbImpl::write(WriteBatch& batch) {
     // different condition than the loop is a drift waiting to happen — the first empty range in a
     // batch would silently shift every later one onto the wrong bounds.
     std::vector<std::optional<std::pair<std::string, std::string>>> ranges(batch.ops().size());
+    if (Status status = throttle_writes(); status != Status::Ok) return status;
+
+    // Validation and application share one critical section, so the floor they see is the same
+    // one and nothing lands before a later op is found to be invalid. Everything in here is
+    // comparisons and memtable inserts; there is no I/O under the lock.
+    //
+    // Scoped, because `maybe_freeze_memtable` below takes the same mutex.
+    {
+    std::lock_guard<std::mutex> lock(mem_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
+    if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
+    const std::string floor = write_floor_;
+
     for (size_t i = 0; i < batch.ops().size(); ++i) {
         const WriteBatch::Op& op = batch.ops()[i];
         if (op.kind == WriteBatch::Kind::DeleteRange) {
@@ -596,13 +635,9 @@ Status DbImpl::write(WriteBatch& batch) {
             return below;
         }
     }
-    if (Status status = throttle_writes(); status != Status::Ok) return status;
     {
         // Applied as a unit: the freeze decision is taken at batch boundaries
         // only, so a flush never splits a batch across two memtables.
-        std::lock_guard<std::mutex> lock(mem_mutex_);
-        ELYSIUMKV_LOCK_AUDIT();
-        if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
         for (size_t i = 0; i < batch.ops().size(); ++i) {
             const WriteBatch::Op& op = batch.ops()[i];
             switch (op.kind) {
@@ -624,6 +659,7 @@ Status DbImpl::write(WriteBatch& batch) {
                 }
             }
         }
+    }
     }
     return maybe_freeze_memtable(false);
 }
