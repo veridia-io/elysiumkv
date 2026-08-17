@@ -125,6 +125,11 @@ struct Stats {
     Duration stalled_total{0};
     uint64_t stall_count = 0;
 
+    /// Background operations that failed — a flush or a compaction. **Counted even when the engine
+    /// retries and succeeds**, which is the case that otherwise leaves no trace: a store working
+    /// its way through a degraded object store looks identical to a healthy one.
+    uint64_t background_failures = 0;
+
     uint64_t block_cache_hits = 0;
     uint64_t block_cache_misses = 0;
     size_t block_cache_bytes = 0;

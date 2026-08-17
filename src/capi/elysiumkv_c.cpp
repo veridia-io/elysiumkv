@@ -559,6 +559,23 @@ elysiumkv_status elysiumkv_disk_cache_blob_store_create_chunked(void* delegate,
     });
 }
 
+elysiumkv_status elysiumkv_blob_cache_stats(void* store, uint64_t* hits, uint64_t* misses) {
+    return guard([&]() -> elysiumkv_status {
+        if (store == nullptr || hits == nullptr || misses == nullptr) {
+            return fail(Status::Config, "elysiumkv_blob_cache_stats: store, hits and misses are required");
+        }
+        auto* handle = static_cast<std::shared_ptr<BlobStore>*>(store);
+        // as_cache rather than a dynamic_cast: this builds without RTTI.
+        CacheBlobStore* cache = handle->get()->as_cache();
+        if (cache == nullptr) {
+            return fail(Status::Config, "elysiumkv_blob_cache_stats: not a caching blob store");
+        }
+        *hits = cache->hits();
+        *misses = cache->misses();
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_memory_cache_blob_store_create(void* delegate, void* budget,
                                                      size_t max_cache_bytes, int cache_on_write,
                                                      void** out) {
@@ -1324,7 +1341,7 @@ constexpr uint32_t kStatsFormatVersion = 1;
 // the header declares its own length, so a decoder that starts records at `header_bytes` skips
 // what it does not recognise — which is the property that made the previous seven appended
 // scalars a non-event too.
-constexpr uint32_t kStatsHeaderBytes = 232;
+constexpr uint32_t kStatsHeaderBytes = 240;
 constexpr uint32_t kStatsLevelRecordBytes = 48;
 constexpr uint32_t kStatsTierRecordBytes = 32;
 
@@ -1399,6 +1416,7 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.pad(7);
     out.u64(stats.memtable_entries);
     out.u64(stats.memtable_tombstones);
+    out.u64(stats.background_failures);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);
