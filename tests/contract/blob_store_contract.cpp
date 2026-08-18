@@ -147,6 +147,55 @@ TEST_P(BlobStoreContract, BulkViewNamesTheSameLocation) {
     EXPECT_EQ(as_string(*value), "hello");
 }
 
+// The counters are what an operator is billed on against object storage, so every
+// implementation owes them — a store that silently reports zero traffic is worse than
+// one that reports none at all.
+TEST_P(BlobStoreContract, EveryRequestIsCounted) {
+    const IoCounters before = store_->counters();
+
+    ASSERT_EQ(put("000000000001.sst", "abcdefghij"), Status::Ok);
+    ASSERT_TRUE(get("000000000001.sst", 2, 3).has_value());
+    ASSERT_TRUE(list().has_value());
+    ASSERT_EQ(remove("000000000001.sst"), Status::Ok);
+
+    const IoCounters after = store_->counters();
+    EXPECT_EQ(after.puts, before.puts + 1);
+    EXPECT_EQ(after.gets, before.gets + 1);
+    EXPECT_EQ(after.lists, before.lists + 1);
+    EXPECT_EQ(after.removes, before.removes + 1);
+    EXPECT_EQ(after.bytes_written, before.bytes_written + 10);
+    // At least the three asked for: a cache reads a whole chunk to answer a window.
+    EXPECT_GE(after.bytes_read, before.bytes_read + 3);
+    EXPECT_EQ(after.errors, before.errors);
+}
+
+// A miss is an answer, and a store that serves nothing but misses is working. Counting
+// it as an error would make an empty prefix look like a broken tier.
+TEST_P(BlobStoreContract, NotFoundIsARequestAndNotAnError) {
+    const IoCounters before = store_->counters();
+
+    ASSERT_EQ(get("000000000042.sst").error(), Status::NotFound);
+
+    const IoCounters after = store_->counters();
+    EXPECT_EQ(after.gets, before.gets + 1);
+    EXPECT_EQ(after.errors, before.errors);
+}
+
+// A collision is a real failure, and it is counted as one — the tier's error rate is the
+// signal that says a store is misbehaving rather than merely empty.
+TEST_P(BlobStoreContract, AFailedPutIsCountedAsAnError) {
+    ASSERT_EQ(put("000000000001.sst", "original"), Status::Ok);
+    const IoCounters before = store_->counters();
+
+    ASSERT_EQ(put("000000000001.sst", "replacement"), Status::Unusable);
+
+    const IoCounters after = store_->counters();
+    EXPECT_EQ(after.puts, before.puts + 1);
+    EXPECT_EQ(after.errors, before.errors + 1);
+    EXPECT_EQ(after.bytes_written, before.bytes_written)
+        << "a rejected put moved nothing";
+}
+
 TEST_P(BlobStoreContract, IdIsNonEmpty) { EXPECT_FALSE(store_->id().empty()); }
 
 }  // namespace

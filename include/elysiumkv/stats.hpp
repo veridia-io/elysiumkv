@@ -1,6 +1,8 @@
 #ifndef ELYSIUMKV_STATS_HPP
 #define ELYSIUMKV_STATS_HPP
 
+#include "elysiumkv/io_counters.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -70,6 +72,13 @@ struct TierStats {
     /// Files whose placement no longer matches this tier: past `max_age`, or the
     /// tier is over `max_bytes`.
     int files_pending_migration = 0;
+    /// This tier's authoritative store's traffic, which against object storage is the bill. A
+    /// cache in front of the tier is not counted here; its effect is its hit rate.
+    ///
+    /// **Two tiers naming one store report the same figures** — they are the store's, not the
+    /// tier's, so summing across tiers double-counts.
+    IoCounters io;
+
     /// `Transient` only: the oldest file here is past `stall_age`.
     ///
     /// **The condition as observed at this instant, which is a moment ahead of the valve.** The

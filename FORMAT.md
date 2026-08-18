@@ -304,7 +304,7 @@ Header — `kStatsHeaderBytes = 240`:
 | 0 | `format_version` | uint32 (1) |
 | 4 | `header_bytes` | uint32 (240) |
 | 8 | `level_record_bytes` | uint32 (48) |
-| 12 | `tier_record_bytes` | uint32 (32) |
+| 12 | `tier_record_bytes` | uint32 (88) |
 | 16 | `level_count` | uint32 |
 | 20 | `tier_count` | uint32 |
 | 24 | `requires_recovery` | uint8 (0/1) |
@@ -355,7 +355,7 @@ Level record — 48 bytes:
 | 32 | `entries` | uint64 |
 | 40 | `tombstones` | uint64 |
 
-Tier record — 32 bytes:
+Tier record — 88 bytes:
 
 | Offset | Field | Type |
 | --- | --- | --- |
@@ -366,6 +366,20 @@ Tier record — 32 bytes:
 | 24 | `files_pending_migration` | int32 |
 | 28 | `stalling` | uint8 (0/1) |
 | 29 | *padding* | 3 bytes, zero |
+| 32 | `io_gets` | uint64 |
+| 40 | `io_puts` | uint64 |
+| 48 | `io_removes` | uint64 |
+| 56 | `io_lists` | uint64 |
+| 64 | `io_bytes_read` | uint64 |
+| 72 | `io_bytes_written` | uint64 |
+| 80 | `io_errors` | uint64 |
+
+The seven `io_*` counters are the **tier's authoritative store's** traffic since it was opened —
+requests as much as bytes, because against object storage both are billed. They are the store's and
+not the tier's, so **two tiers naming one store report identical figures** and summing across tiers
+double-counts. A cache in front of a tier is not counted here; its hit and miss counters already say
+what it did. `io_errors` excludes `NotFound`, which is an answer rather than a failure. The tier
+record grew from 32 to 88 by appending, under the same rule as the level record above.
 
 ## 8. Entry limits
 

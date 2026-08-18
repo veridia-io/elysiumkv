@@ -85,11 +85,15 @@ std::future<GetResult> FaultInjectingBlobStore::get(std::string_view name, uint6
         std::lock_guard<std::mutex> lock(mutex_);
         latency = latency_;
         if (const Rule* rule = match(Op::Get, name)) {
-            return make_ready_future(GetResult(std::unexpected(rule->status)));
+            GetResult injected(std::unexpected(rule->status));
+            note_get(injected);
+            return make_ready_future(std::move(injected));
         }
     }
     if (latency.count() > 0) std::this_thread::sleep_for(latency);
-    return make_ready_future(delegate_->get(name, offset, len).get());
+    GetResult result = delegate_->get(name, offset, len).get();
+    note_get(result);
+    return make_ready_future(std::move(result));
 }
 
 std::future<Status> FaultInjectingBlobStore::put(std::string_view name, Slice bytes) {
@@ -113,23 +117,30 @@ std::future<Status> FaultInjectingBlobStore::put(std::string_view name, Slice by
             const size_t n = std::min(fired->torn_bytes, bytes.size());
             (void)delegate_->put(name, Slice(bytes.data(), n)).get();
         }
+        note_put(fired->status, bytes.size());
         return make_ready_future(fired->status);
     }
-    return make_ready_future(delegate_->put(name, bytes).get());
+    const Status status = delegate_->put(name, bytes).get();
+    note_put(status, bytes.size());
+    return make_ready_future(status);
 }
 
 std::future<Status> FaultInjectingBlobStore::remove(std::string_view name) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (const Rule* rule = match(Op::Remove, name)) {
+            note_remove(rule->status);
             return make_ready_future(rule->status);
         }
     }
-    return make_ready_future(delegate_->remove(name).get());
+    const Status status = delegate_->remove(name).get();
+    note_remove(status);
+    return make_ready_future(status);
 }
 
 std::future<Status> FaultInjectingBlobStore::remove_many(const std::vector<std::string>& names) {
     record(Op::RemoveMany);
+    // Not counted here: the base loops over this store's `remove`, which counts each one.
     return BlobStore::remove_many(names);
 }
 
@@ -137,10 +148,14 @@ std::future<ListResult> FaultInjectingBlobStore::list(std::string_view prefix) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (const Rule* rule = match(Op::List, prefix)) {
-            return make_ready_future(ListResult(std::unexpected(rule->status)));
+            ListResult injected(std::unexpected(rule->status));
+            note_list(injected);
+            return make_ready_future(std::move(injected));
         }
     }
-    return make_ready_future(delegate_->list(prefix).get());
+    ListResult result = delegate_->list(prefix).get();
+    note_list(result);
+    return make_ready_future(std::move(result));
 }
 
 }  // namespace elysiumkv::test

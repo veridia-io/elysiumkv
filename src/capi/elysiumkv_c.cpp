@@ -124,22 +124,31 @@ public:
         size_t produced = 0;
         const elysiumkv_status status =
             vtable_.get(vtable_.context, name_z.c_str(), offset, want, buffer.data(), &produced);
-        if (status != ELYSIUMKV_OK) return make_ready_future(GetResult(std::unexpected(from_c(status))));
-        if (produced > want) return make_ready_future(GetResult(std::unexpected(Status::Corrupt)));
+        // Counted here rather than at each return, so a path added later cannot escape it.
+        const auto record = [this](GetResult result) {
+            note_get(result);
+            return make_ready_future(std::move(result));
+        };
+        if (status != ELYSIUMKV_OK) return record(GetResult(std::unexpected(from_c(status))));
+        if (produced > want) return record(GetResult(std::unexpected(Status::Corrupt)));
 
         buffer.resize(produced);
-        return make_ready_future(GetResult(std::move(buffer)));
+        return record(GetResult(std::move(buffer)));
     }
 
     std::future<Status> put(std::string_view name, Slice bytes) override {
         const std::string name_z(name);
-        return make_ready_future(
-            from_c(vtable_.put(vtable_.context, name_z.c_str(), bytes.data(), bytes.size())));
+        const Status status =
+            from_c(vtable_.put(vtable_.context, name_z.c_str(), bytes.data(), bytes.size()));
+        note_put(status, bytes.size());
+        return make_ready_future(status);
     }
 
     std::future<Status> remove(std::string_view name) override {
         const std::string name_z(name);
-        return make_ready_future(from_c(vtable_.remove(vtable_.context, name_z.c_str())));
+        const Status status = from_c(vtable_.remove(vtable_.context, name_z.c_str()));
+        note_remove(status);
+        return make_ready_future(status);
     }
 
     /// Only overridden when the vtable supplies it; otherwise the base class's
@@ -169,10 +178,12 @@ public:
                 static_cast<std::vector<std::string>*>(context)->emplace_back(name);
             },
             &names);
-        if (status != ELYSIUMKV_OK) {
-            return make_ready_future(ListResult(std::unexpected(from_c(status))));
-        }
-        return make_ready_future(ListResult(std::move(names)));
+        const auto record = [this](ListResult result) {
+            note_list(result);
+            return make_ready_future(std::move(result));
+        };
+        if (status != ELYSIUMKV_OK) return record(ListResult(std::unexpected(from_c(status))));
+        return record(ListResult(std::move(names)));
     }
 
 private:
@@ -1383,7 +1394,10 @@ constexpr uint32_t kStatsFormatVersion = 1;
 // scalars a non-event too.
 constexpr uint32_t kStatsHeaderBytes = 240;
 constexpr uint32_t kStatsLevelRecordBytes = 48;
-constexpr uint32_t kStatsTierRecordBytes = 32;
+// 32 for the original fields, then the store's seven I/O counters. Appended, and the header says
+// how wide a record is — so a decoder written against 32 reads the prefix of each and steps
+// correctly over the rest.
+constexpr uint32_t kStatsTierRecordBytes = 88;
 
 /// Appends little-endian into a buffer it never overruns: once `full` is set the
 /// writer only counts, which is what makes the size query and the real write the
@@ -1480,6 +1494,13 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
         out.i32(tier.files_pending_migration);
         out.u8(tier.stalling ? 1u : 0u);
         out.pad(3);
+        out.u64(tier.io.gets);
+        out.u64(tier.io.puts);
+        out.u64(tier.io.removes);
+        out.u64(tier.io.lists);
+        out.u64(tier.io.bytes_read);
+        out.u64(tier.io.bytes_written);
+        out.u64(tier.io.errors);
     }
 }
 

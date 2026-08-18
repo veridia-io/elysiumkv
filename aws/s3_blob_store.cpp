@@ -251,7 +251,9 @@ std::string S3BlobStore::id() const { return impl_->id; }
 BlobStore& S3BlobStore::bulk_view() { return *impl_->bulk_facade; }
 
 std::future<GetResult> S3BlobStore::get(std::string_view name, uint64_t offset, size_t len) {
-    return make_ready_future(do_get(*impl_, *impl_->point_client, name, offset, len));
+    auto result = do_get(*impl_, *impl_->point_client, name, offset, len);
+    note_get(result);
+    return make_ready_future(std::move(result));
 }
 
 namespace {
@@ -276,7 +278,11 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
     Aws::S3::Model::CreateMultipartUploadRequest create;
     create.SetBucket(impl_->options.bucket);
     create.SetKey(key);
+    // **Counted per request to S3, not per call to this class.** A multipart put is one `put`
+    // and several billed round trips — create, a part each, complete — and the figure this exists
+    // to produce is the one on the invoice.
     auto created = impl_->bulk_client->CreateMultipartUpload(create);
+    note_put(created.IsSuccess() ? Status::Ok : Status::Io, 0);
     if (!created.IsSuccess()) return Status::Io;
     const Aws::String upload_id = created.GetResult().GetUploadId();
 
@@ -288,7 +294,9 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
         request.SetBucket(impl_->options.bucket);
         request.SetKey(key);
         request.SetUploadId(upload_id);
-        (void)impl_->bulk_client->AbortMultipartUpload(request);
+        auto outcome = impl_->bulk_client->AbortMultipartUpload(request);
+        // A delete of the parts, and billed as its own round trip.
+        note_remove(outcome.IsSuccess() ? Status::Ok : Status::Io);
     };
 
     Aws::S3::Model::CompletedMultipartUpload completed;
@@ -308,6 +316,7 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
         part.SetContentLength(static_cast<long long>(length));
 
         auto uploaded = impl_->bulk_client->UploadPart(part);
+        note_put(uploaded.IsSuccess() ? Status::Ok : Status::Io, length);
         if (!uploaded.IsSuccess()) {
             abort();
             return Status::Io;
@@ -327,6 +336,7 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
     complete.SetIfNoneMatch("*");
 
     auto finished = impl_->bulk_client->CompleteMultipartUpload(complete);
+    note_put(finished.IsSuccess() ? Status::Ok : Status::Io, 0);
     if (finished.IsSuccess()) return Status::Ok;
     // Including the write-once rejection: the upload exists and its parts are billable
     // until aborted, and "the name was taken" is no reason to leave them.
@@ -358,6 +368,7 @@ std::future<Status> S3BlobStore::put(std::string_view name, Slice bytes) {
     request.SetContentLength(static_cast<long long>(bytes.size()));
 
     auto outcome = impl_->point_client->PutObject(request);
+    note_put(outcome.IsSuccess() ? Status::Ok : Status::Io, bytes.size());
     if (outcome.IsSuccess()) return make_ready_future(Status::Ok);
     // A rejected conditional means the name is already taken, which under the
     // no-reuse rule means a zombie writer reusing file numbers. Terminal, not
@@ -377,6 +388,7 @@ std::future<Status> S3BlobStore::remove(std::string_view name) {
     request.SetBucket(impl_->options.bucket);
     request.SetKey(impl_->key_for(name));
     auto outcome = impl_->point_client->DeleteObject(request);
+    note_remove(outcome.IsSuccess() ? Status::Ok : Status::Io);
     if (outcome.IsSuccess()) return make_ready_future(Status::Ok);
     // Removing something absent is success — S3 says so, and the interface
     // requires remove to be idempotent.
@@ -403,6 +415,8 @@ std::future<Status> S3BlobStore::remove_many(const std::vector<std::string>& nam
         request.SetDelete(std::move(payload));
 
         auto outcome = impl_->point_client->DeleteObjects(request);
+        note_remove(outcome.IsSuccess() ? Status::Ok : Status::Io,
+                    std::min(start + kBatch, names.size()) - start);
         if (!outcome.IsSuccess()) return make_ready_future(Status::Io);
         // Per-key failures arrive *inside* a 200. Ignoring them would report
         // success for objects still present, and the caller would stop trying.
@@ -422,6 +436,8 @@ std::future<ListResult> S3BlobStore::list(std::string_view prefix) {
     do {
         if (!token.empty()) request.SetContinuationToken(token);
         auto outcome = impl_->point_client->ListObjectsV2(request);
+        note_list(outcome.IsSuccess() ? ListResult(std::vector<std::string>{})
+                                      : ListResult(std::unexpected(Status::Io)));
         if (!outcome.IsSuccess()) {
             // **Never absence.** An empty list in an existing bucket is a
             // meaningful empty result; a failure to look is not, and conflating

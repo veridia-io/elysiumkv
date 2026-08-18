@@ -77,15 +77,70 @@ public final class ElysiumKVStats {
         private final long oldestFileAgeMs;
         private final int filesPendingMigration;
         private final boolean stalling;
+        private final long gets;
+        private final long puts;
+        private final long removes;
+        private final long lists;
+        private final long bytesRead;
+        private final long bytesWritten;
+        private final long errors;
 
         Tier(int tier, int fileCount, long bytes, long oldestFileAgeMs, int filesPendingMigration,
-             boolean stalling) {
+             boolean stalling, long gets, long puts, long removes, long lists, long bytesRead,
+             long bytesWritten, long errors) {
             this.tier = tier;
             this.fileCount = fileCount;
             this.bytes = bytes;
             this.oldestFileAgeMs = oldestFileAgeMs;
             this.filesPendingMigration = filesPendingMigration;
             this.stalling = stalling;
+            this.gets = gets;
+            this.puts = puts;
+            this.removes = removes;
+            this.lists = lists;
+            this.bytesRead = bytesRead;
+            this.bytesWritten = bytesWritten;
+            this.errors = errors;
+        }
+
+        /**
+         * Requests this tier's authoritative store has served since it was opened. <b>Against
+         * object storage this is the bill</b>, which is per request as much as per byte — and a
+         * cache in front of the tier is not counted here, because its effect is its hit rate.
+         *
+         * <p>Zero from a native library older than these fields: the record width is in the
+         * header, so an older layout is read as a shorter record rather than misparsed.
+         *
+         * <p><b>Two tiers naming one store report the same numbers.</b> They belong to the store,
+         * not the tier, so summing them across tiers double-counts.
+         */
+        public long gets() {
+            return gets;
+        }
+
+        public long puts() {
+            return puts;
+        }
+
+        public long removes() {
+            return removes;
+        }
+
+        public long lists() {
+            return lists;
+        }
+
+        public long bytesRead() {
+            return bytesRead;
+        }
+
+        public long bytesWritten() {
+            return bytesWritten;
+        }
+
+        /** Failures that were not {@code NotFound}, counted whether or not a retry succeeded. */
+        public long errors() {
+            return errors;
         }
 
         public int tier() { return tier; }
@@ -184,9 +239,19 @@ public final class ElysiumKVStats {
         }
         List<Tier> tierList = new ArrayList<>(tierCount);
         for (int i = 0; i < tierCount && offset + tierRecordBytes <= size; ++i) {
+            // Read only what this record is wide enough to hold: a native library predating the
+            // I/O counters reports a 32-byte record, and the header says so.
+            final boolean hasIo = tierRecordBytes >= 88;
             tierList.add(new Tier(readInt(buffer, offset), readInt(buffer, offset + 4),
                                   readLong(buffer, offset + 8), readLong(buffer, offset + 16),
-                                  readInt(buffer, offset + 24), buffer[offset + 28] != 0));
+                                  readInt(buffer, offset + 24), buffer[offset + 28] != 0,
+                                  hasIo ? readLong(buffer, offset + 32) : 0L,
+                                  hasIo ? readLong(buffer, offset + 40) : 0L,
+                                  hasIo ? readLong(buffer, offset + 48) : 0L,
+                                  hasIo ? readLong(buffer, offset + 56) : 0L,
+                                  hasIo ? readLong(buffer, offset + 64) : 0L,
+                                  hasIo ? readLong(buffer, offset + 72) : 0L,
+                                  hasIo ? readLong(buffer, offset + 80) : 0L));
             offset += tierRecordBytes;
         }
         levels = Collections.unmodifiableList(levelList);

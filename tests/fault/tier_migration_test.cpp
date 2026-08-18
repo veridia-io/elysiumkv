@@ -79,6 +79,56 @@ protected:
     std::unique_ptr<DB> db_;
 };
 
+// Against object storage the request count is the bill, and migration is the engine's
+// largest source of it: every file it moves is a GET, a PUT and a DELETE that no query
+// asked for. Nothing else reports that.
+TEST_F(TierMigrationTest, MigrationIsVisibleInTheTiersIoCounters) {
+    open_transient();
+
+    write(50);
+    settle_into_l1();
+    EXPECT_GT(tier(0).io.puts, 0u);
+    EXPECT_GT(tier(0).io.bytes_written, 0u);
+    EXPECT_EQ(tier(1).io.puts, 0u) << "nothing has moved yet";
+
+    const IoCounters hot_before = tier(0).io;
+    advance(Duration(90'000));
+    ASSERT_EQ(tier(1).file_count, 1);
+
+    // The three requests a migration costs, each on the side that pays for it.
+    EXPECT_GT(tier(0).io.gets, hot_before.gets) << "read from the tier it left";
+    EXPECT_GT(tier(0).io.removes, hot_before.removes) << "deleted from it afterwards";
+    EXPECT_GT(tier(1).io.puts, 0u) << "written to the tier it arrived on";
+    EXPECT_GT(tier(1).io.bytes_written, 0u);
+    EXPECT_EQ(tier(0).io.errors, 0u);
+    EXPECT_EQ(tier(1).io.errors, 0u);
+}
+
+// The counters answer "what did this cost", and a cache hit costs nothing — so they are
+// the authoritative store's and not the outermost layer's. Reporting the top of the chain
+// would bill every hit as a request and make a cache look like it had made things worse.
+TEST_F(TierMigrationTest, TheCountersBelongToTheAuthoritativeStoreAndNotToTheCache) {
+    Options options = make_transient_options(store_, kMaxAge, kStallAge);
+    cache_every_tier(options, store_.path() / "cache");
+    auto outermost = options.tiers[0].store;
+    open(std::move(options));
+
+    write(200);
+    settle_into_l1();
+    for (int pass = 0; pass < 4; ++pass) {
+        for (int i = 0; i < 200; ++i) ASSERT_TRUE(db_->get(Slice::from(key_at(i))).has_value());
+    }
+
+    // Only meaningful if the two layers actually saw different traffic — which is the
+    // point of a cache, and without it the comparison below would hold for free.
+    ASSERT_NE(outermost.get(), static_cast<BlobStore*>(store_.store(0).get()));
+    ASSERT_FALSE(outermost->counters() == store_.store(0)->counters());
+
+    EXPECT_TRUE(tier(0).io == store_.store(0)->counters())
+        << "the tier reports the store that holds the bytes, not the cache in front of it";
+    EXPECT_GT(tier(0).io.puts, 0u) << "writes go all the way down, so they are counted";
+}
+
 // ARCHITECTURE.md "Migration between tiers" — a low-traffic instance never fills a level, so nothing compacts — and
 // data would sit on a losable store indefinitely. Migration is what prevents it,
 // and it is driven by the clock rather than by write volume.
