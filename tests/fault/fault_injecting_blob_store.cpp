@@ -81,17 +81,24 @@ const FaultInjectingBlobStore::Rule* FaultInjectingBlobStore::match(Op op, std::
 std::future<GetResult> FaultInjectingBlobStore::get(std::string_view name, uint64_t offset,
                                                     size_t len) {
     std::chrono::microseconds latency{0};
+    std::optional<Status> injected;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         latency = latency_;
-        if (const Rule* rule = match(Op::Get, name)) {
-            GetResult injected(std::unexpected(rule->status));
-            note_get(injected);
-            return make_ready_future(std::move(injected));
-        }
+        if (const Rule* rule = match(Op::Get, name)) injected = rule->status;
     }
-    if (latency.count() > 0) std::this_thread::sleep_for(latency);
-    GetResult result = delegate_->get(name, offset, len).get();
+
+    // **One result and one return.** Returning the injected failure from its own statement leaves
+    // gcc 13 looking at a move of an `expected` whose value arm it can prove was never written, and
+    // `-Wmaybe-uninitialized` fails the build over reading it. An injected failure still skips the
+    // latency: a store that rejected the call never made the round trip.
+    GetResult result = std::unexpected(Status::Io);
+    if (injected.has_value()) {
+        result = std::unexpected(*injected);
+    } else {
+        if (latency.count() > 0) std::this_thread::sleep_for(latency);
+        result = delegate_->get(name, offset, len).get();
+    }
     note_get(result);
     return make_ready_future(std::move(result));
 }
@@ -146,18 +153,22 @@ std::future<Status> FaultInjectingBlobStore::remove_many(const std::vector<std::
 
 std::future<ListResult> FaultInjectingBlobStore::list(std::string_view prefix) {
     std::chrono::microseconds latency{0};
+    std::optional<Status> injected;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         latency = latency_;
-        if (const Rule* rule = match(Op::List, prefix)) {
-            ListResult injected(std::unexpected(rule->status));
-            note_list(injected);
-            return make_ready_future(std::move(injected));
-        }
+        if (const Rule* rule = match(Op::List, prefix)) injected = rule->status;
     }
-    // A listing is a round trip like any other, and the one open pays per store.
-    if (latency.count() > 0) std::this_thread::sleep_for(latency);
-    ListResult result = delegate_->list(prefix).get();
+
+    // One result and one return, for the reason `get` above gives.
+    ListResult result = std::unexpected(Status::Io);
+    if (injected.has_value()) {
+        result = std::unexpected(*injected);
+    } else {
+        // A listing is a round trip like any other, and the one open pays per store.
+        if (latency.count() > 0) std::this_thread::sleep_for(latency);
+        result = delegate_->list(prefix).get();
+    }
     note_list(result);
     return make_ready_future(std::move(result));
 }
