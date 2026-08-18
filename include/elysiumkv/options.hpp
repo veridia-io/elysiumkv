@@ -287,6 +287,19 @@ struct Options {
     /// is charged to `memory_budget` when one is set, so the cost is visible rather than inferred.
     size_t compaction_window_bytes = 2ull << 20;
 
+    /// Serve reads while a discarded transient store is still unreplayed.
+    ///
+    /// **Off, so the safe path is the default one.** A discard leaves the store *wrong* rather than
+    /// merely incomplete — a key whose newer value lived on the lost store now reads as its older
+    /// one — and reporting that through a flag makes noticing it opt-in. Reads therefore fail with
+    /// `Status::RecoveryRequired` until `mark_recovery_complete()`.
+    ///
+    /// **Writes are never refused either way**: the replay that discharges the condition is made of
+    /// them. Turn this on for a replay that also reads, which is the shape a changelog consumer
+    /// usually has — and in doing so accept that those reads may be behind, which for a replayer
+    /// about to overwrite them is exactly the trade it wants.
+    bool allow_reads_before_recovery = false;
+
     /// Compact a file once this fraction of its entries are tombstones. Zero — the default — is off.
     ///
     /// **The trigger the size ratios cannot express.** A tombstone is not an erasure: it shadows

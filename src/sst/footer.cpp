@@ -1,5 +1,6 @@
 #include "sst/footer.hpp"
 
+#include "sst/crc32c.hpp"
 #include "sst/format.hpp"
 
 namespace elysiumkv {
@@ -18,6 +19,9 @@ std::string Footer::encode() const {
         put_fixed64(out, range_del.offset);
         put_fixed32(out, range_del.length);
     }
+    // Over everything written so far, which is the whole footer body. The trailer that follows is
+    // not covered and does not need to be: the magic is checked before the version is trusted.
+    if (format_version >= kFormatVersion3) put_fixed32(out, crc32c(out));
     put_fixed32(out, format_version);
     put_fixed64(out, kMagic);
     return out;
@@ -32,7 +36,8 @@ Result<int> Footer::footer_length_from_trailer(Slice trailer) {
     if (magic != kMagic) return std::unexpected(Status::Corrupt);
     if (version == kFormatVersion1) return kFooterLengthV1;
     if (version == kFormatVersion2) return kFooterLengthV2;
-    return std::unexpected(Status::Corrupt);
+    if (version == kFormatVersion3) return kFooterLengthV3;
+    return std::unexpected(Status::Unsupported);
 }
 
 Result<Footer> Footer::decode(Slice bytes) {
@@ -47,10 +52,10 @@ Result<Footer> Footer::decode(Slice bytes) {
 
     const int width = version == kFormatVersion1   ? kFooterLengthV1
                       : version == kFormatVersion2 ? kFooterLengthV2
+                      : version == kFormatVersion3 ? kFooterLengthV3
                                                    : 0;
-    if (width == 0 || bytes.size() < static_cast<size_t>(width)) {
-        return std::unexpected(Status::Corrupt);
-    }
+    if (width == 0) return std::unexpected(Status::Unsupported);
+    if (bytes.size() < static_cast<size_t>(width)) return std::unexpected(Status::Corrupt);
 
     const uint8_t* p = bytes.data() + bytes.size() - width;
     Footer footer;
@@ -63,6 +68,13 @@ Result<Footer> Footer::decode(Slice bytes) {
     if (version >= kFormatVersion2) {
         footer.range_del.offset = decode_fixed64(p + 32);
         footer.range_del.length = decode_fixed32(p + 40);
+    }
+    if (version >= kFormatVersion3) {
+        // **Checked before any handle above is used.** The point is to fail here rather than at a
+        // block read that a damaged offset sent somewhere arbitrary.
+        const size_t body = static_cast<size_t>(width - kTrailerLength - 4);
+        footer.crc = decode_fixed32(p + body);
+        if (crc32c(p, body) != footer.crc) return std::unexpected(Status::Corrupt);
     }
     return footer;
 }

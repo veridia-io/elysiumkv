@@ -1466,7 +1466,17 @@ std::vector<FileMetadata> DbImpl::delete_obsolete(const std::vector<FileMetadata
     return failed;
 }
 
+/// Whether a read must be refused because a discard has not been replayed yet.
+///
+/// **Reads only.** The replay is writes, and refusing those would make the condition permanent.
+bool DbImpl::reads_are_blocked() const {
+    return requires_recovery_.load(std::memory_order_relaxed) &&
+           !options_.allow_reads_before_recovery;
+}
+
 Result<Pinned> DbImpl::get(Slice key) {
+    if (reads_are_blocked()) return std::unexpected(Status::RecoveryRequired);
+
     // **Taken once, and used for both the clamp and the level walk.** Two takes cost two locked
     // refcounts on every lookup, and they can disagree: a truncation landing between them would
     // let a key pass a clamp the version it is then read against says hides it.
@@ -1567,6 +1577,17 @@ Result<std::vector<uint8_t>> DbImpl::get_copy(Slice key) {
 
 std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool has_upper,
                                                 bool reverse) {
+    // An iterator has no error return, so the refusal travels as it does for an unreadable file:
+    // nothing yielded, and `status()` says why. Silently scanning a store that reads its own older
+    // values as current is the outcome worth ruling out.
+    if (reads_are_blocked()) {
+        return std::make_unique<DbIterator>(
+            std::make_unique<ErrorIterator>(Status::RecoveryRequired), versions_->current(),
+            std::vector<std::shared_ptr<SkiplistMemtable>>{},
+            std::vector<std::shared_ptr<SstReader>>{}, std::string(), std::string(), false,
+            reverse);
+    }
+
     std::shared_ptr<SkiplistMemtable> mem;
     std::shared_ptr<SkiplistMemtable> imm;
     {
@@ -2574,9 +2595,9 @@ Status DbImpl::verify_stores_and_discard() {
         log_event(LogLevel::Warn, LogEvent::StoresDiscarded, "transient store '", store_id,
                   "' did not survive: dropped ", dropped,
                   " file(s); the store is behind until the caller replays");
-        // After a discard the store is *wrong*, not merely incomplete: a key
-        // whose newer value lived here now reads as its older one. The engine
-        // reports; it does not enforce read blocking.
+        // After a discard the store is *wrong*, not merely incomplete: a key whose newer value
+        // lived here now reads as its older one — so reads are refused until the embedder replays
+        // the gap, unless it has asked for them with `allow_reads_before_recovery`.
         requires_recovery_.store(true);
         version = versions_->current();
     }

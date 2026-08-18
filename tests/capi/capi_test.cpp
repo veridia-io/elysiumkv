@@ -53,7 +53,7 @@ protected:
         elysiumkv_options* options = elysiumkv_options_create();
         EXPECT_EQ(elysiumkv_options_configure(options, catalog_, budget_,
                                             /*memtable_bytes=*/64u << 10,
-                                            /*block_bytes=*/1024, 0, 0, 0, 0, 0, 0, -1, -1,
+                                            /*block_bytes=*/1024, 0, 0, 0, 0, 0, 0, -1, -1, -1,
                                             /*flush_interval_ms=*/0,
                                             /*maintenance_interval_ms=*/0,
                                             /*obsolete_retention_ms=*/0,
@@ -306,7 +306,7 @@ TEST_F(CApiTest, GetCopyReportsTheFullLengthEvenWhenTruncated) {
 // binding to read a failure as absence.
 TEST_F(CApiTest, StatusCodesAreDistinctAndCarryDetail) {
     elysiumkv_options* options = elysiumkv_options_create();
-    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0, 0, 0, 0, 0), ELYSIUMKV_OK);
     // A transient last tier: rejected at open (ARCHITECTURE.md "A tier is not a level").
     ASSERT_EQ(elysiumkv_options_add_tier(options, store_, ELYSIUMKV_TRANSIENT, 60'000, 0, 120'000),
               ELYSIUMKV_OK);
@@ -1055,7 +1055,7 @@ TEST_F(CApiTest, ABindingCanSupplyItsOwnBlobStore) {
     ASSERT_NE(store, nullptr);
 
     elysiumkv_options* options = elysiumkv_options_create();
-    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 32u << 10, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0, 0),
+    ASSERT_EQ(elysiumkv_options_configure(options, catalog_, nullptr, 32u << 10, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, 0, 0, 0, 0, 0),
               ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_add_tier(options, store, ELYSIUMKV_DURABLE, 0, 0, 0), ELYSIUMKV_OK);
     ASSERT_EQ(elysiumkv_options_set_level(options, 0, ELYSIUMKV_COMPRESSION_NONE, 0, 4, 0, 0, 0),

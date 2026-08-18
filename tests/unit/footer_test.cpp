@@ -64,13 +64,47 @@ TEST(Footer, RejectsABadMagic) {
     EXPECT_EQ(Footer::footer_length_from_trailer(Slice::from(encoded)).error(), Status::Corrupt);
 }
 
-TEST(Footer, RejectsAnUnknownFormatVersion) {
+// **`Unsupported`, not `Corrupt`.** The magic is eight bytes and is checked first, so reaching an
+// unknown version means the file is intact and written by a newer build. Reporting damage there
+// sends an operator to a restore they do not need; the remedy is a different binary.
+TEST(Footer, AnUnknownFormatVersionIsUnsupportedNotCorrupt) {
     Footer footer = sample_footer();
     footer.format_version = 99;
     const std::string encoded = footer.encode();
 
-    EXPECT_EQ(Footer::decode(Slice::from(encoded)).error(), Status::Corrupt);
-    EXPECT_EQ(Footer::footer_length_from_trailer(Slice::from(encoded)).error(), Status::Corrupt);
+    EXPECT_EQ(Footer::decode(Slice::from(encoded)).error(), Status::Unsupported);
+    EXPECT_EQ(Footer::footer_length_from_trailer(Slice::from(encoded)).error(),
+              Status::Unsupported);
+}
+
+// The CRC is the point of v3: damage in the footer used to produce plausible handles and fail at
+// some block that was never the problem.
+TEST(Footer, ADamagedFooterBodyIsCaughtByItsChecksum) {
+    Footer footer = sample_footer();
+    footer.format_version = Footer::kFormatVersion3;
+    ASSERT_TRUE(Footer::decode(Slice::from(footer.encode())).has_value());
+
+    // Every byte of the body, one at a time — a checksum that only caught some of them would pass
+    // a test that flipped one convenient byte.
+    const std::string good = footer.encode();
+    for (size_t i = 0; i + Footer::kTrailerLength + 4 < good.size(); ++i) {
+        std::string damaged = good;
+        damaged[i] = static_cast<char>(damaged[i] ^ 0x01);
+        EXPECT_EQ(Footer::decode(Slice::from(damaged)).error(), Status::Corrupt) << "byte " << i;
+    }
+}
+
+// v1 and v2 files predate the checksum and must still read: the version is per file, and a store
+// written by an earlier build is full of them.
+TEST(Footer, EarlierVersionsStillDecodeWithoutAChecksum) {
+    for (uint32_t version : {Footer::kFormatVersion1, Footer::kFormatVersion2}) {
+        Footer footer = sample_footer();
+        footer.format_version = version;
+        const auto decoded = Footer::decode(Slice::from(footer.encode()));
+        ASSERT_TRUE(decoded.has_value()) << version;
+        EXPECT_EQ(decoded->format_version, version);
+        EXPECT_EQ(decoded->index.offset, footer.index.offset);
+    }
 }
 
 TEST(Footer, RejectsShortInput) {

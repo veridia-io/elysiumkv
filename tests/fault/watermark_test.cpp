@@ -903,6 +903,9 @@ TEST_F(WatermarkTest, TheReportedPositionIsInclusiveOfItsOwnWritesAndExclusiveFo
         ASSERT_EQ(db->flush(), Status::Ok);
     }
     wipe(store_.store(0));
+    // Reading past a discard, which is refused by default; this case is about the position the
+    // watermark reports, not about the refusal.
+    options.allow_reads_before_recovery = true;
     auto reopened = open(options);
     ASSERT_NE(reopened, nullptr);
     ASSERT_GT(discarded_files_, 0u);

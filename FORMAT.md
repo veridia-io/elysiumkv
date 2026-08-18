@@ -147,11 +147,31 @@ The footer, at file offset `file_len - footer_length`:
 | 24 | `num_entries` | uint64 | |
 | 32 | `range_del_handle.offset` | uint64 | **v2 only** |
 | 40 | `range_del_handle.length` | uint32 | **v2 only**, framed length |
-| 32 / 44 | `format_version` | uint32 | 1 or 2 |
-| 36 / 48 | `magic` | uint64 | `0x454C595349554D31` |
+| 44 | `crc32c` | uint32 | **v3 only**, over footer bytes `[0, 44)` |
+| 32 / 44 / 48 | `format_version` | uint32 | 1, 2 or 3 |
+| 36 / 48 / 52 | `magic` | uint64 | `0x454C595349554D31` |
 
-`kFooterLengthV1 = 44`, `kFooterLengthV2 = 56`. The v2 field is inserted *before* the invariant
-trailer, which is what keeps that trailer invariant.
+`kFooterLengthV1 = 44`, `kFooterLengthV2 = 56`, `kFooterLengthV3 = 60`. Each new field is inserted
+*before* the invariant trailer, which is what keeps that trailer invariant.
+
+### The footer checksum
+
+**v3 is written for every file**, unlike v2, whose presence is decided per file by whether that file
+carries range tombstones. The distinction is deliberate: a reader that cannot honour a range
+tombstone must refuse exactly the files carrying one, whereas a checksum written only sometimes
+leaves most files unprotected.
+
+The CRC covers the footer body preceding it — `[0, 44)`, the two block handles, `num_entries` and
+the range-delete handle. It does **not** cover the invariant trailer, which needs no covering: the
+magic is validated before the version is trusted, and the version is checked against a known set.
+
+It is verified before any handle in the footer is used. Every block already carries its own CRC, so
+footer damage was always caught eventually — but as a failure at some block a wrong offset pointed
+at, which is not where the problem was.
+
+**A version this build does not know is `Unsupported`, not `Corrupt`.** The magic is eight bytes and
+is checked first, so reaching an unknown version means the file is intact and was written by a newer
+build; the remedy is a different binary rather than a restore.
 
 ### Range delete block
 

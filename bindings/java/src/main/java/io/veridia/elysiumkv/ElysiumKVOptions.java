@@ -34,6 +34,8 @@ public final class ElysiumKVOptions implements AutoCloseable {
     private int bloomBitsPerKey;
     private long maxCompactionBytes;
     private long compactionWindowBytes;
+    /// Tri-state like its neighbours: -1 leaves the engine's default, 0 refuses, 1 serves.
+    private int allowReadsBeforeRecovery = -1;
     private int manifestEditsPerGeneration;
     private int paranoidChecks = -1;   // tri-state: negative keeps the engine default
     private int blockOnStall = -1;
@@ -226,6 +228,22 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Serve reads while a discarded transient store is still unreplayed. Off unless set.
+     *
+     * <p>What survives a discard is <b>wrong rather than merely incomplete</b> — a key whose newer
+     * value lived on the lost store now reads as its older one — so reads fail with
+     * {@link RecoveryRequiredException} until {@link ElysiumKV#markRecoveryComplete()}. Writes are
+     * never refused either way, because the replay is made of them.
+     *
+     * <p>Turn it on for a replay that also reads, which is the shape a changelog consumer usually
+     * has, and accept in doing so that those reads may be behind.
+     */
+    public ElysiumKVOptions allowReadsBeforeRecovery(boolean allow) {
+        allowReadsBeforeRecovery = allow ? 1 : 0;
+        return this;
+    }
+
     public ElysiumKVOptions manifestEditsPerGeneration(int edits) {
         manifestEditsPerGeneration = edits;
         return this;
@@ -334,6 +352,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
                                 readerCacheBytes, bloomBitsPerKey, maxCompactionBytes,
                                 compactionWindowBytes,
                                 manifestEditsPerGeneration, paranoidChecks, blockOnStall,
+                                allowReadsBeforeRecovery,
                                 flushIntervalMs, maintenanceIntervalMs, obsoleteRetentionMs,
                                 orphanRetentionMs, orphanSweepIntervalMs);
         // A second call rather than more positions on the first: the C ABI keeps these apart so

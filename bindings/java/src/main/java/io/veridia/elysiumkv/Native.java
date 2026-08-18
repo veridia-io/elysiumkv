@@ -68,6 +68,7 @@ final class Native {
                                         long maxCompactionBytes, long compactionWindowBytes,
                                         int manifestEditsPerGeneration,
                                         int paranoidChecks, int blockOnStall,
+                                        int allowReadsBeforeRecovery,
                                         long flushIntervalMs, long maintenanceIntervalMs,
                                         long obsoleteRetentionMs, long orphanRetentionMs,
                                         long orphanSweepIntervalMs);

@@ -32,6 +32,15 @@ enum class Status : uint8_t {
     /// manifest pointer: if it has advanced past the version holding the missing file, the writer
     /// collected it legitimately.
     Stale,
+    /// A transient store lost its contents, so what survives is **wrong rather than merely
+    /// incomplete**: a key whose newer value lived there now reads as its older one. Reads are
+    /// refused until the embedder replays the gap and calls `mark_recovery_complete()`.
+    ///
+    /// Neither terminal nor retryable, like `Stale`: a definite answer with a specific remedy that
+    /// is not reopening. Writes are **not** refused — the replay that clears this is made of them,
+    /// and an embedder whose replay reads as well as writes sets
+    /// `Options::allow_reads_before_recovery`.
+    RecoveryRequired,
 };
 
 /// Stable lowercase name, for error text and test failure messages.

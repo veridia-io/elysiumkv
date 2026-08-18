@@ -61,7 +61,11 @@ typedef enum {
     ELYSIUMKV_IO,
     ELYSIUMKV_STALLED,
     ELYSIUMKV_UNSUPPORTED,
-    ELYSIUMKV_STALE
+    ELYSIUMKV_STALE,
+    /* A transient store lost its contents, so reads are refused until the embedder replays the
+     * gap and calls elysiumkv_mark_recovery_complete. Writes are not refused: the replay is made
+     * of them. */
+    ELYSIUMKV_RECOVERY_REQUIRED
 } elysiumkv_status;
 
 typedef enum { ELYSIUMKV_COMPRESSION_NONE = 0, ELYSIUMKV_COMPRESSION_LZ4, ELYSIUMKV_COMPRESSION_ZSTD }
@@ -167,7 +171,12 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, i
  * `compaction_window_bytes` is how much of a compaction input is read at a time; zero leaves the
  * default. Total requests are `input bytes / this`, which against object storage is what a
  * compaction costs — and it is traded directly against memory, because every input of a compaction
- * holds two of these at once and they are all live together. Charged to `memory_budget`. */
+ * holds two of these at once and they are all live together. Charged to `memory_budget`.
+ *
+ * `allow_reads_before_recovery` is tri-state like the flags beside it: negative leaves it, zero
+ * refuses reads until `elysiumkv_mark_recovery_complete`, positive serves them. Off by default,
+ * because what survives a discard is *wrong* rather than merely incomplete and a flag an embedder
+ * has to know to check makes noticing it opt-in. Writes are never refused either way. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, void* manifest_catalog,
                                                      void* memory_budget,
                                                      size_t memtable_bytes, size_t block_bytes,
@@ -178,6 +187,7 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
                                                      size_t compaction_window_bytes,
                                                      int manifest_edits_per_generation,
                                                      int paranoid_checks, int block_on_stall,
+                                                     int allow_reads_before_recovery,
                                                      uint64_t flush_interval_ms,
                                                      uint64_t maintenance_interval_ms,
                                                      uint64_t obsolete_retention_ms,

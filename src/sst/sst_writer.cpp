@@ -120,8 +120,12 @@ Result<SstBuildResult> SstWriter::finish() {
             return std::unexpected(status);
         }
         footer.range_del.length = static_cast<uint32_t>(file_.size() - footer.range_del.offset);
-        footer.format_version = Footer::kFormatVersion2;
     }
+
+    // **Every file, not only the ones that need a new field.** `range_del` is per file because a
+    // reader that cannot honour a range tombstone must refuse exactly the files carrying one; a
+    // checksum is not like that — one written only sometimes leaves most files unprotected.
+    footer.format_version = Footer::kFormatVersion3;
 
     footer.num_entries = num_entries_;
     file_.append(footer.encode());

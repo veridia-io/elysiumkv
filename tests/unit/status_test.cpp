@@ -13,7 +13,7 @@ namespace {
 constexpr Status kAll[] = {
     Status::Ok,     Status::NotFound, Status::Corrupt,     Status::Unusable,
     Status::Fenced, Status::Config,   Status::Io,          Status::Stalled,
-    Status::Unsupported, Status::Stale,
+    Status::Unsupported, Status::Stale, Status::RecoveryRequired,
 };
 
 TEST(Status, NamesAreDistinctAndKnown) {
@@ -49,6 +49,9 @@ TEST(Status, TerminalStatusesRequireReopen) {
     EXPECT_FALSE(is_terminal(Status::Stalled));
     // A stale read-only instance is not finished: `refresh()` recovers it without a reopen.
     EXPECT_FALSE(is_terminal(Status::Stale));
+    // Nor is a store waiting on its replay: the remedy is `mark_recovery_complete()`, and writes —
+    // which is what the replay is made of — are never refused.
+    EXPECT_FALSE(is_terminal(Status::RecoveryRequired));
 }
 
 // ARCHITECTURE.md "Absence is an answer, not an error" — `Unsupported` says the data is intact and

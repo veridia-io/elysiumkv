@@ -19,7 +19,8 @@ public enum Status {
      * A read-only handle is behind the writer's retention window. Recoverable with
      * {@link ReadOnlyStore#refresh()}; never a sign of damaged data.
      */
-    STALE;
+    STALE,
+    RECOVERY_REQUIRED;
 
     private static final Status[] VALUES = values();
 

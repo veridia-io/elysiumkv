@@ -210,8 +210,80 @@ TEST_F(DurabilityTest, LosingATransientStoreDiscardsEveryLevelOnIt) {
 // ARCHITECTURE.md "A tier is not a level" — **the case the whole design exists to make safe.** A discard does not
 // merely lose recent writes: it resurrects stale ones, and a stale value is
 // indistinguishable from a valid one.
+/* **The default polarity: a discarded store refuses reads until the gap is replayed.**
+ *
+ * `DiscardResurrectsStaleValuesAndSaysSo` below is what happens when that is turned off, and is
+ * the reason it is off: what survives a discard is *wrong* rather than merely incomplete, and
+ * reporting it through a flag makes noticing it opt-in. Writes stay open throughout, because the
+ * replay that discharges the condition is made of them.
+ */
+TEST_F(DurabilityTest, ReadsAreRefusedUntilTheReplayIsMarkedComplete) {
+    Options options = transient_options();
+
+    auto db = open_reporting(options);
+    ASSERT_NE(db, nullptr);
+    auto& engine = *static_cast<DbImpl*>(db.get());
+
+    for (int i = 0; i < 100; ++i) {
+        ASSERT_EQ(db->put(Slice::from(key_at(i)), Slice::from("v1")), Status::Ok);
+    }
+    ASSERT_EQ(db->flush(), Status::Ok);
+    now_ += 200'000;
+    ASSERT_EQ(engine.compact_until_quiet(), Status::Ok);
+
+    // **Roll the memtable past the clock jump first.** A file's placement reads the memtable's
+    // creation time, so one that predates the advance flushes straight past the transient tier onto
+    // the durable one — and the wipe below would then take nothing.
+    ASSERT_EQ(db->put(Slice::from(std::string("zzz-warmup")), Slice::from("x")), Status::Ok);
+    ASSERT_EQ(db->flush(), Status::Ok);
+    ASSERT_EQ(engine.compact_until_quiet(), Status::Ok);
+
+    // Young again, so this lands on the transient tier and is what the wipe takes.
+    ASSERT_EQ(db->put(Slice::from(key_at(0)), Slice::from("v2")), Status::Ok);
+    ASSERT_EQ(db->flush(), Status::Ok);
+    ASSERT_GT(db->stats().tiers[0].file_count, 0);
+    db.reset();
+
+    wipe(store_.store(0));
+
+    bool requires_recovery = false;
+    auto reopened = open_reporting(options, nullptr, &requires_recovery);
+    ASSERT_NE(reopened, nullptr);
+    ASSERT_TRUE(requires_recovery);
+
+    EXPECT_EQ(reopened->get(Slice::from(key_at(0))).error(), Status::RecoveryRequired);
+    EXPECT_EQ(reopened->get_copy(Slice::from(key_at(0))).error(), Status::RecoveryRequired);
+
+    // An iterator has no error return, so the refusal arrives as an empty scan whose `status()`
+    // says why — a scan that silently returned older values would be the same defect wearing a
+    // different shape.
+    auto it = reopened->iterator();
+    EXPECT_FALSE(it->next());
+    EXPECT_EQ(it->status(), Status::RecoveryRequired);
+
+    // **Writes are not refused**, or the condition could never be discharged.
+    ASSERT_EQ(reopened->put(Slice::from(key_at(0)), Slice::from("v2")), Status::Ok);
+    ASSERT_EQ(reopened->remove(Slice::from(key_at(99))), Status::Ok);
+    EXPECT_EQ(reopened->get(Slice::from(key_at(0))).error(), Status::RecoveryRequired)
+        << "writing does not itself end the recovery — only the embedder knows when it is done";
+
+    ASSERT_EQ(reopened->mark_recovery_complete(), Status::Ok);
+
+    auto found = reopened->get_copy(Slice::from(key_at(0)));
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(std::string(found->begin(), found->end()), "v2");
+    auto after = reopened->iterator();
+    EXPECT_TRUE(after->next());
+    EXPECT_EQ(after->status(), Status::Ok);
+}
+
 TEST_F(DurabilityTest, DiscardResurrectsStaleValuesAndSaysSo) {
     Options options = transient_options();
+    // **The resurrection is only observable with this on**, which is the whole point of the
+    // default being off: reads are refused until the replay finishes, so an embedder that never
+    // read the documentation cannot serve an older value as current. The case below is what it is
+    // opting into.
+    options.allow_reads_before_recovery = true;
 
     auto db = open_reporting(options);
     ASSERT_NE(db, nullptr);

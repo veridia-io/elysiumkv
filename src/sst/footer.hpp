@@ -27,8 +27,16 @@ struct Footer {
     static constexpr int kFooterLengthV1 = 44;   // version-scoped
     /// v2 appends one block handle: the range tombstones. 44 + 12.
     static constexpr int kFooterLengthV2 = 56;
+    /// v3 appends a CRC over everything before it. 56 + 4.
+    static constexpr int kFooterLengthV3 = 60;
+    /// The widest footer this build knows, and therefore how many bytes a reader must have in hand
+    /// before it can decode one. **Named rather than spelled as the current newest version**: it
+    /// was written as `kFooterLengthV2` in two places in the reader, so adding v3 silently handed
+    /// `decode` four bytes too few and every read came back `Corrupt`.
+    static constexpr int kMaxFooterLength = kFooterLengthV3;
     static constexpr uint32_t kFormatVersion1 = 1;
     static constexpr uint32_t kFormatVersion2 = 2;
+    static constexpr uint32_t kFormatVersion3 = 3;
     /// Spells "ELYSIUM1" in ASCII.
     ///
     /// **Frozen.** The magic sits in the invariant trailer above, so a reader
@@ -50,12 +58,23 @@ struct Footer {
     /// tombstone must refuse the file rather than return the keys it covers.
     BlockHandle range_del;
 
+    /// **The only structure in the format that used to validate nothing.** Every block carries a
+    /// CRC, so damage inside one is caught where it happens; damage in the footer instead produced
+    /// plausible handles, and the read failed later at a block that was never the problem. Covers
+    /// the footer bytes before it — the trailer that follows is self-validating, since the magic is
+    /// checked before anything else and the version against a known set.
+    ///
+    /// **Written on every v3 file**, unlike `range_del`, whose presence is what a file may or may
+    /// not need. A checksum every file lacks is a checksum.
+    uint32_t crc = 0;
+
     /// kFooterLengthV1 or kFooterLengthV2 bytes, depending on `format_version`.
     std::string encode() const;
 
-    /// `trailer` is the last kTrailerLength bytes of the file. Reports the
-    /// footer width for that version, or Corrupt for a bad magic or a version
-    /// this build does not know.
+    /// `trailer` is the last kTrailerLength bytes of the file. Reports the footer width for that
+    /// version, `Corrupt` for a bad magic, or **`Unsupported` for a version this build does not
+    /// know** — the magic is eight bytes, so garbage does not reach that branch, and telling an
+    /// operator their intact bytes are damaged sends them to a restore they do not need.
     static Result<int> footer_length_from_trailer(Slice trailer);
 
     /// `bytes` is the last `footer_length_from_trailer(...)` bytes of the file.
