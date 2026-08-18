@@ -993,6 +993,52 @@ TEST_F(WatermarkTest, ADiscardedOverAgeLevelZeroFileRollsBackToItsLowerBound) {
 
 // --- the live gauge -----------------------------------------------------------
 
+// **Nothing forbids one store backing two tiers of different durabilities**, and `stats()` has to
+// resolve that toward the non-destructive reading: a store a Durable tier names is not discardable,
+// whatever else names it. Otherwise the gauge would report a frontier that survives losing a store
+// the configuration says is never lost — the direction that costs data.
+//
+// Supported and documented (`ResolvedTiers::stores`, `store_is_discardable`) and until now
+// untested, which matters because `stats()` reimplements the attribution in one pass over files.
+TEST_F(WatermarkTest, AStoreNamedByADurableTierIsNotDiscardableEvenWhenATransientTierNamesItToo) {
+    Options options = make_options(store_, Compression::None, 64u << 10);
+    options.background = BackgroundMode::Inline;
+    options.clock = [this] { return now_; };
+    // One store, two tiers: Transient first (they must form a prefix, and must be bounded), then
+    // Durable. Every file therefore sits on a store that both tiers claim.
+    options.tiers = {
+        Tier{.store = store_.store(0),
+             .durability = Durability::Transient,
+             .max_age = Duration(60'000),
+             .stall_age = Duration(120'000)},
+        Tier{.store = store_.store(0), .durability = Durability::Durable},
+    };
+
+    auto db = open(options);
+    ASSERT_NE(db, nullptr);
+
+    // **The two bounds must differ**, or the branches agree and the case proves nothing: a
+    // discardable store reports `min(low)` and a durable one `max(high)`. The file below spans
+    // 40..70, so the two answers are 40 and 70.
+    ASSERT_EQ(db->set_watermark(40), Status::Ok);
+    write(*db, 0, 40);
+    ASSERT_EQ(db->set_watermark(70), Status::Ok);
+    ASSERT_EQ(db->flush(), Status::Ok);
+
+    const Stats stats = db->stats();
+    ASSERT_EQ(stats.tiers.size(), 2u);
+    EXPECT_EQ(stats.durable_watermark, std::optional<uint64_t>(70))
+        << "a Durable tier names this store, so losing it is not a case the gauge must survive — "
+           "40 here would mean the ambiguity was resolved toward discarding";
+
+    // Both tiers name one store, so each reports all of its files and all of its traffic. Summing
+    // across tiers double-counts, which is what `TierStats::io` says out loud.
+    EXPECT_GT(stats.tiers[0].file_count, 0);
+    EXPECT_EQ(stats.tiers[0].file_count, stats.tiers[1].file_count);
+    EXPECT_EQ(stats.tiers[0].bytes, stats.tiers[1].bytes);
+    EXPECT_TRUE(stats.tiers[0].io == stats.tiers[1].io);
+}
+
 // `Stats::durable_watermark` and `recovered_watermark()` are different quantities and must not be
 // confused: the getter is fixed at open, the gauge advances.
 TEST_F(WatermarkTest, TheLiveGaugeIsTheTransientLossSurvivableFrontier) {
