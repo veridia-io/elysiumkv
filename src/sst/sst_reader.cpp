@@ -165,11 +165,14 @@ size_t SstReader::max_uncompressed() const {
     return std::max<size_t>(16 * options_.block_bytes, kMaxEntryBlockBytes);
 }
 
-Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string name,
+Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::string name,
                                                    uint64_t file_size, SstReaderOptions options) {
     if (file_size < static_cast<uint64_t>(Footer::kFooterLengthV1)) {
         return std::unexpected(Status::Corrupt);
     }
+
+    // The wrapper wins when there is one, and the reader keeps it alive; see `owned_store`.
+    BlobStore& store = options.owned_store != nullptr ? *options.owned_store : incoming;
 
     // **One speculative read of the tail, not one read per structure at it.** The index block, the
     // range-delete block and the footer are adjacent at the end of the file (FORMAT.md §5), so a

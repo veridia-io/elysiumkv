@@ -3,6 +3,8 @@
 #include "sst/format.hpp"
 
 #include "compact/merging_iterator.hpp"
+#include "crypt/encrypted_object.hpp"
+#include "elysiumkv/no_encryption_provider.hpp"
 #include "sst/concat_iterator.hpp"
 #include "util/budget_charge.hpp"
 #include "util/jitter.hpp"
@@ -373,6 +375,29 @@ Status DbImpl::recover() {
         [this](const std::vector<FileMetadata>& files) { return delete_obsolete(files); },
         [this] { return now_ms(); },
         options_.obsolete_retention.value_or(Duration(0)));
+
+    // **Resolved before anything can read or write.** The passthrough is added rather than
+    // configured, so there is always a provider and never a null one; an embedder registering its
+    // reserved id is refused rather than silently overriding the one case the engine owns.
+    providers_ = options_.encryption.providers;
+    if (providers_.contains(std::string(kNoEncryptionProviderId))) {
+        last_error_ = "the empty encryption provider id is reserved for the passthrough";
+        return Status::Config;
+    }
+    for (const auto& [id, provider] : providers_) {
+        if (provider == nullptr) {
+            last_error_ = "encryption provider '" + id + "' is null";
+            return Status::Config;
+        }
+    }
+    providers_.emplace(std::string(kNoEncryptionProviderId),
+                       std::make_shared<NoEncryptionProvider>());
+
+    primary_provider_ = options_.encryption.primary_provider;
+    if (!providers_.contains(primary_provider_)) {
+        last_error_ = "primary encryption provider '" + primary_provider_ + "' is not registered";
+        return Status::Config;
+    }
 
     published_level_counts_ = std::ranges::all_of(config_.levels, [](const ResolvedLevel& level) {
         return level.level < VersionSet::kPublishedLevels;
@@ -1181,12 +1206,14 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
 
     // The flush output, whole, held until the put lands. Same reason as the migration copy.
     const BudgetCharge charged(options_.memory_budget, built->bytes.size());
-    auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
-    if (!file_number) return file_number.error();
+    auto written = write_new_sst(*tier.store, Slice::from(built->bytes));
+    if (!written) return written.error();
 
     FileMetadata file;
     file.level = 0;
-    file.file_number = *file_number;
+    file.file_number = written->file_number;
+    file.encryption_provider = written->encryption_provider;
+    file.encryption_metadata = written->encryption_metadata;
     file.store_id = tier.store->id();
     file.smallest_key = built->smallest_key;
     file.largest_key = built->largest_key;
@@ -1378,16 +1405,47 @@ Status DbImpl::check_invariants(Invariant* which) const {
 
 // --- read path ----------------------------------------------------------------
 
+EncryptionProvider* DbImpl::provider_for(const std::string& id) const {
+    const auto found = providers_.find(id);
+    return found == providers_.end() ? nullptr : found->second.get();
+}
+
+/// **No special case for "not encrypted".** The empty id resolves to `NoEncryptionProvider` like
+/// any other id resolves to its provider, and that provider returns an identity cipher. One path
+/// through the read and write paths, so there is one path to get right and one to test — which is
+/// what the reserved id is for.
+Result<std::shared_ptr<ObjectCipher>> DbImpl::cipher_for(const FileMetadata& file) const {
+    EncryptionProvider* provider = provider_for(file.encryption_provider);
+    if (provider == nullptr) {
+        // The bytes are intact; what is missing is the configuration that can read them. Reporting
+        // corruption here would send an operator to a restore they do not need.
+        return std::unexpected(Status::Config);
+    }
+    return provider->open(file.file_number, Slice::from(file.encryption_metadata));
+}
+
+Result<std::shared_ptr<BlobStore>> DbImpl::decrypting_view(BlobStore& store,
+                                                           const FileMetadata& file) const {
+    auto cipher = cipher_for(file);
+    if (!cipher) return std::unexpected(cipher.error());
+    return std::shared_ptr<BlobStore>(std::make_shared<EncryptedObject>(
+        store, *cipher, sst_object_name(file.file_number), file.file_bytes));
+}
+
 Result<std::shared_ptr<SstReader>> DbImpl::reader_for(const FileMetadata& file) {
     if (auto resident = readers_.get(file.file_number)) return resident;
 
     BlobStore* store = store_for(file.store_id);
     if (store == nullptr) return std::unexpected(Status::Corrupt);
 
+    auto view = decrypting_view(*store, file);
+    if (!view) return std::unexpected(view.error());
+
     SstReaderOptions reader_options;
     reader_options.block_bytes = options_.block_bytes;
     reader_options.file_number = file.file_number;
     reader_options.block_cache = block_cache_.get();
+    reader_options.owned_store = *view;
 
     auto reader = SstReader::open(*store, sst_object_name(file.file_number), file.file_bytes,
                                   reader_options);
@@ -2238,7 +2296,8 @@ Status DbImpl::fail_terminal(Status status, std::string detail) {
     return status;
 }
 
-Result<uint64_t> DbImpl::write_new_sst(BlobStore& store, Slice bytes) {
+Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice bytes,
+                                                    bool seal) {
     // ARCHITECTURE.md "Immutable named objects" says it outright: "a failed `put` must not be retried under the same name —
     // allocate a new file number instead; the partial object becomes an orphan and is
     // collected". A taken name is a numbering accident, not a verdict on ownership.
@@ -2248,13 +2307,37 @@ Result<uint64_t> DbImpl::write_new_sst(BlobStore& store, Slice bytes) {
     // writer's leftover object — sitting at exactly the number recovery hands back out —
     // permanently fatal: every reopen collided on the same name. Open stepping over what the
     // stores hold makes that rare, and renumbering makes it harmless when it happens anyway.
+    // Resolved once rather than per attempt: the retry loop below changes the file number, not the
+    // provider. The empty id resolves like any other, to the one that does nothing.
+    EncryptionProvider* provider = provider_for(primary_provider_);
+    if (provider == nullptr) return std::unexpected(Status::Config);
+
     constexpr int kAttempts = 4;
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
         const uint64_t file_number = versions_->allocate_file_number();
         const std::string name = sst_object_name(file_number);
 
-        const Status status = store.put(name, bytes).get();
-        if (status == Status::Ok) return file_number;
+        // **Sealed inside the loop, because the ciphertext depends on the number.** The file number
+        // is the object id bound into every chunk's authentication, so a renumber is a different
+        // object and its bytes have to be produced again. Sealing once outside would write, on the
+        // second attempt, ciphertext that authenticates as belonging to a file that does not exist.
+        WrittenObject written;
+        written.file_number = file_number;
+        std::string sealed;
+        Slice payload = bytes;
+        if (seal) {
+            auto created = provider->create(file_number);
+            if (!created) return std::unexpected(created.error());
+            auto material = EncryptedObject::seal_object(*created->cipher, bytes);
+            if (!material) return std::unexpected(material.error());
+            sealed = std::move(*material);
+            payload = Slice::from(sealed);
+            written.encryption_provider = primary_provider_;
+            written.encryption_metadata = std::move(created->metadata);
+        }
+
+        const Status status = store.put(name, payload).get();
+        if (status == Status::Ok) return written;
         if (status != Status::Unusable) return std::unexpected(status);
 
         // Taken. Step past it and try the next number.

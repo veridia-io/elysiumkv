@@ -88,6 +88,11 @@ configure_file(
 find_package(zstd CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
 
+# **Crypto is not hand-rolled here.** AES-256-GCM with hardware acceleration, a vetted
+# implementation and an audit trail is what an encryption-at-rest claim rests on; writing one is
+# not a reasonable thing to do inside a storage engine. Only libcrypto is needed — no TLS.
+find_package(OpenSSL REQUIRED)
+
 if(TARGET zstd::libzstd)
     set(ELYSIUMKV_ZSTD zstd::libzstd)
 elseif(TARGET zstd::libzstd_static)
@@ -100,6 +105,10 @@ endif()
 add_library(elysiumkv STATIC
     src/capi/elysiumkv_c.cpp
     src/status.cpp
+    src/crypt/encrypted_object.cpp
+    src/crypt/encryption.cpp
+    src/crypt/aes256_gcm_encryption_provider.cpp
+    src/crypt/no_encryption_provider.cpp
     src/db/db_impl.cpp
     src/db/level_config.cpp
     src/blob/disk_blob_store.cpp
@@ -136,7 +145,8 @@ target_include_directories(elysiumkv
     # makes the answer come from the library they actually loaded.
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(elysiumkv PRIVATE elysiumkv_flags ${ELYSIUMKV_ZSTD} lz4::lz4)
+target_link_libraries(elysiumkv PRIVATE elysiumkv_flags ${ELYSIUMKV_ZSTD} lz4::lz4
+                                      OpenSSL::Crypto)
 set_target_properties(elysiumkv PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden

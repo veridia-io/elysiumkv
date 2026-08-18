@@ -217,6 +217,11 @@ final class Native {
 
     static native boolean rangeIsErased(long db, byte[] lower, byte[] upper);
 
+    static native void optionsAddAes256GcmEncryption(long options, String id,
+                                                    EncryptionKeyManager keys, long chunkBytes);
+
+    static native void optionsSetPrimaryEncryptionProvider(long options, String id);
+
     static native void optionsConfigureCompaction(long options, double tombstoneDensityTrigger,
                                                   long tombstoneDensityMinEntries);
 

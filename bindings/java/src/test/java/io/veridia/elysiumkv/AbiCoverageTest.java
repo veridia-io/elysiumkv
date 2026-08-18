@@ -178,6 +178,14 @@ class AbiCoverageTest {
             // is what every other test here already crosses. LoggerTest covers a real one.
             exercise("optionsSetLogger");
 
+            // **Called for real, not marked.** A wrong JNI signature on these compiles and links,
+            // and fails only when an application first encrypts something; registering a provider
+            // here is what turns that into a test failure.
+            ElysiumKVOptions encrypted = support.options();
+            encrypted.encryptWith("abi-coverage", new EncryptionTest.DirectKeys(), 0);
+            exercise("optionsAddAes256GcmEncryption");
+            exercise("optionsSetPrimaryEncryptionProvider");
+
             ElysiumKV db = PinLeakExtension.watch(support.open());
             exercise("open");
 

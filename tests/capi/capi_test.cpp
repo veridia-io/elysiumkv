@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -513,6 +514,106 @@ TEST_F(CApiTest, AReadOnlyHandleRefusesEveryWriteAndStillReads) {
     // And refresh is available on both kinds of handle.
     EXPECT_EQ(elysiumkv_refresh(reader), ELYSIUMKV_OK);
     EXPECT_EQ(elysiumkv_close(reader), 0u);
+}
+
+/* Encryption reaching a binding: a key manager written in C, and the engine's own construction
+ * keyed by it.
+ *
+ * **The assertion is on the stored bytes, not on the round trip.** A round trip passes against a
+ * build that registered the provider and then encrypted nothing, which is exactly the failure a C
+ * seam invites — the callbacks are reached, so it looks wired.
+ */
+namespace {
+
+/// The envelope is the key. Enough to prove the seam; a KMS would add a network and prove nothing
+/// further about the boundary.
+extern "C" elysiumkv_status c_new_data_key(void* context, uint8_t* key_out, size_t key_cap,
+                                       uint8_t* envelope_out, size_t envelope_cap,
+                                       size_t* envelope_len) {
+    auto* counter = static_cast<int*>(context);
+    if (key_cap < 32 || envelope_cap < 32) return ELYSIUMKV_CONFIG;
+    for (size_t i = 0; i < 32; ++i) {
+        key_out[i] = static_cast<uint8_t>(*counter * 17 + static_cast<int>(i));
+        envelope_out[i] = key_out[i];
+    }
+    *envelope_len = 32;
+    ++*counter;
+    return ELYSIUMKV_OK;
+}
+
+extern "C" elysiumkv_status c_open_data_key(void*, const uint8_t* envelope, size_t envelope_len,
+                                        uint8_t* key_out, size_t key_cap) {
+    if (envelope_len != 32 || key_cap < 32) return ELYSIUMKV_CORRUPT;
+    for (size_t i = 0; i < 32; ++i) key_out[i] = envelope[i];
+    return ELYSIUMKV_OK;
+}
+
+}  // namespace
+
+TEST_F(CApiTest, AKeyManagerSuppliedThroughTheAbiEncryptsTheStore) {
+    int keys_issued = 0;
+    elysiumkv_encryption_key_manager manager{};
+    manager.context = &keys_issued;
+    manager.new_data_key = c_new_data_key;
+    manager.open_data_key = c_open_data_key;
+
+    elysiumkv_options* options = make_options();
+    ASSERT_EQ(elysiumkv_options_add_aes256_gcm_encryption(options, "c-kms", &manager, 0), ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_primary_encryption_provider(options, "c-kms"), ELYSIUMKV_OK);
+
+    elysiumkv_db* db = nullptr;
+    ASSERT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_OK);
+    elysiumkv_options_destroy(options);
+    ASSERT_NE(db, nullptr);
+
+    const std::string canary = "CANARY-THROUGH-THE-C-ABI-0123456789";
+    for (int i = 0; i < 64; ++i) {
+        const std::string key = "k" + std::to_string(i);
+        ASSERT_EQ(put(db, key.c_str(), canary.c_str()), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    EXPECT_GT(keys_issued, 0) << "the binding's manager was actually asked for a key";
+
+    // Read back through the ABI.
+    const uint8_t* value = nullptr;
+    size_t len = 0;
+    uint64_t pin = 0;
+    ASSERT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>("k7"), 2, &value, &len, &pin),
+              ELYSIUMKV_OK);
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(value), len), canary);
+    elysiumkv_unpin(db, pin);
+    elysiumkv_close(db);
+
+    // And the bytes on disk are not the canary.
+    for (const auto& entry : std::filesystem::directory_iterator(store_dir_)) {
+        if (!entry.is_regular_file()) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string contents((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+        EXPECT_EQ(contents.find(canary), std::string::npos) << entry.path();
+    }
+}
+
+TEST_F(CApiTest, TheReservedProviderIdIsRefusedThroughTheAbi) {
+    elysiumkv_encryption_key_manager manager{};
+    int counter = 0;
+    manager.context = &counter;
+    manager.new_data_key = c_new_data_key;
+    manager.open_data_key = c_open_data_key;
+
+    elysiumkv_options* options = elysiumkv_options_create();
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption(options, "", &manager, 0), ELYSIUMKV_OK);
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption(options, nullptr, &manager, 0), ELYSIUMKV_OK);
+
+    // An incomplete vtable is refused where it is registered, not where it is first used.
+    elysiumkv_encryption_key_manager partial{};
+    partial.new_data_key = c_new_data_key;
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption(options, "partial", &partial, 0),
+              ELYSIUMKV_OK);
+
+    elysiumkv_encryption_provider empty{};
+    EXPECT_NE(elysiumkv_options_add_encryption_provider(options, "custom", &empty), ELYSIUMKV_OK);
+    elysiumkv_options_destroy(options);
 }
 
 TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {

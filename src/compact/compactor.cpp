@@ -15,6 +15,7 @@
 
 #include "blob/windowed_blob_store.hpp"
 #include "compact/merging_iterator.hpp"
+#include "crypt/encrypted_object.hpp"
 #include "compact/migrator.hpp"
 #include "compact/picker.hpp"
 #include "sst/sst_writer.hpp"
@@ -480,20 +481,31 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     // migration costs exactly the bytes moved.
     auto bytes = source->bulk_view().get_sync(source_name, 0, BlobStore::kReadToEnd);
     if (!bytes) return bytes.error();
-    if (bytes->size() != migration.file.file_bytes) return Status::Corrupt;
+
+    // **The physical size, because this is below the encryption boundary.** Migration copies the
+    // stored object rather than the file's contents, and an encrypted object is longer than the
+    // logical size the manifest records — by one tag per chunk. Comparing against `file_bytes`
+    // here reported every encrypted file as corrupt.
+    auto cipher = cipher_for(migration.file);
+    if (!cipher) return cipher.error();
+    const uint64_t expected = EncryptedObject::physical_size(
+        migration.file.file_bytes, (*cipher)->chunk_bytes(), (*cipher)->overhead_bytes());
+    if (bytes->size() != expected) return Status::Corrupt;
 
     // A whole file in memory, held until the copy lands — the largest transient allocation the
     // engine makes, and the budget could not see it.
     const BudgetCharge charged(options_.memory_budget, bytes->size());
 
-    auto file_number = write_new_sst(*target.store, Slice::from(*bytes));
-    if (!file_number) return file_number.error();
+    // **Not re-sealed.** These bytes came off the source store as they were written; encrypting
+    // them again would double-encrypt, and the copy's metadata is carried over below.
+    auto written = write_new_sst(*target.store, Slice::from(*bytes), /*seal=*/false);
+    if (!written) return written.error();
 
     // Durable edit first, delete second (ARCHITECTURE.md "Open and recovery"). A crash in between leaves the
     // copy as an unambiguous orphan, which open collects; the reverse order
     // would leave a version referencing an object that no longer exists.
     FileMetadata moved = migration.file;
-    moved.file_number = *file_number;
+    moved.file_number = written->file_number;
     moved.store_id = target.store->id();
     // Carried over unchanged, so placement stays monotone across the renumber
     // (ARCHITECTURE.md "A tier is not a level"): the file is exactly as old as it was.
@@ -655,15 +667,27 @@ Result<std::shared_ptr<SstReader>> DbImpl::compaction_reader_for(
     BlobStore* store = store_for(file.store_id);
     if (store == nullptr) return std::unexpected(Status::Corrupt);
 
+    // **Resolved before the window, because the window's size hint is a physical one.** The window
+    // sits *below* the encryption boundary and fetches ciphertext, so a hint of the logical size
+    // would stop its prefetch short of the bytes that actually exist.
+    auto cipher = cipher_for(file);
+    if (!cipher) return std::unexpected(cipher.error());
+
+    const uint64_t physical_bytes = EncryptedObject::physical_size(
+        file.file_bytes, (*cipher)->chunk_bytes(), (*cipher)->overhead_bytes());
+
     // The manifest already records the size, so the window never chases a prefetch past the end.
     windows.push_back(std::make_unique<WindowedBlobStore>(
-        store->bulk_view(), options_.compaction_window_bytes, file.file_bytes,
+        store->bulk_view(), options_.compaction_window_bytes, physical_bytes,
         options_.memory_budget));
 
     SstReaderOptions reader_options;
     reader_options.block_bytes = options_.block_bytes;
     reader_options.file_number = file.file_number;
     reader_options.block_cache = nullptr;
+    // Above the window: the window holds stored bytes, this hands the reader logical ones.
+    reader_options.owned_store = std::make_shared<EncryptedObject>(
+        *windows.back(), *cipher, sst_object_name(file.file_number), file.file_bytes);
     return SstReader::open(*windows.back(), sst_object_name(file.file_number), file.file_bytes,
                            reader_options);
 }
@@ -763,13 +787,15 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         const Tier& tier = tier_for(/*file_number=*/0, min_write_time);
 
         const BudgetCharge output_charged(options_.memory_budget, built->bytes.size());
-        auto file_number = write_new_sst(*tier.store, Slice::from(built->bytes));
-        if (!file_number) return file_number.error();
+        auto written = write_new_sst(*tier.store, Slice::from(built->bytes));
+        if (!written) return written.error();
         compaction_bytes_written_.fetch_add(built->bytes.size(), std::memory_order_relaxed);
 
         FileMetadata file;
         file.level = compaction.output_level;
-        file.file_number = *file_number;
+        file.file_number = written->file_number;
+        file.encryption_provider = written->encryption_provider;
+        file.encryption_metadata = written->encryption_metadata;
         file.store_id = tier.store->id();
         file.smallest_key = built->smallest_key;
         file.largest_key = built->largest_key;

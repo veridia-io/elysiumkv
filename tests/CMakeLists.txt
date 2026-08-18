@@ -32,6 +32,8 @@ add_executable(elysiumkv_tests
     unit/overlap_boundary_test.cpp
     unit/key_edges_test.cpp
     unit/concat_iterator_test.cpp
+    unit/encrypted_object_test.cpp
+    unit/encryption_test.cpp
     unit/reverse_iteration_test.cpp
     unit/truncate_test.cpp
     unit/delete_range_test.cpp
@@ -62,6 +64,7 @@ add_executable(elysiumkv_tests
     fault/kill_point_test.cpp
     fault/config_validation_test.cpp
     fault/durability_test.cpp
+    fault/encryption_at_rest_test.cpp
     fault/tier_migration_test.cpp
     fault/migration_test.cpp
     fault/watermark_test.cpp

@@ -244,6 +244,44 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Registers the built-in AES-256-GCM envelope construction under {@code id}, keyed by your
+     * manager, and makes it the one new objects are written with.
+     *
+     * <p><b>The id is persisted</b>, written into every object this provider encrypts. Renaming it
+     * orphans every file recorded against the old name. It may not be empty: that one is reserved
+     * for the passthrough the engine always registers, which is why an unconfigured store is not a
+     * special case but simply that provider being primary.
+     *
+     * <p>{@code chunkBytes} of zero leaves the default of 4096.
+     */
+    public ElysiumKVOptions encryptWith(String id, EncryptionKeyManager keys, long chunkBytes) {
+        if (id == null || id.isEmpty()) {
+            throw new IllegalArgumentException("the empty provider id is reserved for the passthrough");
+        }
+        if (keys == null) throw new IllegalArgumentException("a key manager is required");
+        if (chunkBytes < 0) {
+            throw new IllegalArgumentException("chunkBytes must not be negative: " + chunkBytes);
+        }
+        Native.optionsAddAes256GcmEncryption(handle(), id, keys, chunkBytes);
+        Native.optionsSetPrimaryEncryptionProvider(handle(), id);
+        return this;
+    }
+
+    /**
+     * Registers a provider for reading without making it primary — the shape a migration to a new
+     * construction takes: the new one is primary, the old one stays registered until no file
+     * records it.
+     */
+    public ElysiumKVOptions alsoDecryptWith(String id, EncryptionKeyManager keys, long chunkBytes) {
+        if (id == null || id.isEmpty()) {
+            throw new IllegalArgumentException("the empty provider id is reserved for the passthrough");
+        }
+        if (keys == null) throw new IllegalArgumentException("a key manager is required");
+        Native.optionsAddAes256GcmEncryption(handle(), id, keys, chunkBytes);
+        return this;
+    }
+
     public ElysiumKVOptions manifestEditsPerGeneration(int edits) {
         manifestEditsPerGeneration = edits;
         return this;

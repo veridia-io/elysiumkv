@@ -880,6 +880,118 @@ void logger_write(void* context, int level, int event, const char* message, size
     env->DeleteLocalRef(text);
 }
 
+/* --- encryption ---------------------------------------------------------------------------
+ *
+ * A key manager written in Java, reached from the engine. **Per object, not per chunk**, and the
+ * result is cached — which is what makes an upcall affordable here and is why the cipher seam is
+ * not exposed the same way.
+ *
+ * `AttachedThread` is what makes this safe from a compaction thread, exactly as it does for the
+ * logger. */
+
+jmethodID g_keys_new_data_key = nullptr;
+jmethodID g_keys_open_data_key = nullptr;
+
+/// Copies a Java byte[] out and zeroes nothing: a `byte[]` is collector-owned and may already have
+/// been copied, so the honest position is that Java-held key material cannot be wiped. Stated at
+/// the binding rather than implied.
+bool copy_bytes(JNIEnv* env, jbyteArray from, uint8_t* out, size_t cap, size_t* len) {
+    if (from == nullptr) return false;
+    const jsize size = env->GetArrayLength(from);
+    if (size < 0 || static_cast<size_t>(size) > cap) return false;
+    env->GetByteArrayRegion(from, 0, size, reinterpret_cast<jbyte*>(out));
+    if (len != nullptr) *len = static_cast<size_t>(size);
+    return true;
+}
+
+elysiumkv_status keys_new_data_key(void* context, uint8_t* key_out, size_t key_cap,
+                               uint8_t* envelope_out, size_t envelope_cap, size_t* envelope_len) {
+    static thread_local AttachedThread attached;
+    JNIEnv* env = attached.env();
+    if (env == nullptr || g_keys_new_data_key == nullptr) return ELYSIUMKV_IO;
+
+    jobjectArray pair = static_cast<jobjectArray>(
+        env->CallObjectMethod(static_cast<jobject>(context), g_keys_new_data_key));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return ELYSIUMKV_IO;
+    }
+    if (pair == nullptr || env->GetArrayLength(pair) != 2) return ELYSIUMKV_CONFIG;
+
+    auto key = static_cast<jbyteArray>(env->GetObjectArrayElement(pair, 0));
+    auto envelope = static_cast<jbyteArray>(env->GetObjectArrayElement(pair, 1));
+    const bool ok = copy_bytes(env, key, key_out, key_cap, nullptr) &&
+                    copy_bytes(env, envelope, envelope_out, envelope_cap, envelope_len);
+    return ok ? ELYSIUMKV_OK : ELYSIUMKV_CONFIG;
+}
+
+elysiumkv_status keys_open_data_key(void* context, const uint8_t* envelope, size_t envelope_len,
+                                uint8_t* key_out, size_t key_cap) {
+    static thread_local AttachedThread attached;
+    JNIEnv* env = attached.env();
+    if (env == nullptr || g_keys_open_data_key == nullptr) return ELYSIUMKV_IO;
+
+    jbyteArray wrapped = env->NewByteArray(static_cast<jsize>(envelope_len));
+    if (wrapped == nullptr) return ELYSIUMKV_IO;
+    env->SetByteArrayRegion(wrapped, 0, static_cast<jsize>(envelope_len),
+                            reinterpret_cast<const jbyte*>(envelope));
+
+    auto key = static_cast<jbyteArray>(
+        env->CallObjectMethod(static_cast<jobject>(context), g_keys_open_data_key, wrapped));
+    env->DeleteLocalRef(wrapped);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        // The manager refusing is a configuration answer, not damage: the remedy is a key it can
+        // unwrap, which is not something a restore provides.
+        return ELYSIUMKV_CONFIG;
+    }
+    return copy_bytes(env, key, key_out, key_cap, nullptr) ? ELYSIUMKV_OK : ELYSIUMKV_CORRUPT;
+}
+
+void JNICALL options_add_aes256_gcm_encryption(JNIEnv* env, jclass, jlong options, jstring id,
+                                             jobject keys, jlong chunk_bytes) {
+    guard_void(env, [&] {
+        if (id == nullptr || keys == nullptr) {
+            throw_glue(env, "elysiumkv JNI: an encryption provider needs an id and a key manager");
+            return;
+        }
+        const char* id_chars = env->GetStringUTFChars(id, nullptr);
+        if (id_chars == nullptr) return;
+
+        // A global ref for the same reason the logger takes one: the manager outlives this call by
+        // the lifetime of the store, and the C ABI hands back no handle to key a registry on.
+        jobject global = env->NewGlobalRef(keys);
+        if (global == nullptr) {
+            env->ReleaseStringUTFChars(id, id_chars);
+            throw_glue(env, "elysiumkv JNI: could not retain the key manager");
+            return;
+        }
+
+        elysiumkv_encryption_key_manager vtable{};
+        vtable.context = global;
+        vtable.new_data_key = keys_new_data_key;
+        vtable.open_data_key = keys_open_data_key;
+        check(env, elysiumkv_options_add_aes256_gcm_encryption(as_options(options), id_chars, &vtable,
+                                                         static_cast<size_t>(chunk_bytes)));
+        env->ReleaseStringUTFChars(id, id_chars);
+    });
+}
+
+void JNICALL options_set_primary_encryption_provider(JNIEnv* env, jclass, jlong options,
+                                                     jstring id) {
+    guard_void(env, [&] {
+        if (id == nullptr) {
+            check(env, elysiumkv_options_set_primary_encryption_provider(as_options(options),
+                                                                     nullptr));
+            return;
+        }
+        const char* chars = env->GetStringUTFChars(id, nullptr);
+        if (chars == nullptr) return;
+        check(env, elysiumkv_options_set_primary_encryption_provider(as_options(options), chars));
+        env->ReleaseStringUTFChars(id, chars);
+    });
+}
+
 jlongArray JNICALL blob_cache_stats(JNIEnv* env, jclass, jlong store) {
     return guard(env, [&]() -> jlongArray {
         uint64_t hits = 0;
@@ -1198,6 +1310,12 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(options_configure_compaction)},
     {const_cast<char*>("rangeIsErased"), const_cast<char*>("(J[B[B)Z"),
      reinterpret_cast<void*>(range_is_erased)},
+    {const_cast<char*>("optionsAddAes256GcmEncryption"),
+     const_cast<char*>("(JLjava/lang/String;Lio/veridia/elysiumkv/EncryptionKeyManager;J)V"),
+     reinterpret_cast<void*>(options_add_aes256_gcm_encryption)},
+    {const_cast<char*>("optionsSetPrimaryEncryptionProvider"),
+     const_cast<char*>("(JLjava/lang/String;)V"),
+     reinterpret_cast<void*>(options_set_primary_encryption_provider)},
     {const_cast<char*>("optionsConfigureJitter"), const_cast<char*>("(JDD)V"),
      reinterpret_cast<void*>(options_configure_jitter)},
     {const_cast<char*>("blobCacheStats"), const_cast<char*>("(J)[J"),
@@ -1274,6 +1392,13 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_logger_log = env->GetMethodID(logger_class, "log", "(IILjava/lang/String;)V");
     env->DeleteLocalRef(logger_class);
     if (g_logger_log == nullptr) return JNI_ERR;
+
+    jclass keys_class = env->FindClass("io/veridia/elysiumkv/EncryptionKeyManager");
+    if (keys_class == nullptr) return JNI_ERR;
+    g_keys_new_data_key = env->GetMethodID(keys_class, "newDataKey", "()[[B");
+    g_keys_open_data_key = env->GetMethodID(keys_class, "openDataKey", "([B)[B");
+    env->DeleteLocalRef(keys_class);
+    if (g_keys_new_data_key == nullptr || g_keys_open_data_key == nullptr) return JNI_ERR;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8) != JNI_OK) return JNI_ERR;
     g_vm = vm;
 

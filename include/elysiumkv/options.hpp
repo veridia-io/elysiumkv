@@ -2,6 +2,7 @@
 #define ELYSIUMKV_OPTIONS_HPP
 
 #include "elysiumkv/blob_store.hpp"
+#include "elysiumkv/encryption.hpp"
 #include "elysiumkv/manifest_catalog.hpp"
 
 #include <chrono>
@@ -303,6 +304,21 @@ struct Options {
     /// usually has — and in doing so accept that those reads may be behind, which for a replayer
     /// about to overwrite them is exactly the trade it wants.
     bool allow_reads_before_recovery = false;
+
+    /// Encryption at rest.
+    ///
+    /// **There is always a provider and it is never null.** The passthrough is pre-registered under
+    /// the reserved empty id, so an unconfigured store is not a special case — it is the passthrough
+    /// being primary. Files record the id they were written under, and a read routes on that,
+    /// which is what lets a store hold files written by several providers at once while migrating.
+    struct EncryptionOptions {
+        /// id -> provider. The key is what objects record and what a read routes on. The engine
+        /// adds the passthrough under `""`; registering that id yourself is refused.
+        std::map<std::string, std::shared_ptr<EncryptionProvider>> providers;
+        /// Which registered provider writes new objects. Empty means the passthrough.
+        std::string primary_provider;
+    };
+    EncryptionOptions encryption;
 
     /// Compact a file once this fraction of its entries are tombstones. Zero — the default — is off.
     ///
