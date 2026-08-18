@@ -117,6 +117,84 @@ TEST(MemoryBudgetTest, AWholeFileCopyIsChargedWhileItIsHeld) {
 }
 
 
+// A compaction holds two windows per input — the one being merged and the one being fetched ahead
+// of it — and holds them all at once, because the merge interleaves its inputs. That is the largest
+// transient allocation the engine makes and it was invisible to the budget.
+//
+// **Sampled from inside the compaction**, because that is the only moment the windows exist: by the
+// time `stats()` could be called they are gone, and a test that looked afterwards would pass
+// against a charge that was never made.
+TEST(MemoryBudgetTest, CompactionWindowsAreChargedWhileTheMergeHoldsThem) {
+    constexpr size_t kWindow = 1u << 20;
+
+    class SamplingStore final : public BlobStore {
+    public:
+        SamplingStore(std::shared_ptr<BlobStore> delegate, std::shared_ptr<MemoryBudget> budget)
+            : delegate_(std::move(delegate)), budget_(std::move(budget)) {}
+
+        std::string id() const override { return delegate_->id(); }
+        std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
+            // Only the windowed reads, which ask for the whole window; a block-sized read is the
+            // point-lookup path and charges nothing.
+            if (len >= 1u << 20) {
+                peak_during_window_read = std::max(peak_during_window_read, budget_->used());
+            }
+            return delegate_->get(name, offset, len);
+        }
+        std::future<Status> put(std::string_view name, Slice bytes) override {
+            return delegate_->put(name, bytes);
+        }
+        std::future<Status> remove(std::string_view name) override {
+            return delegate_->remove(name);
+        }
+        std::future<ListResult> list(std::string_view prefix) override {
+            return delegate_->list(prefix);
+        }
+
+        size_t peak_during_window_read = 0;
+
+    private:
+        std::shared_ptr<BlobStore> delegate_;
+        std::shared_ptr<MemoryBudget> budget_;
+    };
+
+    test::TempDir dir;
+    std::filesystem::create_directories(dir.path() / "store");
+    auto disk = std::make_shared<DiskBlobStore>(dir.path() / "store", "store-a");
+    disk->set_sync_writes(false);
+    auto budget = std::make_shared<MemoryBudget>(64u << 20);
+    auto sampling = std::make_shared<SamplingStore>(disk, budget);
+
+    Options options;
+    options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir.path());
+    options.memory_budget = budget;
+    options.memtable_bytes = 256u << 10;
+    options.background = BackgroundMode::Inline;
+    options.compaction_window_bytes = kWindow;
+    LevelOptions l0;
+    l0.max_files = 100;
+    LevelOptions l1;
+    options.levels = {{0, l0}, {1, l1}};
+    options.tiers = {Tier{.store = sampling, .durability = Durability::Durable}};
+
+    auto opened = DB::open(options);
+    ASSERT_TRUE(opened.has_value());
+    auto db = std::move(*opened);
+
+    const std::string value(200, 'v');
+    for (int i = 0; i < 20000; ++i) {
+        char key[48];
+        std::snprintf(key, sizeof(key), "key:%08d", (i * 7919) % 20000);
+        ASSERT_EQ(db->put(Slice::from(std::string_view(key)), Slice::from(value)), Status::Ok);
+    }
+    ASSERT_EQ(db->flush(), Status::Ok);
+    ASSERT_EQ(db->compact_level(0), Status::Ok);
+
+    // Two windows per input, and more than one input — so the charge outstrips any single window.
+    EXPECT_GT(sampling->peak_during_window_read, 2 * kWindow)
+        << "the windows a compaction holds must be visible to the budget";
+}
+
 TEST(MemoryBudgetTest, AnUnconditionalChargeReportsTheOverage) {
     MemoryBudget budget(1000);
     EXPECT_TRUE(budget.try_acquire_over(600));

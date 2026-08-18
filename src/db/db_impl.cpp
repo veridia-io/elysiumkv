@@ -10,6 +10,7 @@
 #include "sst/sst_writer.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <ranges>
 #include <cassert>
 #include <chrono>
@@ -284,6 +285,18 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
         return std::unexpected(Status::Config);
     }
     if (options.manifest_catalog == nullptr) return std::unexpected(Status::Config);
+    // Zero would make every block its own request, which is the shape the window exists to remove,
+    // and it reads as "unset" rather than as a choice.
+    //
+    // The upper bound is arithmetic and nothing more: the budget charges two windows, so anything
+    // past half the address space wraps. **Deliberately not bounded by `max_compaction_bytes`** — a
+    // store with a small compaction budget is a real configuration, and a window wider than the
+    // whole compaction simply reads each input in one request, which is the best case rather than
+    // an error. Bounding it that way rejected `TinyCompactionBudget` outright.
+    if (options.compaction_window_bytes == 0 ||
+        options.compaction_window_bytes > std::numeric_limits<size_t>::max() / 2) {
+        return std::unexpected(Status::Config);
+    }
 
     // ARCHITECTURE.md "A tier is not a level" — `open` is guarded rather than merely documented. Adding a Transient
     // tier later must not leave existing call sites compiling and silently

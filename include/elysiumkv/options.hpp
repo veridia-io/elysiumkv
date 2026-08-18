@@ -271,6 +271,22 @@ struct Options {
     int bloom_bits_per_key = 10;
     size_t max_compaction_bytes = 400ull << 20;
 
+    /// How much of a compaction input is read at a time.
+    ///
+    /// **The knob that decides what a compaction costs against object storage.** A merge reads
+    /// every block of every input exactly once and asks for them one at a time, which is a round
+    /// trip per block; the window makes it one per `compaction_window_bytes`. Total requests are
+    /// therefore `input bytes / this`, and against a store with 20 ms of latency that number *is*
+    /// the compaction's duration.
+    ///
+    /// **Traded directly against memory, which is why it is not simply large.** Every input of a
+    /// compaction is read concurrently — the merge interleaves them — so the windows are all live
+    /// at once, and each input holds two of them: the one being merged and the one being fetched
+    /// ahead of it. The footprint is `2 x this x inputs x concurrent compactions`, and with the
+    /// default `max_compaction_bytes` and a 16 MiB `target_file_bytes` that is about 25 inputs. It
+    /// is charged to `memory_budget` when one is set, so the cost is visible rather than inferred.
+    size_t compaction_window_bytes = 2ull << 20;
+
     /// Compact a file once this fraction of its entries are tombstones. Zero — the default — is off.
     ///
     /// **The trigger the size ratios cannot express.** A tombstone is not an erasure: it shadows
