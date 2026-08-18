@@ -1,5 +1,6 @@
 #include "support/test_db.hpp"
 #include "elysiumkv/db.hpp"
+#include "elysiumkv/memory_budget.hpp"
 
 #include <gtest/gtest.h>
 

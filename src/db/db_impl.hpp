@@ -363,6 +363,7 @@ private:
     /// `Durable` store is corruption; missing from a `Transient` store discards
     /// every file on that store; any `Io` is neither, and must not discard.
     std::vector<ListResult> list_all_stores() const;
+    bool reads_are_blocked() const;
     Status verify_stores_and_discard();
     /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
     /// been **continuously unreferenced for `orphan_retention`**.

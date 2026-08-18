@@ -47,6 +47,8 @@ public class ElysiumKVException extends RuntimeException {
                 return new ConfigException(status, message);
             case STALE:
                 return new StaleException(status, message);
+            case RECOVERY_REQUIRED:
+                return new RecoveryRequiredException(status, message);
             case UNSUPPORTED:
                 // Terminal like CORRUPT and CONFIG, but neither of them: the bytes are fine and no
                 // option is wrong. Giving it one of their types would misdirect the reader.

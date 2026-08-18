@@ -64,7 +64,7 @@
          can point it at the version being published, from the same tag that names both. Adapter
          and engine are versioned together: they share a repository and a release. -->
     <elysiumkv.version>0.0.0-SNAPSHOT</elysiumkv.version>
-    <kafka.version>3.9.1</kafka.version>
+    <kafka.version>3.9.2</kafka.version>
     <junit.version>5.13.4</junit.version>
   </properties>
 

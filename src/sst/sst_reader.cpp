@@ -194,14 +194,14 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
     constexpr uint64_t kSpeculativeTailBytes = 256u << 10;
     const auto tail_len = static_cast<size_t>(std::min<uint64_t>(
         file_size,
-        std::max<uint64_t>(kSpeculativeTailBytes, static_cast<uint64_t>(Footer::kFooterLengthV2))));
+        std::max<uint64_t>(kSpeculativeTailBytes, static_cast<uint64_t>(Footer::kMaxFooterLength))));
     auto tail = store.get_sync(name, file_size - tail_len, tail_len);
     if (!tail) return std::unexpected(tail.error());
     if (tail->size() != tail_len) return std::unexpected(Status::Corrupt);
 
     const uint64_t tail_start = file_size - tail_len;
     const auto footer_window = static_cast<size_t>(
-        std::min<uint64_t>(tail_len, static_cast<uint64_t>(Footer::kFooterLengthV2)));
+        std::min<uint64_t>(tail_len, static_cast<uint64_t>(Footer::kMaxFooterLength)));
     const Slice tail_slice(tail->data() + (tail_len - footer_window), footer_window);
 
     auto footer_length = Footer::footer_length_from_trailer(tail_slice);

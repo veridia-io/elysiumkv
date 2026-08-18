@@ -188,6 +188,7 @@ void JNICALL options_configure(JNIEnv* env, jclass, jlong options, jlong catalog
                                jlong max_compaction_bytes, jlong compaction_window_bytes,
                                jint manifest_edits_per_generation,
                                jint paranoid_checks, jint block_on_stall,
+                               jint allow_reads_before_recovery,
                                jlong flush_interval_ms, jlong maintenance_interval_ms,
                                jlong obsolete_retention_ms, jlong orphan_retention_ms,
                                jlong orphan_sweep_interval_ms) {
@@ -199,7 +200,7 @@ void JNICALL options_configure(JNIEnv* env, jclass, jlong options, jlong catalog
                        static_cast<size_t>(reader_cache_bytes), bloom_bits_per_key,
                        static_cast<size_t>(max_compaction_bytes),
                        static_cast<size_t>(compaction_window_bytes), manifest_edits_per_generation,
-                       paranoid_checks, block_on_stall,
+                       paranoid_checks, block_on_stall, allow_reads_before_recovery,
                        static_cast<uint64_t>(flush_interval_ms),
                        static_cast<uint64_t>(maintenance_interval_ms),
                        static_cast<uint64_t>(obsolete_retention_ms),
@@ -1105,7 +1106,7 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(options_add_tier)},
     {const_cast<char*>("optionsSetLevel"), const_cast<char*>("(JIIJIIIJ)V"),
      reinterpret_cast<void*>(options_set_level)},
-    {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJJIIIJJJJJ)V"),
+    {const_cast<char*>("optionsConfigure"), const_cast<char*>("(JJJJJJJIJJIIIIJJJJJ)V"),
      reinterpret_cast<void*>(options_configure)},
 
     {const_cast<char*>("diskBlobStoreCreate"),

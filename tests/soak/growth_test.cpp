@@ -56,6 +56,17 @@ TEST(Soak, ResidentMemoryPlateausUnderSteadyState) {
     // event at the end of a long run.
     auto budget = std::make_shared<MemoryBudget>(128u << 10);
     options.memory_budget = budget;
+
+    // **Sized to the budget, or this measures a mismatch rather than the budget.** A compaction
+    // holds two windows per input and the charge is unconditional, so the default 2 MiB window puts
+    // 4 MiB against a 128 KiB budget — thirty-two times the limit from one input, arriving and
+    // leaving with a background compaction. That is what made this test flaky: resident memory did
+    // not drift upward, the *budget* stepped by 4 MiB whenever the final read landed inside one.
+    //
+    // Refusing such a pairing at `open` was tried and reverted: five configurations in this suite
+    // deliberately pair a tiny budget with the default window to force shedding, and they are not
+    // wrong — the engine works, the budget simply reports memory it does not bound.
+    options.compaction_window_bytes = 16u << 10;
     auto opened = DB::open(options);
     ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
     auto db = std::move(*opened);

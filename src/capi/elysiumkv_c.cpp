@@ -59,6 +59,7 @@ elysiumkv_status to_c(Status status) {
         case Status::Stalled: return ELYSIUMKV_STALLED;
         case Status::Unsupported: return ELYSIUMKV_UNSUPPORTED;
         case Status::Stale: return ELYSIUMKV_STALE;
+        case Status::RecoveryRequired: return ELYSIUMKV_RECOVERY_REQUIRED;
     }
     return ELYSIUMKV_UNUSABLE;
 }
@@ -207,6 +208,7 @@ private:
             case ELYSIUMKV_STALLED: return Status::Stalled;
             case ELYSIUMKV_UNSUPPORTED: return Status::Unsupported;
             case ELYSIUMKV_STALE: return Status::Stale;
+            case ELYSIUMKV_RECOVERY_REQUIRED: return Status::RecoveryRequired;
         }
         // An unknown code is emphatically not absence: treat it as "could not
         // determine", which is the non-destructive reading (ARCHITECTURE.md - Immutable named objects).
@@ -348,7 +350,8 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
                                          size_t max_compaction_bytes,
                                          size_t compaction_window_bytes,
                                          int manifest_edits_per_generation, int paranoid_checks,
-                                         int block_on_stall, uint64_t flush_interval_ms,
+                                         int block_on_stall, int allow_reads_before_recovery,
+                                         uint64_t flush_interval_ms,
                                          uint64_t maintenance_interval_ms,
                                          uint64_t obsolete_retention_ms,
                                          uint64_t orphan_retention_ms,
@@ -379,6 +382,9 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
         }
         if (paranoid_checks >= 0) options->options.paranoid_checks = paranoid_checks > 0;
         if (block_on_stall >= 0) options->options.block_on_stall = block_on_stall > 0;
+        if (allow_reads_before_recovery >= 0) {
+            options->options.allow_reads_before_recovery = allow_reads_before_recovery > 0;
+        }
         if (flush_interval_ms > 0) {
             options->options.flush_interval = std::chrono::milliseconds(flush_interval_ms);
         }
