@@ -28,6 +28,20 @@ Four presets exist and all four gate a change: `debug`, `release`, `asan-ubsan`,
 sanitizer presets are not optional extras — the bugs this design can have (a pin outliving its cache
 entry, a reader racing a compaction) are mostly invisible without them.
 
+**MemorySanitizer is deliberately absent, and the reason is worth stating.** MSan reports a read of
+uninitialized memory only if *every* instruction that could have written that memory was
+instrumented — which means libc++, and zstd, lz4 and gtest as vcpkg builds them. One uninstrumented
+dependency does not weaken the tool, it floods it: every byte that crosses an uninstrumented
+boundary is reported as poisoned, and a sanitizer whose output is mostly false is one people learn
+to skip. Standing that up means a custom vcpkg triplet, an MSan build of libc++, and a nightly slow
+enough that it competes with the differential.
+
+What it would buy over what is here: ASan already catches the reads that go *outside* an
+allocation, which is the shape a decoder handed hostile bytes actually takes, and `fuzz/` now drives
+those decoders with inputs nobody wrote. The gap MSan would close is a read *inside* a valid
+allocation that nothing initialised — narrower, and narrower still in a codebase whose buffers are
+`std::vector` and `std::string` rather than raw `malloc`. Revisit if that changes.
+
 The Java binding builds on top of the native library:
 
 ```sh
@@ -37,6 +51,19 @@ cd bindings/java && mvn test
 
 Remote-storage tests need Docker for LocalStack, and the AWS implementations need
 `-DELYSIUMKV_BUILD_AWS=ON`. Both are off by default so a normal contribution does not pay for them.
+
+The decoder fuzzers are off by default too, and clang-only — `-fsanitize=fuzzer` has no gcc
+equivalent:
+
+```sh
+cmake -S . -B build/fuzz -G Ninja -DELYSIUMKV_FUZZ=ON \
+      -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/fuzz && ctest --test-dir build/fuzz -R Fuzz
+```
+
+On macOS with Homebrew LLVM, libFuzzer and AddressSanitizer deadlock at startup — before `main`,
+with no output. Add `-DELYSIUMKV_FUZZ_SANITIZERS=undefined` there; input exploration and UB checking
+still work, and CI runs the full combination on Linux.
 
 ## Tests
 

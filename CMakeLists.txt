@@ -257,6 +257,15 @@ if(ELYSIUMKV_BUILD_BENCH)
     add_subdirectory(bench)
 endif()
 
+# --- decoder fuzzing ----------------------------------------------------------
+# Off by default and clang-only; see fuzz/CMakeLists.txt. Registered under `enable_testing` above
+# so the short corpus run joins the ordinary suite when it is switched on.
+option(ELYSIUMKV_FUZZ "Build libFuzzer targets for the decoders (clang only)" OFF)
+if(ELYSIUMKV_FUZZ)
+    enable_testing()
+    add_subdirectory(fuzz)
+endif()
+
 # --- the operator CLI ---------------------------------------------------------
 # A shipped binary rather than a build-tree tool, so it is not gated on tests or benchmarks: it is
 # what you reach for when a store is misbehaving, which is when a release build is what you have.

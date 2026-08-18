@@ -1,0 +1,50 @@
+# clang-tidy for a codebase that already gates -Wall -Wextra -Wpedantic -Wconversion
+# -Wsign-conversion -Wshadow -Werror on three platforms and two compilers. What is left for a
+# linter is what a compiler cannot see: lifetime and correctness analysis, and the two idioms this
+# engine has rules about.
+#
+# Deliberately not the full catalogue. A check that fires on style this codebase has settled — and
+# settled in writing, in CONTRIBUTING.md — produces noise that trains people to ignore the tool.
+# Two are off for reasons worth recording rather than rediscovering:
+#
+#   performance-enum-size  fires on every public enum. Narrowing one is an ABI decision, not a
+#                          performance one — `Status` and `Compression` cross the C ABI.
+#   misc-const-correctness wants `const` on locals throughout. Real, and thousands of warnings
+#                          deep in a codebase that did not adopt it; adopting it is a separate
+#                          decision from switching the linter on.
+#   misc-include-cleaner   demands an exact include list per translation unit, which fights the
+#                          layered headers here and is wrong often enough to be untrustworthy.
+#   misc-use-internal-linkage
+#                          false-positives on anything declared in a header the analysis did not
+#                          resolve, which is most of `src/` when the compile database and the tidy
+#                          binary come from different toolchains.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-branch-clone,
+  cert-dcl21-cpp,
+  cert-dcl58-cpp,
+  cert-err34-c,
+  clang-analyzer-*,
+  misc-*,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -misc-const-correctness,
+  -misc-include-cleaner,
+  -misc-use-internal-linkage,
+  performance-*,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  portability-*,
+  readability-container-size-empty,
+  readability-misleading-indentation,
+  readability-redundant-smartptr-get,
+  readability-simplify-boolean-expr,
+  readability-string-compare
+
+# The engine builds with -fno-rtti, so anything suggesting dynamic_cast is proposing code that
+# will not compile — the `as_cache()` virtual exists precisely because of that.
+WarningsAsErrors: ''
+HeaderFilterRegex: '(src|include)/.*'
+FormatStyle: none
