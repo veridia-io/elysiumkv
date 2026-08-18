@@ -176,6 +176,90 @@ TEST(Version, AnOlderLevelZeroSiblingAlsoBlocksTheDrop) {
     EXPECT_TRUE(version.files_expired_before(150).empty());
 }
 
+/* **The boundaries, because the answer is now found by binary search rather than a scan.**
+ *
+ * A file's span is closed at both ends, so a deeper file ending exactly where the candidate begins
+ * *does* overlap it. That is the case a half-open search gets wrong, and it gets it wrong silently:
+ * the file is dropped and its keys revert to the deeper file's older values.
+ */
+TEST(Version, ADeeperFileEndingExactlyAtTheCandidatesFirstKeyBlocksTheDrop) {
+    FileMetadata candidate = file(1, 9, "m", "p");
+    candidate.max_write_time_ms = 100;
+
+    // Sorted and disjoint, as the level invariant requires and the search relies on.
+    FileMetadata before = file(2, 1, "a", "c");
+    FileMetadata touching = file(2, 2, "e", "m");   // ends exactly at the candidate's first key
+    FileMetadata after = file(2, 3, "r", "z");
+    for (FileMetadata* f : {&before, &touching, &after}) f->max_write_time_ms = 10000;
+
+    Version version({{}, {candidate}, {before, touching, after}}, 20, {}, "");
+    EXPECT_TRUE(version.files_expired_before(150).empty()) << "m is in both files";
+}
+
+TEST(Version, ADeeperFileStartingExactlyAtTheCandidatesLastKeyBlocksTheDrop) {
+    FileMetadata candidate = file(1, 9, "m", "p");
+    candidate.max_write_time_ms = 100;
+
+    FileMetadata before = file(2, 1, "a", "c");
+    FileMetadata touching = file(2, 2, "p", "z");   // starts exactly at the candidate's last key
+    for (FileMetadata* f : {&before, &touching}) f->max_write_time_ms = 10000;
+
+    Version version({{}, {candidate}, {before, touching}}, 20, {}, "");
+    EXPECT_TRUE(version.files_expired_before(150).empty()) << "p is in both files";
+}
+
+/// One position further out on each side, which must *not* block — the other half of the boundary,
+/// and what a search that reached too far would get wrong.
+TEST(Version, DeeperFilesJustOutsideTheCandidatesSpanDoNotBlockTheDrop) {
+    FileMetadata candidate = file(1, 9, "m", "p");
+    candidate.max_write_time_ms = 100;
+
+    FileMetadata below = file(2, 1, "a", "l");      // ends just before "m"
+    FileMetadata above = file(2, 2, "q", "z");      // starts just after "p"
+    for (FileMetadata* f : {&below, &above}) f->max_write_time_ms = 10000;
+
+    Version version({{}, {candidate}, {below, above}}, 20, {}, "");
+    const auto dead = version.files_expired_before(150);
+    ASSERT_EQ(dead.size(), 1u);
+    EXPECT_EQ(dead[0].file_number, 9u);
+}
+
+/// The blocker in the middle of a long level, which is what distinguishes a search from a peek at
+/// the neighbours.
+TEST(Version, ABlockerIsFoundWhereverItSitsInTheLevel) {
+    FileMetadata candidate = file(1, 999, "key:000500", "key:000501");
+    candidate.max_write_time_ms = 100;
+
+    std::vector<FileMetadata> deep;
+    for (int i = 0; i < 200; ++i) {
+        char lo[32];
+        char hi[32];
+        std::snprintf(lo, sizeof(lo), "key:%06d", i * 10);
+        std::snprintf(hi, sizeof(hi), "key:%06d", i * 10 + 9);
+        FileMetadata f = file(2, static_cast<uint64_t>(i + 1), lo, hi);
+        f.max_write_time_ms = 10000;
+        deep.push_back(f);
+    }
+
+    Version version({{}, {candidate}, deep}, 2000, {}, "");
+    EXPECT_TRUE(version.files_expired_before(150).empty())
+        << "the file covering key:000500 is the 51st of 200, not a neighbour";
+}
+
+/// A *newer* file overlapping is not a reason to keep this one — it already shadows it, so dropping
+/// the older uncovers nothing.
+TEST(Version, ANewerOverlappingFileDoesNotBlockTheDrop) {
+    FileMetadata candidate = file(2, 4, "b", "y");
+    candidate.max_write_time_ms = 100;
+    FileMetadata newer = file(1, 9, "a", "z");      // shallower, so newer
+    newer.max_write_time_ms = 10000;
+
+    Version version({{}, {newer}, {candidate}}, 20, {}, "");
+    const auto dead = version.files_expired_before(150);
+    ASSERT_EQ(dead.size(), 1u);
+    EXPECT_EQ(dead[0].file_number, 4u);
+}
+
 /// Nothing overlapping beneath it, so it goes.
 TEST(Version, AFileWithNothingOlderBeneathItIsDropped) {
     FileMetadata shallow = file(1, 9, "b", "d");

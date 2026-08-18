@@ -142,6 +142,16 @@ public:
     /// Undefined for L0 and for a level with range tombstones; the caller checks `carries_ranges`.
     std::pair<size_t, size_t> overlapping_index_range(int level, Slice lower, Slice upper) const;
 
+    /// `[begin, end)` into `files_at(level)` whose **data span** intersects the closed interval
+    /// `[first, last]`.
+    ///
+    /// Distinct from `overlapping_index_range` in two ways that both matter: the interval is
+    /// closed, matching a file's own `smallest..largest`; and it consults the data span only, so
+    /// unlike that one it is **valid for a level carrying range tombstones** — a level's data spans
+    /// stay sorted and disjoint whatever its tombstone spans do. Undefined for L0, whose files
+    /// overlap by construction.
+    std::pair<size_t, size_t> data_span_index_range(int level, Slice first, Slice last) const;
+
     /// Files whose `[smallest, largest]` intersects the **closed** interval
     /// `[first, last]`. This is the *compaction* shape, and the distinction is
     /// load-bearing rather than pedantic: a file's `smallest_key..largest_key`

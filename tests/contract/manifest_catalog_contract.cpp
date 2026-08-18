@@ -1,5 +1,6 @@
 #include "contract/manifest_catalog_contract.hpp"
 
+#include <random>
 #include <string>
 #include <vector>
 
@@ -165,6 +166,51 @@ TEST_P(ManifestCatalogContract, LargeSnapshotsRoundTrip) {
     ASSERT_TRUE(read_back.has_value());
     EXPECT_EQ(read_back->size(), snapshot.size());
     EXPECT_EQ(as_string(*read_back), snapshot);
+}
+
+// The same for an edit, which is the case that was missing. An edit carries a full record per
+// output file, so a compaction with many outputs — or ordinary keys and a small
+// `target_file_bytes` — produces one far past any single-item limit a catalog may have.
+//
+// **Incompressible on purpose.** The padding above compresses to almost nothing, so a 2 MiB
+// snapshot of it lands in one chunk and proves the chunking works only in the sense that it did
+// not break. This body does not shrink, so it genuinely spans chunks.
+TEST_P(ManifestCatalogContract, LargeEditsRoundTrip) {
+    std::string edit;
+    edit.reserve(2u << 20);
+    std::mt19937 rng(20260818);
+    while (edit.size() < (2u << 20)) edit.push_back(static_cast<char>(rng() & 0xFF));
+
+    ASSERT_EQ(catalog_->put_edit(1, 7, Slice::from(edit)).get(), Status::Ok);
+
+    auto read_back = catalog_->get_edit(1, 7).get();
+    ASSERT_TRUE(read_back.has_value()) << status_name(read_back.error());
+    EXPECT_EQ(read_back->size(), edit.size());
+    EXPECT_EQ(as_string(*read_back), edit);
+
+    // **One entry, not one per chunk.** Replay asks for each sequence once, so a chunked edit
+    // reported several times would replay it several times.
+    auto seqs = catalog_->list_edits(1).get();
+    ASSERT_TRUE(seqs.has_value());
+    EXPECT_EQ(*seqs, (std::vector<uint64_t>{7}));
+}
+
+// A sequence number is not a prefix of another one. Chunk addressing appends to the sequence, so
+// `edit#7#` must not match `edit#70#` — the failure would be edit 7 silently reading 70's bytes.
+TEST_P(ManifestCatalogContract, AnEditSequenceIsNotAPrefixOfAnother) {
+    ASSERT_EQ(catalog_->put_edit(1, 7, Slice::from(std::string_view("seven"))).get(), Status::Ok);
+    ASSERT_EQ(catalog_->put_edit(1, 70, Slice::from(std::string_view("seventy"))).get(),
+              Status::Ok);
+    ASSERT_EQ(catalog_->put_edit(1, 700, Slice::from(std::string_view("sevenhundred"))).get(),
+              Status::Ok);
+
+    EXPECT_EQ(as_string(*catalog_->get_edit(1, 7).get()), "seven");
+    EXPECT_EQ(as_string(*catalog_->get_edit(1, 70).get()), "seventy");
+    EXPECT_EQ(as_string(*catalog_->get_edit(1, 700).get()), "sevenhundred");
+
+    auto seqs = catalog_->list_edits(1).get();
+    ASSERT_TRUE(seqs.has_value());
+    EXPECT_EQ(*seqs, (std::vector<uint64_t>{7, 70, 700}));
 }
 
 }  // namespace

@@ -1,6 +1,7 @@
 #include "version/version.hpp"
 
 #include <algorithm>
+#include <tuple>
 #include <memory>
 
 namespace elysiumkv {
@@ -184,9 +185,47 @@ std::vector<Version::RangeDropCandidate> Version::range_drop_candidates() const 
     return candidates;
 }
 
+std::pair<size_t, size_t> Version::data_span_index_range(int level, Slice first,
+                                                         Slice last) const {
+    const std::vector<FileMetadata>& files = files_at(level);
+
+    // First file whose largest key reaches `first` — everything before it ends too early.
+    const auto begin = std::lower_bound(
+        files.begin(), files.end(), first,
+        [](const FileMetadata& file, Slice probe) { return Slice::from(file.largest_key) < probe; });
+    // First file that starts strictly above `last`; the interval is closed, so equality overlaps.
+    const auto end = std::upper_bound(
+        files.begin(), files.end(), last,
+        [](Slice probe, const FileMetadata& file) { return probe < Slice::from(file.smallest_key); });
+    if (end < begin) return {static_cast<size_t>(begin - files.begin()),
+                             static_cast<size_t>(begin - files.begin())};
+    return {static_cast<size_t>(begin - files.begin()), static_cast<size_t>(end - files.begin())};
+}
+
+/// Whether any file **older** than this one still holds keys in its range — the question that
+/// decides whether an expired file can be dropped whole rather than compacted away.
+///
+/// **Searched, not scanned.** This ran over every file in every level, per candidate, on every
+/// maintenance pass with a `ttl` set — quadratic in the file count. Two things make it a search:
+/// levels shallower than the candidate's hold only *newer* files and cannot answer the question at
+/// all, and every level below L0 is sorted and disjoint by data span, so the files that could
+/// overlap are a contiguous run found by binary search.
 bool Version::older_file_overlaps(const FileMetadata& file) const {
-    for (const auto& others : levels_) {
-        for (const FileMetadata& other : others) {
+    // A level above the candidate's is newer by definition, so the walk starts at its own.
+    for (int level = file.level; level < static_cast<int>(levels_.size()); ++level) {
+        const std::vector<FileMetadata>& others = files_at(level);
+
+        // L0's files overlap each other, so there is no order to search — but `stop_at` bounds it
+        // to a handful, which is why leaving it a scan costs nothing.
+        size_t begin = 0;
+        size_t end = others.size();
+        if (level > 0) {
+            std::tie(begin, end) = data_span_index_range(level, Slice::from(file.smallest_key),
+                                                         Slice::from(file.largest_key));
+        }
+
+        for (size_t i = begin; i < end; ++i) {
+            const FileMetadata& other = others[i];
             const bool older = other.level > file.level ||
                                (other.level == file.level && other.file_number < file.file_number);
             if (!older) continue;
