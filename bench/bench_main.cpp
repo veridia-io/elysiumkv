@@ -4,6 +4,7 @@
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_blob_store.hpp"
+#include "elysiumkv/memory_cache_blob_store.hpp"
 
 #include <benchmark/benchmark.h>
 
@@ -15,11 +16,102 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace elysiumkv {
 namespace {
 
 /// ARCHITECTURE.md "Benchmarks" — reported, not gating.
+
+/// Readers arriving together on the same cold object, through a cache over a slow store.
+///
+/// **The shape a cold start actually has**, and the one no other benchmark here covers: every
+/// benchmark below is single-threaded, so a cache that issues one fetch per *reader* rather than
+/// one per *chunk* measures identically to one that does not. Against a store with real latency
+/// that is the difference between one round trip and one per thread.
+void BM_CacheColdReadFanout(benchmark::State& state) {
+    const auto threads = static_cast<size_t>(state.range(0));
+    const auto latency = std::chrono::microseconds(state.range(1));
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        test::TempDir dir;
+        std::filesystem::create_directories(dir.path() / "store");
+        auto disk = std::make_shared<DiskBlobStore>(dir.path() / "store", "bench");
+        disk->set_sync_writes(false);
+        auto slow = std::make_shared<test::FaultInjectingBlobStore>(disk);
+
+        const std::string bytes(256u << 10, 'v');
+        (void)slow->put("000000000001.sst", Slice::from(bytes)).get();
+        auto cache = std::make_shared<MemoryCacheBlobStore>(slow, nullptr, 8u << 20,
+                                                           /*cache_on_write=*/false, 64u << 10);
+        slow->set_latency(latency);
+        state.ResumeTiming();
+
+        // Every thread wants the same chunk, and none of them has it.
+        std::vector<std::thread> readers;
+        readers.reserve(threads);
+        for (size_t i = 0; i < threads; ++i) {
+            readers.emplace_back([&cache] {
+                auto value = cache->get("000000000001.sst", 0, 4096).get();
+                benchmark::DoNotOptimize(value);
+            });
+        }
+        for (std::thread& reader : readers) reader.join();
+
+        state.PauseTiming();
+        state.counters["delegate_gets"] =
+            static_cast<double>(slow->call_count(test::FaultInjectingBlobStore::Op::Get));
+        state.ResumeTiming();
+    }
+}
+BENCHMARK(BM_CacheColdReadFanout)->Args({8, 2000})->Unit(benchmark::kMicrosecond);
+
+/// Warm reads of *unrelated* objects, in parallel. What one mutex over the whole cache costs.
+///
+/// **Reported, never gating.** A threaded benchmark's spread on a shared runner is far above the
+/// ratchet's noise band, so `check_regression.py` prints it and skips the comparison — which is
+/// what should happen to a number that says as much about the machine as about the code.
+void BM_CacheWarmParallelReads(benchmark::State& state) {
+    const auto threads = static_cast<size_t>(state.range(0));
+    constexpr int kObjects = 64;
+    constexpr int kReadsPerThread = 2000;
+
+    test::TempDir dir;
+    std::filesystem::create_directories(dir.path() / "store");
+    auto disk = std::make_shared<DiskBlobStore>(dir.path() / "store", "bench");
+    disk->set_sync_writes(false);
+    auto cache = std::make_shared<MemoryCacheBlobStore>(disk, nullptr, 64u << 20,
+                                                       /*cache_on_write=*/true, 64u << 10);
+    cache->set_verify_against_delegate(false);
+    const std::string bytes(64u << 10, 'v');
+    for (int i = 0; i < kObjects; ++i) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "%012d.sst", i + 1);
+        (void)cache->put(name, Slice::from(bytes)).get();
+    }
+
+    for (auto _ : state) {
+        std::vector<std::thread> readers;
+        readers.reserve(threads);
+        for (size_t t = 0; t < threads; ++t) {
+            readers.emplace_back([&cache, t] {
+                for (int i = 0; i < kReadsPerThread; ++i) {
+                    char name[32];
+                    std::snprintf(name, sizeof(name), "%012d.sst",
+                                  static_cast<int>((t * 7 + static_cast<size_t>(i)) % kObjects) + 1);
+                    auto value = cache->get(name, static_cast<uint64_t>(i % 16) * 4096, 4096).get();
+                    benchmark::DoNotOptimize(value);
+                }
+            });
+        }
+        for (std::thread& reader : readers) reader.join();
+    }
+    state.counters["reads"] = benchmark::Counter(
+        static_cast<double>(threads * kReadsPerThread), benchmark::Counter::kIsIterationInvariantRate);
+}
+BENCHMARK(BM_CacheWarmParallelReads)->Arg(1)->Arg(8)->Unit(benchmark::kMillisecond);
 
 /// 100 keys per cluster whatever the store holds, so a prefix scan returns the
 /// same number of keys at every store size — which is what makes the scaling
@@ -34,7 +126,9 @@ std::string key_at(int i) {
 /// per iteration.
 class BenchStore {
 public:
-    explicit BenchStore(int keys) {
+    /// `target_file_bytes` of zero leaves the default. A small value produces the many-file store
+    /// that iterator construction is actually sensitive to.
+    explicit BenchStore(int keys, size_t target_file_bytes = 0) {
         std::filesystem::create_directories(dir_.path() / "store");
         auto store = std::make_shared<DiskBlobStore>(dir_.path() / "store", "bench");
         store->set_sync_writes(false);
@@ -52,6 +146,11 @@ public:
         LevelOptions l0;
         l0.max_files = 100;
         LevelOptions l1;
+        if (target_file_bytes != 0) {
+            options.memtable_bytes = target_file_bytes;
+            l0.target_file_bytes = target_file_bytes;
+            l1.target_file_bytes = target_file_bytes;
+        }
         options.levels = {{0, l0}, {1, l1}};
         options.tiers = {Tier{.store = store, .durability = Durability::Durable}};
 
@@ -325,6 +424,22 @@ void BM_WriteAmplification(benchmark::State& state) {
     state.counters["compactions"] = benchmark::Counter(compactions);
 }
 BENCHMARK(BM_WriteAmplification)->Arg(50000)->Unit(benchmark::kMillisecond);
+
+/// Opening an unbounded iterator and taking one key. **What iterator construction costs**, which
+/// no other benchmark isolates: a prefix scan prunes to a handful of files before opening any, so
+/// it says nothing about the case where the bound does not prune.
+void BM_FullScanFirstKey(benchmark::State& state) {
+    static BenchStore store(static_cast<int>(state.range(0)), 256u << 10);
+    for (auto _ : state) {
+        auto it = store.db().iterator();
+        bool got = it->next();
+        benchmark::DoNotOptimize(got);
+    }
+    double files = 0;
+    for (const LevelStats& level : store.db().stats().levels) files += level.file_count;
+    state.counters["files"] = files;
+}
+BENCHMARK(BM_FullScanFirstKey)->Arg(1000000)->Unit(benchmark::kMicrosecond);
 
 /// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
 ///

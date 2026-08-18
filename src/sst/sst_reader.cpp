@@ -195,7 +195,7 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& store, std::string
     const auto tail_len = static_cast<size_t>(std::min<uint64_t>(
         file_size,
         std::max<uint64_t>(kSpeculativeTailBytes, static_cast<uint64_t>(Footer::kFooterLengthV2))));
-    auto tail = store.get(name, file_size - tail_len, tail_len).get();
+    auto tail = store.get_sync(name, file_size - tail_len, tail_len);
     if (!tail) return std::unexpected(tail.error());
     if (tail->size() != tail_len) return std::unexpected(Status::Corrupt);
 
@@ -247,7 +247,7 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
     Buffer fetched;
     Slice framed = prefetched;
     if (framed.size() != handle.length) {
-        auto raw = store_.get(name_, handle.offset, handle.length).get();
+        auto raw = store_.get_sync(name_, handle.offset, handle.length);
         if (!raw) return std::unexpected(raw.error());
         fetched = std::move(*raw);
         framed = Slice::from(fetched);
@@ -275,7 +275,7 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
                 layer = &cache->delegate();
             }
 
-            auto retried = authority.get(name_, handle.offset, handle.length).get();
+            auto retried = authority.get_sync(name_, handle.offset, handle.length);
             if (retried && retried->size() == handle.length) {
                 auto fresh = unframe_block(Slice::from(*retried), max_uncompressed());
                 if (fresh) content = std::move(fresh);
@@ -297,7 +297,7 @@ Status SstReader::ensure_filter() {
     std::lock_guard<std::mutex> lock(lazy_mutex_);
     if (filter_loaded_.load(std::memory_order_relaxed)) return Status::Ok;
 
-    auto filter = store_.get(name_, footer_.filter.offset, footer_.filter.length).get();
+    auto filter = store_.get_sync(name_, footer_.filter.offset, footer_.filter.length);
     if (!filter) return filter.error();
     auto content = unframe_block(Slice::from(*filter), max_uncompressed());
     if (!content) return content.error();

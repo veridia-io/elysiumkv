@@ -362,6 +362,7 @@ private:
     /// One `list` per distinct store, never a `get` per file. Missing from a
     /// `Durable` store is corruption; missing from a `Transient` store discards
     /// every file on that store; any `Io` is neither, and must not discard.
+    std::vector<ListResult> list_all_stores() const;
     Status verify_stores_and_discard();
     /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
     /// been **continuously unreferenced for `orphan_retention`**.
@@ -480,6 +481,11 @@ private:
     ResolvedTiers tiers_;
     std::shared_ptr<BlockCache> block_cache_;
     std::unique_ptr<VersionSet> versions_;
+
+    /// Whether every configured level is inside `VersionSet::kPublishedLevels`, decided once at
+    /// open. False makes the write valve read counts off the Version as it used to — correct, and
+    /// only reachable with more levels than any real configuration has.
+    bool published_level_counts_ = false;
 
     mutable std::mutex mem_mutex_;
     /// The floor a write is refused against, **guarded by `mem_mutex_`** and published by

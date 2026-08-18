@@ -7,6 +7,7 @@
 #include <optional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace elysiumkv {
@@ -131,6 +132,15 @@ public:
     /// `[lower, upper)`; an empty `upper` means "to the end of the keyspace".
     /// This is the *read* shape — ARCHITECTURE.md "Absence is an answer, not an error" makes iterator bounds half-open.
     std::vector<FileMetadata> overlapping_half_open(int level, Slice lower, Slice upper) const;
+
+    /// The same set as `overlapping_half_open`, as a `[begin, end)` index range into
+    /// `files_at(level)` — **for a level whose files are sorted and disjoint and which carries no
+    /// range tombstones**, where the answer is necessarily contiguous. Two binary searches instead
+    /// of a scan, and no copy: an unbounded scan of a 697-file level copied every entry, two
+    /// strings each, to build a list it then walked one file at a time.
+    ///
+    /// Undefined for L0 and for a level with range tombstones; the caller checks `carries_ranges`.
+    std::pair<size_t, size_t> overlapping_index_range(int level, Slice lower, Slice upper) const;
 
     /// Files whose `[smallest, largest]` intersects the **closed** interval
     /// `[first, last]`. This is the *compaction* shape, and the distinction is

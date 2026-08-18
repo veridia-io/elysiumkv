@@ -435,6 +435,44 @@ TEST_F(CompactionTest, StopAtReportsStalledWhenBlockingIsDeclined) {
     EXPECT_GT(db->stats().stall_count, 0u);
 }
 
+// The same valve, isolated from the one beside it. `StopAtReportsStalledWhenBlockingIsDeclined`
+// drives L0 with a 4 KiB memtable, which makes the *freeze* valve — a write arriving while the
+// previous memtable is still being flushed — fire first; that test passes with `stop_at` ignored
+// entirely. Here the memtable is large and every flush is explicit and complete, so a rejection can
+// only have come from the level file count.
+TEST_F(CompactionTest, StopAtAloneRefusesAWriteWithNoMemtablePressure) {
+    TestStore store(1);
+    Options options;
+    options.manifest_catalog = store.catalog();
+    options.memtable_bytes = 8u << 20;  // nothing freezes on its own
+    options.background = BackgroundMode::Threaded;
+    options.block_on_stall = false;
+
+    LevelOptions l0;
+    l0.max_files = 100;  // well above stop_at, so the picker never drains L0
+    l0.stop_at = 3;
+    LevelOptions l1;
+    options.levels = {{0, l0}, {1, l1}};
+    options.tiers = {Tier{.store = store.store(0), .durability = Durability::Durable}};
+
+    auto opened = DB::open(options);
+    ASSERT_TRUE(opened.has_value());
+    auto db = std::move(*opened);
+
+    for (int file = 0; file < 3; ++file) {
+        ASSERT_EQ(db->put(Slice::from(key_at(file)), Slice::from(std::string(64, 'v'))),
+                  Status::Ok)
+            << "below stop_at, and nothing else is under pressure";
+        ASSERT_EQ(db->flush(), Status::Ok);
+    }
+    ASSERT_EQ(db->stats().levels[0].file_count, 3);
+
+    EXPECT_EQ(db->put(Slice::from(key_at(99)), Slice::from(std::string(64, 'v'))),
+              Status::Stalled)
+        << "L0 is at stop_at, and that is the only valve that can be closed";
+    EXPECT_GT(db->stats().stall_count, 0u);
+}
+
 }  // namespace
 }  // namespace elysiumkv::test
 

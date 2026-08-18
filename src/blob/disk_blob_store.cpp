@@ -1,6 +1,7 @@
 #include "elysiumkv/disk_blob_store.hpp"
 
 #include "blob/object_name.hpp"
+#include "blob/open_file_cache.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -18,6 +19,10 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr std::string_view kTempPrefix = ".tmp.";
+
+/// Small on purpose — see `set_max_open_files`. Enough for L0 plus the file a scan is walking on
+/// each of a few levels, which is the whole hot set of an LSM read.
+constexpr size_t kDefaultMaxOpenFiles = 32;
 
 /// Flat, non-empty, no path separators, no leading dot. The leading-dot rule
 /// also keeps user objects clear of the temp files below.
@@ -63,12 +68,20 @@ bool fsync_directory(const fs::path& dir) {
 }  // namespace
 
 DiskBlobStore::DiskBlobStore(fs::path root, std::string id)
-    : root_(std::move(root)), id_(std::move(id)) {
+    : root_(std::move(root)),
+      id_(std::move(id)),
+      open_files_(std::make_unique<OpenFileCache>(kDefaultMaxOpenFiles)) {
     if (id_.empty()) {
         std::error_code ec;
         const fs::path canonical = fs::weakly_canonical(root_, ec);
         id_ = ec ? root_.string() : canonical.string();
     }
+}
+
+DiskBlobStore::~DiskBlobStore() = default;
+
+void DiskBlobStore::set_max_open_files(size_t count) {
+    open_files_ = std::make_unique<OpenFileCache>(count);
 }
 
 bool DiskBlobStore::root_is_directory() const {
@@ -81,9 +94,12 @@ fs::path DiskBlobStore::path_for(std::string_view name) const {
 }
 
 std::future<GetResult> DiskBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
+    return make_ready_future(get_sync(name, offset, len));
+}
+GetResult DiskBlobStore::get_sync(std::string_view name, uint64_t offset, size_t len) {
     auto result = do_get(name, offset, len);
     note_get(result);
-    return make_ready_future(std::move(result));
+    return result;
 }
 std::future<Status> DiskBlobStore::put(std::string_view name, Slice bytes) {
     const Status status = do_put(name, bytes);
@@ -101,20 +117,42 @@ std::future<ListResult> DiskBlobStore::list(std::string_view prefix) {
     return make_ready_future(std::move(result));
 }
 
-GetResult DiskBlobStore::do_get(std::string_view name, uint64_t offset, size_t len) {
-    if (!is_valid_object_name(name)) return std::unexpected(Status::Config);
+std::shared_ptr<const OpenFile> DiskBlobStore::open_for_read(std::string_view name,
+                                                            Status& failure) {
+    if (auto held = open_files_->lookup(name)) return held;
 
-    FileDescriptor fd(::open(path_for(name).c_str(), O_RDONLY));
-    if (!fd.valid()) {
-        Status status = errno_to_status(errno);
+    int fd = ::open(path_for(name).c_str(), O_RDONLY);
+    if (fd < 0 && (errno == EMFILE || errno == ENFILE)) {
+        // Out of descriptors, and this cache is holding some. Giving them all back is strictly
+        // better than failing a read to keep them.
+        open_files_->clear();
+        fd = ::open(path_for(name).c_str(), O_RDONLY);
+    }
+    if (fd < 0) {
+        failure = errno_to_status(errno);
         // A missing file inside a missing root is not evidence of absence.
-        if (status == Status::NotFound && !root_is_directory()) status = Status::Io;
-        return std::unexpected(status);
+        if (failure == Status::NotFound && !root_is_directory()) failure = Status::Io;
+        return nullptr;
     }
 
     struct stat st {};
-    if (::fstat(fd.get(), &st) != 0) return std::unexpected(Status::Io);
-    const auto file_size = static_cast<uint64_t>(st.st_size);
+    if (::fstat(fd, &st) != 0) {
+        ::close(fd);
+        failure = Status::Io;
+        return nullptr;
+    }
+    return open_files_->insert(
+        name, std::make_shared<const OpenFile>(fd, static_cast<uint64_t>(st.st_size)));
+}
+
+GetResult DiskBlobStore::do_get(std::string_view name, uint64_t offset, size_t len) {
+    if (!is_valid_object_name(name)) return std::unexpected(Status::Config);
+
+    Status failure = Status::Io;
+    auto file = open_for_read(name, failure);
+    if (file == nullptr) return std::unexpected(failure);
+
+    const uint64_t file_size = file->size;
     if (offset >= file_size) return Buffer{};
 
     const uint64_t available = file_size - offset;
@@ -124,7 +162,7 @@ GetResult DiskBlobStore::do_get(std::string_view name, uint64_t offset, size_t l
 
     size_t done = 0;
     while (done < out.size()) {
-        const ssize_t n = ::pread(fd.get(), out.data() + done, out.size() - done,
+        const ssize_t n = ::pread(file->fd, out.data() + done, out.size() - done,
                                   static_cast<off_t>(offset + done));
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -178,6 +216,9 @@ Status DiskBlobStore::do_put(std::string_view name, Slice bytes) {
 
 Status DiskBlobStore::do_remove(std::string_view name) {
     if (!is_valid_object_name(name)) return Status::Config;
+    // **Before the unlink, not after.** A held descriptor keeps reading an unlinked inode
+    // perfectly well, so leaving one behind would make a removed object still readable.
+    open_files_->erase(name);
     if (::unlink(path_for(name).c_str()) == 0) return Status::Ok;
     if (errno == ENOENT) {
         // Idempotent — but only if we could actually look.
