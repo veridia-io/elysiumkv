@@ -68,7 +68,13 @@ jobs:
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 20
-          sudo apt-get install -y -qq ninja-build libc++-20-dev libc++abi-20-dev
+          # **A pinned clang, and the default libstdc++.** The version matters — the runner's
+          # unpinned `clang` could not compile `std::expected` at all — but the standard library
+          # must *not* be swapped: LLVM ships `libclang_rt.fuzzer` for Linux built against
+          # libstdc++, so a target compiled with `-stdlib=libc++` fails to link with hundreds of
+          # undefined references to `std::__throw_length_error` and friends from inside libFuzzer
+          # itself. One binary, one standard library.
+          sudo apt-get install -y -qq ninja-build
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
@@ -85,7 +91,7 @@ jobs:
           echo '#include <expected>
           #include <cstdio>
           int main() { std::expected<int, int> e{1}; std::printf("std::expected ok %d\\n", *e); }' > /tmp/probe.cpp
-          clang++-20 -std=c++23 -stdlib=libc++ /tmp/probe.cpp -o /tmp/probe
+          clang++-20 -std=c++23 /tmp/probe.cpp -o /tmp/probe
           /tmp/probe
 
       - name: Resolve the vcpkg pin
@@ -109,12 +115,15 @@ jobs:
 
       # `-fsanitize=fuzzer` is clang-only, which is why this job does not join the matrix: that one
       # builds with whatever `/usr/bin/c++` is, and on the Linux legs that is gcc.
+      #
+      # Tests, benchmarks and the CLI are off: this job needs the library and four small targets,
+      # and was otherwise building — and linking — the whole 689-case suite to run four fuzzers.
       - name: Configure and build
         run: |
           cmake -S . -B build/fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
+            -DELYSIUMKV_BUILD_TESTS=OFF -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF \
             -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
-            -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build/fuzz
 
