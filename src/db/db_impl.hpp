@@ -228,9 +228,7 @@ public:
     /// use removes the window instead of narrowing it, and leaves exactly one place that knows the
     /// pin exists.
     bool transient_stalled() const {
-        // Widened explicitly: the stored type is signed and the sign is the state — negative
-        // means unpinned, so this is not a `signed char` leaking into an `int` by accident.
-        const int pinned = static_cast<int>(pinned_transient_stall_.load());
+        const int pinned = pinned_transient_stall_.load();
         if (pinned >= 0) return pinned != 0;
         return transient_stalled_.load();
     }
@@ -554,7 +552,10 @@ private:
     /// "the test writes it before the writes it cares about" is an argument about *intent*, not
     /// about synchronisation. TSAN reported it intermittently, which is what an unsynchronised
     /// access looks like when the interleaving usually happens to be benign.
-    std::atomic<int8_t> pinned_transient_stall_{-1};
+    /// Tri-state: negative is unpinned, 0 and 1 are the pinned value. An `int` rather than an
+    /// `int8_t` because the width buys nothing on a test-only override and `signed char` widening
+    /// to `int` is a genuine trap elsewhere — worth not writing at all rather than casting past.
+    std::atomic<int> pinned_transient_stall_{-1};
     std::atomic<uint32_t> suppressed_tasks_{0};
 #ifdef ELYSIUMKV_PARANOID
     /// ARCHITECTURE.md "Negative controls" — at most one *deleting* task may be in flight, because

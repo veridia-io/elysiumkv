@@ -210,8 +210,13 @@ jobs:
           fi
           BASE="${{ github.event.pull_request.base.sha }}"
           # -U0 so only changed lines are considered; -p1 strips the a/ b/ prefixes.
+          # `-only-check-in-db` because the AWS sources are not in this compile database — the SDK
+          # is an optional component and this job does not pay for it — so without it clang-tidy
+          # falls back to default flags and reports `aws/core/Aws.h` missing as a compile error.
+          # `-quiet` because otherwise every file prints a "suppressed N warnings in non-user code"
+          # banner and the real finding is buried under thirty of them.
           git diff -U0 "$BASE"...HEAD -- 'src/*' 'include/*' 'aws/*' 'cli/*' \
-            | python3 "$DIFF_TOOL" -p1 -path build/tidy \
+            | python3 "$DIFF_TOOL" -p1 -path build/tidy -quiet -only-check-in-db \
                 -clang-tidy-binary clang-tidy-20 \
             | tee /tmp/tidy.log
           # clang-tidy-diff exits 0 even when it reports, so the log is what decides.
