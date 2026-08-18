@@ -162,7 +162,12 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, i
  * default of one second. Not a latency knob: the interval is the smallest term in the exposure
  * window `max_age + interval + queueing behind an in-flight compaction + the migration itself`.
  * An idle tick performs no version scan, which is what makes a short default affordable across
- * many instances in one process. */
+ * many instances in one process.
+ *
+ * `compaction_window_bytes` is how much of a compaction input is read at a time; zero leaves the
+ * default. Total requests are `input bytes / this`, which against object storage is what a
+ * compaction costs — and it is traded directly against memory, because every input of a compaction
+ * holds two of these at once and they are all live together. Charged to `memory_budget`. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, void* manifest_catalog,
                                                      void* memory_budget,
                                                      size_t memtable_bytes, size_t block_bytes,
@@ -170,6 +175,7 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
                                                      size_t reader_cache_bytes,
                                                      int bloom_bits_per_key,
                                                      size_t max_compaction_bytes,
+                                                     size_t compaction_window_bytes,
                                                      int manifest_edits_per_generation,
                                                      int paranoid_checks, int block_on_stall,
                                                      uint64_t flush_interval_ms,

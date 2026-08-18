@@ -197,6 +197,32 @@ TEST_F(ConfigValidationTest, AMissingCatalogIsRejected) {
     EXPECT_EQ(open_error(options), Status::Config);
 }
 
+// Zero is not "leave it alone" — it would make every block of a compaction its own request, which
+// is the cost the window exists to remove.
+TEST_F(ConfigValidationTest, AZeroCompactionWindowIsRejected) {
+    Options options = base();
+    options.compaction_window_bytes = 0;
+    EXPECT_EQ(open_error(options), Status::Config);
+}
+
+// The budget charges two windows, so a value past half the address space wraps. This is what a
+// negative becomes once it has crossed an unsigned boundary.
+TEST_F(ConfigValidationTest, AWindowThatWouldOverflowItsOwnBudgetChargeIsRejected) {
+    Options options = base();
+    options.compaction_window_bytes = std::numeric_limits<size_t>::max();
+    EXPECT_EQ(open_error(options), Status::Config);
+}
+
+// **A window wider than the whole compaction budget is not an error.** A store with a small
+// compaction budget is a real configuration — the differential suite runs one — and a window that
+// covers a whole input reads it in a single request, which is the best case.
+TEST_F(ConfigValidationTest, AWindowWiderThanTheCompactionBudgetIsAccepted) {
+    Options options = base();
+    options.max_compaction_bytes = 16u << 20;
+    options.compaction_window_bytes = 32u << 20;
+    EXPECT_EQ(open_error(options), Status::Ok);
+}
+
 // ARCHITECTURE.md "A tier is not a level" — gaps inherit the nearest shallower entry.
 TEST_F(ConfigValidationTest, GapsInTheLevelMapInheritFromAbove) {
     Options options = base();

@@ -551,6 +551,75 @@ void BM_TtlReclamation(benchmark::State& state) {
 }
 BENCHMARK(BM_TtlReclamation)->Arg(2000)->Arg(10000)->Unit(benchmark::kMicrosecond);
 
+/// A compaction whose inputs live on a store with real latency.
+///
+/// **The case the windowed read only half fixed.** The window turned one request per block into one
+/// per window, which is the request *count*; the merge still waits out every refill with nothing
+/// else in flight, and a compaction refills once per window per input. Nothing else here measures
+/// that: every other remote benchmark is a read against a store that is already built.
+void BM_RemoteCompaction(benchmark::State& state) {
+    const auto latency = std::chrono::microseconds(state.range(0));
+    const auto window = static_cast<size_t>(state.range(1));
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        test::TempDir dir;
+        std::filesystem::create_directories(dir.path() / "store");
+        auto disk = std::make_shared<DiskBlobStore>(dir.path() / "store", "bench");
+        disk->set_sync_writes(false);
+        auto slow = std::make_shared<test::FaultInjectingBlobStore>(disk);
+
+        Options options;
+        options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir.path());
+        // **Files larger than the 2 MiB window**, or there is no next window to fetch and this
+        // measures nothing — the first version of this benchmark produced 1 MiB inputs and showed a
+        // flat line for exactly that reason.
+        options.memtable_bytes = 8u << 20;
+        options.background = BackgroundMode::Inline;
+        LevelOptions l0;
+        l0.max_files = 100;          // built without compacting, so the run below is the whole cost
+        l0.target_file_bytes = 8u << 20;
+        LevelOptions l1;
+        l1.target_file_bytes = 8u << 20;
+        options.levels = {{0, l0}, {1, l1}};
+        options.compaction_window_bytes = window;
+        options.tiers = {Tier{.store = slow, .durability = Durability::Durable}};
+
+        auto db = std::move(*DB::open(options));
+        const std::string value(200, 'v');
+
+        // **Shuffled, not ascending** — the same trap `BM_WriteAmplification` documents. Written in
+        // key order each L0 file holds a disjoint range, so the merge walks them one after another
+        // and only one input is ever being read. A changelog partition arrives in key-arrival
+        // order, which spreads every memtable across the whole keyspace, so the real merge
+        // interleaves all of its inputs at once.
+        std::vector<int> order(300000);
+        for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+        std::shuffle(order.begin(), order.end(), std::mt19937(20260819));
+        for (const int key : order) {
+            (void)db->put(Slice::from(key_at(key)), Slice::from(value));
+        }
+        (void)db->flush();
+
+        // Injected only once the inputs exist: charging the build would measure the writes.
+        slow->set_latency(latency);
+        const uint64_t before = slow->call_count(test::FaultInjectingBlobStore::Op::Get);
+        state.ResumeTiming();
+
+        (void)db->compact_level(0);
+
+        state.PauseTiming();
+        state.counters["input_gets"] =
+            static_cast<double>(slow->call_count(test::FaultInjectingBlobStore::Op::Get) - before);
+        state.ResumeTiming();
+    }
+}
+BENCHMARK(BM_RemoteCompaction)
+    ->Args({20000, 2u << 20})
+    ->Args({20000, 8u << 20})
+    ->Args({20000, 32u << 20})
+    ->Unit(benchmark::kMillisecond);
+
 /// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
 ///
 /// The gate under test is `check_regression.py`, not the engine, so the engine

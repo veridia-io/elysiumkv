@@ -644,11 +644,6 @@ Status DbImpl::run_compaction(const Compaction& compaction, DeferredLine& line) 
     return Status::Ok;
 }
 
-/// Bounds a compaction's buffering. Two megabytes is 512 blocks at the default block size, so it
-/// removes almost all of the round trips while staying small enough that every partition compacting
-/// at once stays well inside the shared memory budget.
-constexpr size_t kCompactionWindowBytes = 2u << 20;
-
 /// A reader for one compaction input: windowed, and outside the shared caches.
 ///
 /// It deliberately does not use `reader_for`. That one memoises into `readers_`, which the serving
@@ -660,8 +655,10 @@ Result<std::shared_ptr<SstReader>> DbImpl::compaction_reader_for(
     BlobStore* store = store_for(file.store_id);
     if (store == nullptr) return std::unexpected(Status::Corrupt);
 
-    windows.push_back(
-        std::make_unique<WindowedBlobStore>(store->bulk_view(), kCompactionWindowBytes));
+    // The manifest already records the size, so the window never chases a prefetch past the end.
+    windows.push_back(std::make_unique<WindowedBlobStore>(
+        store->bulk_view(), options_.compaction_window_bytes, file.file_bytes,
+        options_.memory_budget));
 
     SstReaderOptions reader_options;
     reader_options.block_bytes = options_.block_bytes;

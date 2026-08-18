@@ -346,6 +346,7 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
                                          size_t block_cache_bytes, size_t reader_cache_bytes,
                                          int bloom_bits_per_key,
                                          size_t max_compaction_bytes,
+                                         size_t compaction_window_bytes,
                                          int manifest_edits_per_generation, int paranoid_checks,
                                          int block_on_stall, uint64_t flush_interval_ms,
                                          uint64_t maintenance_interval_ms,
@@ -370,6 +371,9 @@ elysiumkv_status elysiumkv_options_configure(elysiumkv_options* options, void* m
         if (reader_cache_bytes > 0) options->options.reader_cache_bytes = reader_cache_bytes;
         if (bloom_bits_per_key > 0) options->options.bloom_bits_per_key = bloom_bits_per_key;
         if (max_compaction_bytes > 0) options->options.max_compaction_bytes = max_compaction_bytes;
+        if (compaction_window_bytes > 0) {
+            options->options.compaction_window_bytes = compaction_window_bytes;
+        }
         if (manifest_edits_per_generation > 0) {
             options->options.manifest_edits_per_generation = manifest_edits_per_generation;
         }
