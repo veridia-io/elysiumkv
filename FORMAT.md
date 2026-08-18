@@ -227,7 +227,16 @@ max_write_time_ms  varint64
 watermark_flags    varint64   bit 0 = low present, bit 1 = high present; other values invalid
 watermark_low      varint64   zero when bit 0 is clear
 watermark_high     varint64   zero when bit 1 is clear
+encryption_provider string    reserved; always empty in this version
+encryption_metadata string    reserved; always empty in this version
 ```
+
+The two **encryption** fields are reserved and written empty. They will name the provider that
+encrypted the file's bytes and carry whatever that provider needs to reopen them; nothing populates
+them yet. They are present now because adding a field costs a version bump — and a rebuild of every
+store from its changelog — once a version has shipped, while a version that has not shipped can
+still absorb one for free. A decoder must read and discard them, not skip them: they occupy
+positions, and the fields after them are found by reading through.
 
 The **range tombstone span** is the interval this file's range deletes cover, and it is deliberately
 not bounded by `smallest_key` and `largest_key`: a file can delete a range it holds no keys in, so a

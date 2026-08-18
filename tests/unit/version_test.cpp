@@ -313,6 +313,45 @@ TEST(VersionEdit, RoundTrips) {
     EXPECT_EQ(decoded->compaction_pointers, edit.compaction_pointers);
 }
 
+/* The encryption fields are reserved and written empty (`FORMAT.md` §6), but reserved is not the
+ * same as absent: they occupy positions, and everything after them
+ * is found by reading through. So the round trip is asserted with them **populated**, which is what
+ * the phase that fills them will do — and if that phase forgets to encode or decode one, the fields
+ * after it decode as garbage rather than the record failing outright.
+ */
+TEST(VersionEdit, TheReservedEncryptionFieldsRoundTripWhenPopulated) {
+    FileMetadata carrying = file(1, 11, "a", "z");
+    carrying.encryption_provider = "kms-gcm-2026";
+    carrying.encryption_metadata = std::string("\x00wrapped\xff\x00key", 15);
+
+    VersionEdit edit;
+    edit.next_file_number = 12;
+    edit.added.push_back(carrying);
+    // A second file after it, so a mis-sized read of the first is visible as the second decoding
+    // wrongly rather than as a length check catching it by luck.
+    edit.added.push_back(file(2, 12, "aa", "zz"));
+
+    auto decoded = decode_version_edit(Slice::from(encode_version_edit(edit)));
+    ASSERT_TRUE(decoded.has_value()) << status_name(decoded.error());
+    ASSERT_EQ(decoded->added.size(), 2u);
+    EXPECT_EQ(decoded->added[0].encryption_provider, "kms-gcm-2026");
+    EXPECT_EQ(decoded->added[0].encryption_metadata, carrying.encryption_metadata)
+        << "the metadata is opaque bytes, embedded nulls included";
+    EXPECT_EQ(decoded->added[1], edit.added[1]) << "the record after it decoded correctly";
+}
+
+/// Empty is the reserved id of the passthrough, so today's files and files written with encryption
+/// disabled are the same case rather than two.
+TEST(VersionEdit, AFileWithNoEncryptionRecordsAnEmptyProvider) {
+    VersionEdit edit;
+    edit.added.push_back(file(0, 1, "a", "z"));
+    auto decoded = decode_version_edit(Slice::from(encode_version_edit(edit)));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded->added.size(), 1u);
+    EXPECT_TRUE(decoded->added[0].encryption_provider.empty());
+    EXPECT_TRUE(decoded->added[0].encryption_metadata.empty());
+}
+
 TEST(VersionEdit, EmptyEditRoundTrips) {
     auto decoded = decode_version_edit(Slice::from(encode_version_edit(VersionEdit{})));
     ASSERT_TRUE(decoded.has_value());
