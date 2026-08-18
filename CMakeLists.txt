@@ -124,6 +124,7 @@ add_library(elysiumkv STATIC
     src/sst/compression.cpp
     src/sst/crc32c.cpp
     src/sst/footer.cpp
+    src/sst/concat_iterator.cpp
     src/sst/sst_reader.cpp
     src/sst/sst_reader_cache.cpp
     src/sst/sst_writer.cpp

@@ -1,6 +1,7 @@
 #include "elysiumkv/disk_cache_blob_store.hpp"
 
 #include "blob/range_cache.hpp"
+#include "blob/single_flight.hpp"
 #include "blob/verify_cache_hit.hpp"
 
 #include <fcntl.h>
@@ -11,7 +12,9 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <memory>
 #include <utility>
+#include <vector>
 
 namespace elysiumkv {
 namespace {
@@ -60,49 +63,51 @@ bool write_whole_file(const fs::path& path, Slice bytes) {
     return true;
 }
 
+/// **Sharded only when there is enough capacity to divide.** One mutex over the whole cache is
+/// held across the chunk file's `write` and across eviction's `remove_all`, so readers of unrelated
+/// objects wait on each other's filesystem calls. Splitting the capacity to fix that is a bad trade
+/// below a few megabytes, where each shard would be too small to hold a working set.
+constexpr size_t kMaxShards = 8;
+constexpr size_t kMinBytesPerShard = 1u << 20;
+
+size_t shard_count(size_t max_bytes) {
+    const size_t affordable = max_bytes / kMinBytesPerShard;
+    return affordable < kMaxShards ? (affordable == 0 ? 1 : affordable) : kMaxShards;
+}
+
 }  // namespace
 
-struct DiskCacheBlobStore::Impl final : RangeCacheCore::Payload {
+struct DiskCacheBlobStore::Impl {
     std::shared_ptr<BlobStore> delegate;
     fs::path root;
     size_t max_cache_bytes;
     bool cache_on_write;
     size_t fetch_granularity = 0;
 
-    mutable std::mutex mutex_;
-    RangeCacheCore core;
+    SingleFlight in_flight;
     std::atomic<bool> verify{true};
     std::atomic<uint64_t> hits{0};
     std::atomic<uint64_t> misses{0};
 
-    Impl(std::shared_ptr<BlobStore> store, fs::path directory, size_t bytes, bool write_through)
-        : delegate(std::move(store)),
-          root(std::move(directory)),
-          max_cache_bytes(bytes),
-          cache_on_write(write_through),
-          core(*this, bytes) {
-        std::error_code ec;
-        fs::create_directories(root, ec);
-        // **Start empty.** ARCHITECTURE.md "Caches chain" says wiping a cache at startup is valid, and it is
-        // the honest choice here: the alternative is trusting a directory whose
-        // contents this process did not write, with no index to say what is in it.
-        // Adopting it would mean either a persisted index to keep consistent or a
-        // full rescan, both for bytes that are refetchable.
-        for (const auto& entry : fs::directory_iterator(root, ec)) {
-            fs::remove_all(entry.path(), ec);
-        }
-    }
+    /// One independent cache, holding the names that hash to it. They share the directory: entries
+    /// are keyed by object name, which belongs to exactly one shard, so no two can collide.
+    struct Shard final : RangeCacheCore::Payload {
+    Impl* owner;
+    mutable std::mutex mutex_;
+    RangeCacheCore core;
+
+    Shard(Impl* impl, size_t bytes) : owner(impl), core(*this, bytes) {}
 
     bool store(const std::string& name, uint64_t offset, Slice bytes) override {
         std::error_code ec;
-        fs::create_directories(root / name, ec);
+        fs::create_directories(owner->root / name, ec);
         if (ec) return false;
-        return write_whole_file(range_path(root, name, offset), bytes);
+        return write_whole_file(range_path(owner->root, name, offset), bytes);
     }
 
     std::optional<Buffer> load(const std::string& name, uint64_t offset, uint64_t skip,
                                size_t len) override {
-        const int fd = ::open(range_path(root, name, offset).c_str(), O_RDONLY);
+        const int fd = ::open(range_path(owner->root, name, offset).c_str(), O_RDONLY);
         if (fd < 0) return std::nullopt;  // wiped from under us; refetch below
 
         Buffer out(len);
@@ -125,7 +130,46 @@ struct DiskCacheBlobStore::Impl final : RangeCacheCore::Payload {
 
     void drop(const std::string& name) override {
         std::error_code ec;
-        fs::remove_all(root / name, ec);
+        fs::remove_all(owner->root / name, ec);
+    }
+    };
+
+    std::vector<std::unique_ptr<Shard>> shards;
+
+    Impl(std::shared_ptr<BlobStore> store, fs::path directory, size_t bytes, bool write_through)
+        : delegate(std::move(store)),
+          root(std::move(directory)),
+          max_cache_bytes(bytes),
+          cache_on_write(write_through) {
+        std::error_code ec;
+        fs::create_directories(root, ec);
+        // **Start empty.** ARCHITECTURE.md "Caches chain" says wiping a cache at startup is valid, and it is
+        // the honest choice here: the alternative is trusting a directory whose
+        // contents this process did not write, with no index to say what is in it.
+        // Adopting it would mean either a persisted index to keep consistent or a
+        // full rescan, both for bytes that are refetchable.
+        for (const auto& entry : fs::directory_iterator(root, ec)) {
+            fs::remove_all(entry.path(), ec);
+        }
+
+        const size_t count = shard_count(bytes);
+        shards.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            shards.push_back(std::make_unique<Shard>(this, bytes / count));
+        }
+    }
+
+    Shard& shard_for(std::string_view name) {
+        return *shards[std::hash<std::string_view>{}(name) % shards.size()];
+    }
+
+    size_t cached_bytes() const {
+        size_t total = 0;
+        for (const auto& shard : shards) {
+            std::lock_guard<std::mutex> lock(shard->mutex_);
+            total += shard->core.cached_bytes();
+        }
+        return total;
     }
 };
 
@@ -150,21 +194,25 @@ void DiskCacheBlobStore::set_verify_against_delegate(bool verify) {
 }
 
 size_t DiskCacheBlobStore::cached_bytes() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex_);
-    return impl_->core.cached_bytes();
+    return impl_->cached_bytes();
 }
 
 std::future<GetResult> DiskCacheBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
+    return make_ready_future(get_sync(name, offset, len));
+}
+
+GetResult DiskCacheBlobStore::get_sync(std::string_view name, uint64_t offset, size_t len) {
     GetResult result = serve_get(name, offset, len);
     note_get(result);
-    return make_ready_future(std::move(result));
+    return result;
 }
 
 GetResult DiskCacheBlobStore::serve_get(std::string_view name, uint64_t offset, size_t len) {
     std::optional<Buffer> cached;
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
-        cached = impl_->core.lookup(name, offset, len);
+        Impl::Shard& shard = impl_->shard_for(name);
+        std::lock_guard<std::mutex> lock(shard.mutex_);
+        cached = shard.core.lookup(name, offset, len);
     }
     if (cached.has_value()) {
         impl_->hits.fetch_add(1, std::memory_order_relaxed);
@@ -183,14 +231,24 @@ GetResult DiskCacheBlobStore::serve_get(std::string_view name, uint64_t offset, 
     // Rounded out to a chunk, so the next block of a scan is already held. The plan is a superset
     // of the request, never a subset, so what comes back can always answer it.
     const FetchPlan plan = plan_fetch(offset, len, impl_->fetch_granularity);
-    auto fetched = impl_->delegate->get(name, plan.offset, plan.len).get();
-    if (!fetched) return fetched;
 
-    {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
-        const bool to_end = plan.len == kReadToEnd || fetched->size() < plan.len;
-        impl_->core.insert(name, plan.offset, Slice(fetched->data(), fetched->size()), to_end);
-    }
+    // **One fetch per chunk, not one per reader.** Threads arriving together on a cold chunk
+    // otherwise each pay the round trip and each write the result; the first one here does the
+    // work and the rest wait for it. Sharing the fetched buffer is safe because they share the
+    // plan: each still cuts its own window out of it below.
+    auto fetched = impl_->in_flight.run(name, plan.offset, plan.len, [&] {
+        auto result = impl_->delegate->get_sync(name, plan.offset, plan.len);
+        if (!result) return result;
+
+        {
+            Impl::Shard& shard = impl_->shard_for(name);
+            std::lock_guard<std::mutex> lock(shard.mutex_);
+            const bool to_end = plan.len == kReadToEnd || result->size() < plan.len;
+            shard.core.insert(name, plan.offset, Slice(result->data(), result->size()), to_end);
+        }
+        return result;
+    });
+    if (!fetched) return fetched;
 
     // The caller asked for a window inside the chunk. Truncating at what actually arrived keeps the
     // contract for a read overlapping the end of the object: short is an answer, not an error.
@@ -212,21 +270,24 @@ std::future<Status> DiskCacheBlobStore::put(std::string_view name, Slice bytes) 
     if (status != Status::Ok) return make_ready_future(status);
 
     if (impl_->cache_on_write) {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
-        impl_->core.insert(name, 0, bytes, /*to_end=*/true);
+        Impl::Shard& shard = impl_->shard_for(name);
+        std::lock_guard<std::mutex> lock(shard.mutex_);
+        shard.core.insert(name, 0, bytes, /*to_end=*/true);
     }
     return make_ready_future(Status::Ok);
 }
 
 void DiskCacheBlobStore::invalidate(std::string_view name) {
-    std::lock_guard<std::mutex> lock(impl_->mutex_);
-    impl_->core.invalidate(name);
+    Impl::Shard& shard = impl_->shard_for(name);
+    std::lock_guard<std::mutex> lock(shard.mutex_);
+    shard.core.invalidate(name);
 }
 
 std::future<Status> DiskCacheBlobStore::remove(std::string_view name) {
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
-        impl_->core.invalidate(name);
+        Impl::Shard& shard = impl_->shard_for(name);
+        std::lock_guard<std::mutex> lock(shard.mutex_);
+        shard.core.invalidate(name);
     }
     const Status status = impl_->delegate->remove(name).get();
     note_remove(status);
@@ -235,8 +296,13 @@ std::future<Status> DiskCacheBlobStore::remove(std::string_view name) {
 
 std::future<Status> DiskCacheBlobStore::remove_many(const std::vector<std::string>& names) {
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
-        for (const std::string& name : names) impl_->core.invalidate(name);
+        // One name at a time, each under its own shard's lock. Taking every shard would be the
+        // whole cache shut for the duration, which is what sharding is for.
+        for (const std::string& name : names) {
+            Impl::Shard& shard = impl_->shard_for(name);
+            std::lock_guard<std::mutex> lock(shard.mutex_);
+            shard.core.invalidate(name);
+        }
     }
     const Status status = impl_->delegate->remove_many(names).get();
     note_remove(status, names.size());

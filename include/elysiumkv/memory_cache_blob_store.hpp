@@ -44,6 +44,7 @@ public:
     bool cache_on_write() const override;
 
     std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override;
+    GetResult get_sync(std::string_view name, uint64_t offset, size_t len) override;
     std::future<Status> put(std::string_view name, Slice bytes) override;
     std::future<Status> remove(std::string_view name) override;
     std::future<Status> remove_many(const std::vector<std::string>& names) override;

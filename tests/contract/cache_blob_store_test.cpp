@@ -19,6 +19,12 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <string>
+#include <vector>
+
 #include <memory>
 #include <string>
 
@@ -112,6 +118,62 @@ TEST_F(CacheTest, AReadIsServedFromTheCacheTheSecondTime) {
     EXPECT_EQ(below_->call_count(Op::Get), before + 1) << "the second read must not";
     EXPECT_EQ(cache.hits(), 1u);
     EXPECT_EQ(cache.misses(), 1u);
+}
+
+// A cold chunk with many readers is one fetch, not one per reader. Against object storage the
+// request count *is* the bill, so this is the difference between one GET and one per thread — and
+// it is invisible to every single-threaded test.
+TEST_F(CacheTest, ConcurrentMissesOnOneChunkFetchOnce) {
+    MemoryCacheBlobStore cache(below_, nullptr, kGenerousCache, /*cache_on_write=*/false,
+                               /*fetch_granularity=*/64u << 10);
+    cache.set_verify_against_delegate(false);
+    const std::string bytes(256u << 10, 'x');
+    ASSERT_EQ(cache.put("000000000001.sst", Slice::from(bytes)).get(), Status::Ok);
+
+    // Enough that a fetch is still outstanding when the rest arrive; without it they would each
+    // miss, find nothing in flight, and go down separately.
+    below_->set_latency(std::chrono::milliseconds(20));
+    const uint64_t before = below_->call_count(Op::Get);
+
+    constexpr int kReaders = 8;
+    std::vector<std::thread> readers;
+    std::atomic<int> ok{0};
+    for (int i = 0; i < kReaders; ++i) {
+        // Different windows of the same chunk: they share a fetch plan, so they share the fetch.
+        readers.emplace_back([&cache, &ok, i] {
+            auto value = cache.get("000000000001.sst", static_cast<uint64_t>(i) * 512, 256).get();
+            if (value.has_value() && value->size() == 256) ok.fetch_add(1);
+        });
+    }
+    for (std::thread& reader : readers) reader.join();
+
+    EXPECT_EQ(ok.load(), kReaders) << "every reader got its own window";
+    EXPECT_EQ(below_->call_count(Op::Get), before + 1)
+        << "eight readers, one round trip";
+}
+
+// A request larger than the chunk rounds to its own plan, so it must *not* be collapsed into a
+// smaller reader's fetch — which would hand it a buffer too short to answer with.
+TEST_F(CacheTest, ADifferentFetchPlanIsNotSharedWithASmallerOne) {
+    MemoryCacheBlobStore cache(below_, nullptr, kGenerousCache, /*cache_on_write=*/false,
+                               /*fetch_granularity=*/4096);
+    cache.set_verify_against_delegate(false);
+    std::string bytes(64u << 10, '\0');
+    for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<char>(i % 251);
+    ASSERT_EQ(cache.put("000000000001.sst", Slice::from(bytes)).get(), Status::Ok);
+
+    below_->set_latency(std::chrono::milliseconds(20));
+    GetResult small = std::unexpected(Status::Io);
+    GetResult large = std::unexpected(Status::Io);
+    std::thread a([&] { small = cache.get("000000000001.sst", 0, 100).get(); });
+    std::thread b([&] { large = cache.get("000000000001.sst", 0, 40000).get(); });
+    a.join();
+    b.join();
+
+    ASSERT_TRUE(small.has_value());
+    ASSERT_TRUE(large.has_value());
+    EXPECT_EQ(as_string(*small), bytes.substr(0, 100));
+    EXPECT_EQ(as_string(*large), bytes.substr(0, 40000));
 }
 
 /// The reason `cache_on_write` exists: a freshly written L0 file is read almost
@@ -226,6 +288,37 @@ TEST_F(CacheTest, EvictionIsLeastRecentlyUsedAndBounded) {
     ASSERT_TRUE(cache.get("000000000002.sst", 0, BlobStore::kReadToEnd).get().has_value());
     EXPECT_EQ(below_->call_count(Op::Get), before + 1)
         << "object 2 was the least recently used and must have been the one evicted";
+}
+
+// A cache large enough to shard evicts per shard, so the bound is the sum of the shards' and the
+// LRU order is only within one. What must not change is that the total stays bounded and every
+// read is still correct — including the ones served after their object was evicted.
+TEST_F(CacheTest, ASharedCacheStaysBoundedAndCorrectUnderEvictionPressure) {
+    constexpr size_t kCapacity = 16u << 20;  // large enough to shard
+    MemoryCacheBlobStore cache(below_, nullptr, kCapacity, /*cache_on_write=*/true);
+    cache.set_verify_against_delegate(false);
+
+    // Four times the capacity, so every shard evicts many times over.
+    constexpr int kObjects = 64;
+    const size_t object_bytes = kCapacity / kObjects * 4;
+    std::vector<std::string> contents;
+    for (int i = 1; i <= kObjects; ++i) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "%012d.sst", i);
+        contents.push_back(std::string(object_bytes, static_cast<char>('a' + i % 26)));
+        ASSERT_EQ(cache.put(name, Slice::from(contents.back())).get(), Status::Ok);
+        EXPECT_LE(cache.cached_bytes(), kCapacity) << "after writing object " << i;
+    }
+
+    for (int i = 1; i <= kObjects; ++i) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "%012d.sst", i);
+        auto value = cache.get(name, 128, 4096).get();
+        ASSERT_TRUE(value.has_value()) << name;
+        EXPECT_EQ(as_string(*value), contents[static_cast<size_t>(i - 1)].substr(128, 4096))
+            << name << " — evicted or held, the bytes are the same";
+    }
+    EXPECT_LE(cache.cached_bytes(), kCapacity);
 }
 
 /// ARCHITECTURE.md "A process-wide memory budget" — an in-memory cache reports to the shared budget, and a full budget is a

@@ -60,6 +60,21 @@ public:
     virtual std::string id() const = 0;
 
     virtual std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) = 0;
+
+    /// The same read, without the future.
+    ///
+    /// **Every read inside this engine is of this shape**: the caller wants the bytes now, and
+    /// completes the future on the next line. `std::future` costs a heap allocation and its atomics
+    /// for that — measured at over a hundred nanoseconds per call, against a block read of about a
+    /// microsecond — and buys nothing, because no implementation here is asynchronous and no call
+    /// site has two requests outstanding.
+    ///
+    /// The default forwards, so an implementation owes nothing; override it where the read path
+    /// matters. `get` stays the primitive, and stays the seam a genuinely concurrent
+    /// implementation would use.
+    virtual GetResult get_sync(std::string_view name, uint64_t offset, size_t len) {
+        return get(name, offset, len).get();
+    }
     virtual std::future<Status> put(std::string_view name, Slice bytes) = 0;
     virtual std::future<Status> remove(std::string_view name) = 0;
 
@@ -167,6 +182,12 @@ public:
 class CacheBlobStore : public BlobStore {
 public:
     virtual BlobStore& delegate() = 0;
+
+    /// The bound on what this layer holds. **A cache above a few megabytes is sharded by object
+    /// name**, so this is the sum of the shards' bounds and eviction is least-recently-used within
+    /// a shard rather than across the whole cache — two objects on different shards never compete.
+    /// The alternative was one mutex held across a chunk write and across eviction's unlinks,
+    /// measured at 4.5x slower with eight readers of unrelated objects.
     virtual size_t max_cache_bytes() const = 0;
     virtual bool cache_on_write() const = 0;
     /// A miss against a remote delegate is a round trip, so the ratio is read latency.

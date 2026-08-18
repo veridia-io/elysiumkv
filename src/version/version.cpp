@@ -66,6 +66,25 @@ std::vector<FileMetadata> Version::overlapping_half_open(int level, Slice lower,
     return result;
 }
 
+std::pair<size_t, size_t> Version::overlapping_index_range(int level, Slice lower,
+                                                           Slice upper) const {
+    const std::vector<FileMetadata>& files = files_at(level);
+
+    // First file whose largest key is at or above `lower` — everything before it ends too early.
+    const auto begin = std::lower_bound(
+        files.begin(), files.end(), lower,
+        [](const FileMetadata& file, Slice probe) { return Slice::from(file.largest_key) < probe; });
+
+    // First file that starts at or above `upper`, which the half-open bound excludes.
+    auto end = files.end();
+    if (!upper.empty()) {
+        end = std::lower_bound(begin, files.end(), upper, [](const FileMetadata& file, Slice probe) {
+            return Slice::from(file.smallest_key) < probe;
+        });
+    }
+    return {static_cast<size_t>(begin - files.begin()), static_cast<size_t>(end - files.begin())};
+}
+
 bool Version::any_file_holds(Slice lower, Slice upper) const {
     if (!upper.empty() && !(lower < upper)) return false;   // empty band holds nothing
     for (const auto& level : levels_) {

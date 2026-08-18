@@ -478,7 +478,7 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     // The copy is byte-for-byte. Compression is a level property (ARCHITECTURE.md "Inside an SST") and
     // migration does not change a file's level, so nothing is decoded: a
     // migration costs exactly the bytes moved.
-    auto bytes = source->bulk_view().get(source_name, 0, BlobStore::kReadToEnd).get();
+    auto bytes = source->bulk_view().get_sync(source_name, 0, BlobStore::kReadToEnd);
     if (!bytes) return bytes.error();
     if (bytes->size() != migration.file.file_bytes) return Status::Corrupt;
 

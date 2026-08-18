@@ -3,12 +3,14 @@
 #include "sst/format.hpp"
 
 #include "compact/merging_iterator.hpp"
+#include "sst/concat_iterator.hpp"
 #include "util/budget_charge.hpp"
 #include "util/jitter.hpp"
 #include "compact/picker.hpp"
 #include "sst/sst_writer.hpp"
 
 #include <algorithm>
+#include <ranges>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -359,6 +361,10 @@ Status DbImpl::recover() {
         [this] { return now_ms(); },
         options_.obsolete_retention.value_or(Duration(0)));
 
+    published_level_counts_ = std::ranges::all_of(config_.levels, [](const ResolvedLevel& level) {
+        return level.level < VersionSet::kPublishedLevels;
+    });
+
     const Status status = versions_->recover();
     if (status == Status::NotFound && read_only_) {
         // **A reader does not create a store.** Finding no manifest means it opened the wrong place
@@ -372,8 +378,7 @@ Status DbImpl::recover() {
         // store whose manifest is gone or a wiped catalog, and a counter starting at 1 would
         // collide with the first of them.
         if (Status created = versions_->create(); created != Status::Ok) return created;
-        for (const auto& [store_id, store] : tiers_.stores) {
-            auto names = authoritative_store(*store).bulk_view().list("").get();
+        for (const ListResult& names : list_all_stores()) {
             if (!names) continue;  // unreadable here is open's problem, not this step's
             for (const std::string& name : *names) {
                 if (auto number = sst_file_number(name)) versions_->observe_file_number(*number);
@@ -1449,9 +1454,14 @@ std::vector<FileMetadata> DbImpl::delete_obsolete(const std::vector<FileMetadata
 }
 
 Result<Pinned> DbImpl::get(Slice key) {
+    // **Taken once, and used for both the clamp and the level walk.** Two takes cost two locked
+    // refcounts on every lookup, and they can disagree: a truncation landing between them would
+    // let a key pass a clamp the version it is then read against says hides it.
+    auto version = versions_->current();
+
     // Below the truncation point is absence, and absence is not an error — the same answer a
     // deleted key gives, reached without touching a single file.
-    if (versions_->current()->truncated(key)) return std::unexpected(Status::NotFound);
+    if (version->truncated(key)) return std::unexpected(Status::NotFound);
 
     std::shared_ptr<SkiplistMemtable> mem;
     std::shared_ptr<SkiplistMemtable> imm;
@@ -1476,7 +1486,6 @@ Result<Pinned> DbImpl::get(Slice key) {
         if (memtable->range_deletes(key)) return std::unexpected(Status::NotFound);
     }
 
-    auto version = versions_->current();
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
         // L0 is ordered by descending file number, so the first hit is the most
         // recent; deeper levels are non-overlapping, so there is at most one.
@@ -1580,6 +1589,22 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
         // Prune by key range before opening anything: this is what keeps a
         // prefix scan from touching files it cannot contain (ARCHITECTURE.md "Absence is an answer, not an error").
+        // **One child for the whole level, opening one file at a time**, where the level allows it:
+        // below L0 the files are disjoint and sorted, so at most one can answer any key. That is
+        // what keeps a scan from opening every file it *might* need before returning its first
+        // entry. Not when the level carries range tombstones — those shadow entries in sibling
+        // files, which the merge can only apply with a child per file.
+        if (level > 0 && !version->carries_ranges(level)) {
+            const auto [begin, end] = version->overlapping_index_range(level, lower, upper);
+            if (begin < end) {
+                children.push_back(make_concat_iterator(
+                    version, level, begin, end,
+                    [this](const FileMetadata& file) { return reader_for(file); }));
+                child_ranges.emplace_back();
+            }
+            continue;
+        }
+
         for (const FileMetadata& file : version->overlapping_half_open(level, lower, upper)) {
             auto reader = reader_for(file);
             if (!reader) {
@@ -2003,13 +2028,23 @@ Status DbImpl::throttle_writes() {
     };
 
     while (true) {
-        auto version = versions_->current();
+        // **Not taken unless something needs it.** The valve reads file counts and nothing else,
+        // and `VersionSet` publishes those as atomics — so the common case, a write that is not
+        // throttled at all, costs no lock and no refcount. Inline mode takes it regardless: it has
+        // to publish the transient-stall flag itself, and is single-threaded anyway.
+        std::shared_ptr<const Version> version;
+        const auto version_for = [&]() -> const Version& {
+            if (version == nullptr) version = versions_->current();
+            return *version;
+        };
         const uint64_t now = now_ms();
 
         bool stop = false;
         bool slowdown = false;
         for (const ResolvedLevel& level : config_.levels) {
-            const auto files = static_cast<int>(version->file_count(level.level));
+            const auto files = static_cast<int>(
+                published_level_counts_ ? versions_->published_file_count(level.level)
+                                        : version_for().file_count(level.level));
             if (level.stop_at.has_value() && files >= *level.stop_at) stop = true;
             if (level.slowdown_at.has_value() && files >= *level.slowdown_at) slowdown = true;
 
@@ -2029,7 +2064,7 @@ Status DbImpl::throttle_writes() {
         if (inline_mode()) {
             // No coordinator to publish it, so the writer that would otherwise wait for one
             // evaluates it itself — the same asymmetry `flush_interval` already documents.
-            publish_transient_stall(*version, now);
+            publish_transient_stall(version_for(), now);
         }
         if (transient_stalled()) stop = true;
 
@@ -2054,8 +2089,9 @@ Status DbImpl::throttle_writes() {
             const Status status = compact_until_quiet();
             if (status != Status::Ok) return status;
             budget_still_holding();
-            auto after = versions_->current();
-            if (after == version) return Status::Ok;  // nothing left to do
+            auto before = version;
+            if (before == nullptr) before = versions_->current();
+            if (versions_->current() == before) return Status::Ok;  // nothing left to do
             continue;
         }
 
@@ -2067,7 +2103,7 @@ Status DbImpl::throttle_writes() {
                               : transient_stalled() ? "a transient tier past its stall age"
                                                     : "level file counts";
             for (const ResolvedLevel& level : config_.levels) {
-                const auto files = static_cast<int>(version->file_count(level.level));
+                const auto files = static_cast<int>(version_for().file_count(level.level));
                 if (level.stop_at.has_value() && files >= *level.stop_at) {
                     deferred.level = level.level;
                     deferred.files = files;
@@ -2204,8 +2240,10 @@ Status DbImpl::sweep_orphans() {
     const auto retention = static_cast<uint64_t>(options_.orphan_retention.count());
 
     size_t reclaimed = 0;
+    std::vector<ListResult> listings = list_all_stores();
+    size_t listed = 0;
     for (const auto& [store_id, store] : tiers_.stores) {
-        auto names = authoritative_store(*store).bulk_view().list("").get();
+        ListResult& names = listings[listed++];
         if (!names) {
             // **Failure to look is not evidence of absence**, and this is the most destructive
             // possible place to forget that: treating an unreadable store as "everything here is
@@ -2309,15 +2347,46 @@ uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
     return reclaimed;
 }
 
+/// Every store's full listing, in `tiers_.stores` order.
+///
+/// **One thread per store, because the seam is not enough.** Every `BlobStore` here completes its
+/// future synchronously, so issuing the listings before collecting them runs them one after another
+/// exactly as a plain loop does. Against object storage each is a round trip, and an instance with a
+/// hot tier and a cold one pays both in series for no reason. The calling thread takes the last, so
+/// a single-store instance spawns nothing.
+std::vector<ListResult> DbImpl::list_all_stores() const {
+    std::vector<const std::shared_ptr<BlobStore>*> stores;
+    stores.reserve(tiers_.stores.size());
+    for (const auto& [store_id, store] : tiers_.stores) stores.push_back(&store);
+
+    std::vector<ListResult> results(stores.size(), ListResult(std::unexpected(Status::Io)));
+    if (stores.empty()) return results;
+
+    std::vector<std::thread> listers;
+    listers.reserve(stores.size() - 1);
+    for (size_t i = 0; i + 1 < stores.size(); ++i) {
+        listers.emplace_back([&results, &stores, i] {
+            results[i] = authoritative_store(**stores[i]).bulk_view().list("").get();
+        });
+    }
+    const size_t last = stores.size() - 1;
+    results[last] = authoritative_store(**stores[last]).bulk_view().list("").get();
+    for (std::thread& lister : listers) lister.join();
+    return results;
+}
+
 Status DbImpl::verify_stores_and_discard() {
     auto version = versions_->current();
 
     // One list per distinct store, against bulk_view(), never a get per file.
     // Caches are never consulted: a file present in a cache but absent from its
     // authoritative store counts as missing.
+    std::vector<ListResult> results = list_all_stores();
+
     std::map<std::string, std::vector<std::string>> listings;
+    size_t listed = 0;
     for (const auto& [store_id, store] : tiers_.stores) {
-        auto names = authoritative_store(*store).bulk_view().list("").get();
+        ListResult& names = results[listed++];
         if (!names) {
             // ARCHITECTURE.md "A tier is not a level" — failure to look is not evidence of absence. Fail open, with
             // a retryable error and no manifest write.

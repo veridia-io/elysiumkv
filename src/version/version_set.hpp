@@ -4,6 +4,7 @@
 #include "elysiumkv/manifest_catalog.hpp"
 #include "version/version.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -80,6 +81,23 @@ public:
     /// reference into it is not. This shipped once, in `delete_range`, and tsan found it.
     std::shared_ptr<const Version> current() const;
 
+    /// Levels whose file count is published as its own atomic by `install`.
+    static constexpr int kPublishedLevels = 16;
+
+    /// The installed version's file count at `level`, without taking the version.
+    ///
+    /// **For the write path's valve, which asks on every write and needs nothing else from the
+    /// Version.** Taking the version there costs a lock and a refcount — measurably, at roughly a
+    /// twentieth of a `put` — to read three integers that never change between installs. Published
+    /// by `install` itself, so there is no second place that has to remember to update it.
+    ///
+    /// Levels at or beyond `kPublishedLevels` are not published and read as zero; a caller with
+    /// more levels than that must use the Version. `DbImpl` decides once, at open.
+    uint32_t published_file_count(int level) const {
+        if (level < 0 || level >= kPublishedLevels) return 0;
+        return file_counts_[static_cast<size_t>(level)].load(std::memory_order_relaxed);
+    }
+
     /// Persists the edit, *then* swaps in the new version. A failure to persist
     /// leaves the current version untouched.
     Status apply(VersionEdit edit);
@@ -150,6 +168,8 @@ private:
     /// Caller holds `mutex_`.
     void collect_obsolete_locked();
     void install(std::shared_ptr<const Version> version);
+
+    std::array<std::atomic<uint32_t>, kPublishedLevels> file_counts_{};
 
     ManifestCatalog& catalog_;
     int edits_per_generation_;

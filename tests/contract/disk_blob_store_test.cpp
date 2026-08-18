@@ -52,6 +52,47 @@ TEST_F(DiskBlobStoreTest, MissingRootIsIoNeverNotFound) {
     EXPECT_EQ(store_.remove("000000000001.sst").get(), Status::Io);
 }
 
+// The descriptor cache is bounded, and the bound is small — so the common case for a store with
+// more files than descriptors is reading through eviction, on every read.
+TEST_F(DiskBlobStoreTest, ReadsAreCorrectAcrossDescriptorCacheEviction) {
+    store_.set_max_open_files(4);
+
+    const auto name = [](int i) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%012d.sst", i);
+        return std::string(buf);
+    };
+    for (int i = 0; i < 40; ++i) {
+        const std::string bytes = "object-" + std::to_string(i);
+        ASSERT_EQ(store_.put(name(i), Slice::from(bytes)).get(), Status::Ok);
+    }
+
+    // Twice through, so the second pass reads names the first pass evicted.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int i = 0; i < 40; ++i) {
+            auto value = store_.get(name(i), 0, BlobStore::kReadToEnd).get();
+            ASSERT_TRUE(value.has_value()) << name(i);
+            EXPECT_EQ(std::string(reinterpret_cast<const char*>(value->data()), value->size()),
+                      "object-" + std::to_string(i));
+        }
+    }
+}
+
+// Zero holds nothing, which is what a process against a low descriptor limit wants.
+TEST_F(DiskBlobStoreTest, ADisabledDescriptorCacheStillReads) {
+    store_.set_max_open_files(0);
+    ASSERT_EQ(store_.put("000000000001.sst", Slice::from(std::string_view("hello"))).get(),
+              Status::Ok);
+
+    auto value = store_.get("000000000001.sst", 1, 3).get();
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(value->data()), value->size()), "ell");
+
+    ASSERT_EQ(store_.remove("000000000001.sst").get(), Status::Ok);
+    EXPECT_EQ(store_.get("000000000001.sst", 0, BlobStore::kReadToEnd).get().error(),
+              Status::NotFound);
+}
+
 // A replaced ephemeral volume normally presents as an *empty* directory, which
 // lists successfully — and that is the only shape of evidence a discard may use.
 TEST_F(DiskBlobStoreTest, EmptyExistingRootListsSuccessfullyEmpty) {

@@ -31,6 +31,7 @@ add_executable(elysiumkv_tests
     unit/large_value_test.cpp
     unit/overlap_boundary_test.cpp
     unit/key_edges_test.cpp
+    unit/concat_iterator_test.cpp
     unit/reverse_iteration_test.cpp
     unit/truncate_test.cpp
     unit/delete_range_test.cpp

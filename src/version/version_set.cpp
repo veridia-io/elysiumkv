@@ -54,6 +54,17 @@ void VersionSet::observe_file_number(uint64_t number) {
 void VersionSet::install(std::shared_ptr<const Version> version) {
     installs_.fetch_add(1, std::memory_order_relaxed);
     live_versions_.push_back(version);
+
+    // Published before `current_`, so a reader that sees the new version never reads counts from
+    // the old one. The reverse order would let the write path throttle on a level the installed
+    // version has already emptied.
+    for (int level = 0; level < kPublishedLevels; ++level) {
+        const uint32_t count = level < static_cast<int>(version->num_levels())
+                                   ? static_cast<uint32_t>(version->file_count(level))
+                                   : 0;
+        file_counts_[static_cast<size_t>(level)].store(count, std::memory_order_relaxed);
+    }
+
     std::lock_guard<std::mutex> lock(current_mutex_);
     current_ = std::move(version);
 }

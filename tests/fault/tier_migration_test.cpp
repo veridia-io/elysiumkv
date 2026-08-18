@@ -79,6 +79,32 @@ protected:
     std::unique_ptr<DB> db_;
 };
 
+// Open lists every store, and against object storage each listing is a round trip. Paying them one
+// after another makes opening a two-tier instance twice as slow as it needs to be — and the futures
+// do not fix it, because every store here completes them synchronously.
+TEST_F(TierMigrationTest, TheStoresAreListedConcurrentlyAtOpen) {
+    constexpr auto kListLatency = std::chrono::milliseconds(150);
+
+    Options options = make_transient_options(store_, kMaxAge, kStallAge);
+    std::vector<std::shared_ptr<FaultInjectingBlobStore>> slow;
+    for (Tier& tier : options.tiers) {
+        auto wrapped = std::make_shared<FaultInjectingBlobStore>(tier.store);
+        wrapped->set_latency(kListLatency);
+        slow.push_back(wrapped);
+        tier.store = wrapped;
+    }
+    ASSERT_EQ(slow.size(), 2u) << "one store would prove nothing";
+
+    const auto began = std::chrono::steady_clock::now();
+    open(std::move(options));
+    const auto elapsed = std::chrono::steady_clock::now() - began;
+
+    // Serial would be at least two. Generous, because open does other work and a loaded machine
+    // stretches a sleep — but far below the number that says they ran one after the other.
+    EXPECT_LT(elapsed, kListLatency * 2)
+        << "the listings ran one after the other";
+}
+
 // Against object storage the request count is the bill, and migration is the engine's
 // largest source of it: every file it moves is a GET, a PUT and a DELETE that no query
 // asked for. Nothing else reports that.

@@ -145,14 +145,18 @@ std::future<Status> FaultInjectingBlobStore::remove_many(const std::vector<std::
 }
 
 std::future<ListResult> FaultInjectingBlobStore::list(std::string_view prefix) {
+    std::chrono::microseconds latency{0};
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        latency = latency_;
         if (const Rule* rule = match(Op::List, prefix)) {
             ListResult injected(std::unexpected(rule->status));
             note_list(injected);
             return make_ready_future(std::move(injected));
         }
     }
+    // A listing is a round trip like any other, and the one open pays per store.
+    if (latency.count() > 0) std::this_thread::sleep_for(latency);
     ListResult result = delegate_->list(prefix).get();
     note_list(result);
     return make_ready_future(std::move(result));
