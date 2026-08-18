@@ -83,13 +83,30 @@ std::string sort_key_snapshot(uint64_t generation, uint32_t chunk) {
     return buf;
 }
 
-std::string sort_key_edit(uint64_t generation, uint64_t seq) {
+/// **The chunk index is new, so an edit written by an earlier build is unreadable here.** That
+/// costs nothing as long as this ships inside the same release as manifest format 6, which already
+/// requires every existing store to be rebuilt from its log — the engine takes a manifest version
+/// as a clean break and never dual-reads. Landing it after 0.7.0 would need a bump of its own.
+std::string sort_key_edit(uint64_t generation, uint64_t seq, uint32_t chunk) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "gen#%012llu#edit#%012llu",
+    std::snprintf(buf, sizeof(buf), "gen#%012llu#edit#%012llu#%04u",
+                  static_cast<unsigned long long>(generation),
+                  static_cast<unsigned long long>(seq), chunk);
+    return buf;
+}
+
+/// Every chunk of one edit. The trailing separator is what keeps seq 1 from matching seq 10.
+std::string edit_chunk_prefix(uint64_t generation, uint64_t seq) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "gen#%012llu#edit#%012llu#",
                   static_cast<unsigned long long>(generation),
                   static_cast<unsigned long long>(seq));
     return buf;
 }
+
+/// The marker `list_edits` reads the sequence number after. Parsing from the *left* rather than
+/// with `rfind('#')`, which now finds the chunk index instead.
+constexpr std::string_view kEditMarker = "#edit#";
 
 std::string edit_prefix(uint64_t generation) {
     char buf[64];
@@ -148,6 +165,12 @@ bool is_conditional_failure(const Aws::DynamoDB::DynamoDBError& error) {
            Aws::DynamoDB::DynamoDBErrors::CONDITIONAL_CHECK_FAILED;
 }
 
+/// The request itself was refused — the wrong shape, or an item over the 400 KB cap. Retrying it
+/// unchanged cannot succeed, which is the whole difference that matters here.
+bool is_validation_failure(const Aws::DynamoDB::DynamoDBError& error) {
+    return error.GetErrorType() == Aws::DynamoDB::DynamoDBErrors::VALIDATION;
+}
+
 }  // namespace
 
 struct DynamoManifestCatalog::Impl {
@@ -182,7 +205,69 @@ struct DynamoManifestCatalog::Impl {
         auto outcome = client->PutItem(request);
         if (outcome.IsSuccess()) return Status::Ok;
         if (is_conditional_failure(outcome.GetError())) return Status::Config;
+        // **Terminal, not retryable.** A rejected *request* — an item over the 400 KB cap, a table
+        // whose schema does not match — will be rejected identically forever, and `Status::Io`
+        // means "ask again later" to everything above. That turns a permanent failure into a
+        // background retry loop whose only symptom is `background_failures` climbing.
+        if (is_validation_failure(outcome.GetError())) return Status::Config;
         return Status::Io;
+    }
+
+    /// Compresses, splits and writes `bytes` as chunks addressed by `sort_key(index)`.
+    ///
+    /// **Chunked unconditionally, not above a threshold.** Items cap at 400 KB, and a threshold
+    /// would mean the chunking path only ever runs in production, where it is least welcome to be
+    /// wrong.
+    Status put_chunked(const std::function<std::string(uint32_t)>& sort_key, Slice bytes) {
+        std::string packed;
+        if (const Status status = compress(bytes, packed); status != Status::Ok) return status;
+
+        const uint32_t total =
+            static_cast<uint32_t>((packed.size() + kChunkPayloadBytes - 1) / kChunkPayloadBytes);
+        const uint32_t chunks = std::max<uint32_t>(total, 1);
+
+        for (uint32_t index = 0; index < chunks; ++index) {
+            const size_t offset = static_cast<size_t>(index) * kChunkPayloadBytes;
+            const size_t length = std::min(kChunkPayloadBytes, packed.size() - offset);
+            const Status status =
+                put_once(sort_key(index), packed.substr(offset, length), chunks);
+            if (status != Status::Ok) return status;
+        }
+        return Status::Ok;
+    }
+
+    /// Reads back what `put_chunked` wrote under `prefix`.
+    GetResult get_chunked(const std::string& prefix) {
+        auto items = query_prefix(prefix);
+        if (!items) return std::unexpected(items.error());
+        if (items->empty()) return std::unexpected(Status::NotFound);
+
+        // Sorting by sort key puts the chunks back in order; the zero-padded index is
+        // what makes lexicographic order the right order.
+        std::sort(items->begin(), items->end(), [](const auto& a, const auto& b) {
+            return a.at(attr::kSk).GetS() < b.at(attr::kSk).GetS();
+        });
+
+        uint32_t declared = 0;
+        const auto total = items->front().find(attr::kTotalChunks);
+        if (total != items->front().end()) {
+            const std::string& text = total->second.GetN();
+            std::from_chars(text.data(), text.data() + text.size(), declared);
+        }
+        // A short chunk set is a half-written record — an orphan whose pointer was never
+        // installed. Reporting it as Corrupt rather than silently concatenating what is there is
+        // the difference between a loud failure and a truncated manifest.
+        if (declared != 0 && declared != items->size()) return std::unexpected(Status::Corrupt);
+
+        std::string packed;
+        for (const auto& item : *items) {
+            const auto payload = item.find(attr::kPayload);
+            if (payload == item.end()) return std::unexpected(Status::Corrupt);
+            const auto& bytes = payload->second.GetB();
+            packed.append(reinterpret_cast<const char*>(bytes.GetUnderlyingData()),
+                          bytes.GetLength());
+        }
+        return decompress(packed);
     }
 
     Result<std::vector<Aws::Map<Aws::String, Aws::DynamoDB::Model::AttributeValue>>> query_prefix(
@@ -360,94 +445,29 @@ Result<std::optional<ManifestCatalog::Entry>> DynamoManifestCatalog::compare_and
 }
 
 std::future<Status> DynamoManifestCatalog::put_snapshot(uint64_t generation, Slice bytes) {
-    std::string packed;
-    if (const Status status = compress(bytes, packed); status != Status::Ok) {
-        return make_ready_future(status);
-    }
-
-    // **Chunked unconditionally, not above a threshold.** Items cap at 400 KB and
-    // a few thousand file entries is ~450 KB before compression, so the split is
-    // needed in practice — and a threshold would mean the chunking path only ever
-    // runs in production, where it is least welcome to be wrong.
-    const uint32_t total =
-        static_cast<uint32_t>((packed.size() + kChunkPayloadBytes - 1) / kChunkPayloadBytes);
-    const uint32_t chunks = std::max<uint32_t>(total, 1);
-
-    for (uint32_t index = 0; index < chunks; ++index) {
-        const size_t offset = static_cast<size_t>(index) * kChunkPayloadBytes;
-        const size_t length = std::min(kChunkPayloadBytes, packed.size() - offset);
-        const Status status = impl_->put_once(sort_key_snapshot(generation, index),
-                                              packed.substr(offset, length), chunks);
-        if (status != Status::Ok) return make_ready_future(status);
-    }
-    return make_ready_future(Status::Ok);
+    return make_ready_future(impl_->put_chunked(
+        [generation](uint32_t chunk) { return sort_key_snapshot(generation, chunk); }, bytes));
 }
 
 std::future<GetResult> DynamoManifestCatalog::get_snapshot(uint64_t generation) {
-    auto items = impl_->query_prefix(snapshot_prefix(generation));
-    if (!items) return make_ready_future(GetResult(std::unexpected(items.error())));
-    if (items->empty()) return make_ready_future(GetResult(std::unexpected(Status::NotFound)));
-
-    // Sorting by sort key puts the chunks back in order; the zero-padded index is
-    // what makes lexicographic order the right order.
-    std::sort(items->begin(), items->end(), [](const auto& a, const auto& b) {
-        return a.at(attr::kSk).GetS() < b.at(attr::kSk).GetS();
-    });
-
-    uint32_t declared = 0;
-    const auto total = items->front().find(attr::kTotalChunks);
-    if (total != items->front().end()) {
-        const std::string& text = total->second.GetN();
-        std::from_chars(text.data(), text.data() + text.size(), declared);
-    }
-    // A short chunk set is a half-written generation — an orphan whose pointer was
-    // never installed. Reporting it as Corrupt rather than silently concatenating
-    // what is there is the difference between a loud failure and a truncated
-    // manifest.
-    if (declared != 0 && declared != items->size()) {
-        return make_ready_future(GetResult(std::unexpected(Status::Corrupt)));
-    }
-
-    std::string packed;
-    for (const auto& item : *items) {
-        const auto payload = item.find(attr::kPayload);
-        if (payload == item.end()) {
-            return make_ready_future(GetResult(std::unexpected(Status::Corrupt)));
-        }
-        const auto& bytes = payload->second.GetB();
-        packed.append(reinterpret_cast<const char*>(bytes.GetUnderlyingData()), bytes.GetLength());
-    }
-    return make_ready_future(decompress(packed));
+    return make_ready_future(impl_->get_chunked(snapshot_prefix(generation)));
 }
 
+/// **Chunked and compressed exactly as a snapshot is.** This wrote one raw item, so an edit had to
+/// fit the 400 KB cap whole — and an edit carries a full `FileMetadata` per output file, five
+/// strings each. The bound was `max_compaction_bytes / target_file_bytes x per-file record`, both
+/// of which an embedder sets: lowering `target_file_bytes` to 256 KiB, which `options.hpp`
+/// recommends for a hot tier, puts a default-sized compaction's edit at the cap, and modest keys
+/// take it past. The store then cannot commit that compaction, ever.
 std::future<Status> DynamoManifestCatalog::put_edit(uint64_t generation, uint64_t seq,
                                                    Slice bytes) {
-    return make_ready_future(
-        impl_->put_once(sort_key_edit(generation, seq),
-                        std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
-                        std::nullopt));
+    return make_ready_future(impl_->put_chunked(
+        [generation, seq](uint32_t chunk) { return sort_key_edit(generation, seq, chunk); },
+        bytes));
 }
 
 std::future<GetResult> DynamoManifestCatalog::get_edit(uint64_t generation, uint64_t seq) {
-    Aws::DynamoDB::Model::GetItemRequest request;
-    request.SetTableName(impl_->options.table);
-    request.AddKey(attr::kPk, impl_->pk());
-    request.AddKey(attr::kSk,
-                   Aws::DynamoDB::Model::AttributeValue(sort_key_edit(generation, seq)));
-    request.SetConsistentRead(true);
-
-    auto outcome = impl_->client->GetItem(request);
-    if (!outcome.IsSuccess()) return make_ready_future(GetResult(std::unexpected(Status::Io)));
-    const auto& item = outcome.GetResult().GetItem();
-    if (item.empty()) return make_ready_future(GetResult(std::unexpected(Status::NotFound)));
-
-    const auto payload = item.find(attr::kPayload);
-    if (payload == item.end()) {
-        return make_ready_future(GetResult(std::unexpected(Status::Corrupt)));
-    }
-    const auto& bytes = payload->second.GetB();
-    return make_ready_future(GetResult(Buffer(bytes.GetUnderlyingData(),
-                                              bytes.GetUnderlyingData() + bytes.GetLength())));
+    return make_ready_future(impl_->get_chunked(edit_chunk_prefix(generation, seq)));
 }
 
 std::future<Result<std::vector<uint64_t>>> DynamoManifestCatalog::list_edits(uint64_t generation) {
@@ -456,19 +476,24 @@ std::future<Result<std::vector<uint64_t>>> DynamoManifestCatalog::list_edits(uin
         return make_ready_future(Result<std::vector<uint64_t>>(std::unexpected(items.error())));
     }
 
-    std::vector<uint64_t> seqs;
+    // **One entry per edit, not per chunk.** A chunked edit is several items sharing a sequence
+    // number, and the replay above this asks for each sequence once.
+    std::set<uint64_t> seen;
     for (const auto& item : *items) {
         const std::string& sort_key = item.at(attr::kSk).GetS();
-        const size_t hash = sort_key.rfind('#');
-        if (hash == std::string::npos) continue;
+        // Read forward from the marker: `rfind('#')` finds the chunk index now, not the sequence.
+        const size_t marker = sort_key.find(kEditMarker);
+        if (marker == std::string::npos) continue;
+        const char* begin = sort_key.data() + marker + kEditMarker.size();
         uint64_t seq = 0;
-        const char* begin = sort_key.data() + hash + 1;
+        // Stops at the separator before the chunk index, which is what makes this work for a key
+        // whose sequence is not the last field.
         if (std::from_chars(begin, sort_key.data() + sort_key.size(), seq).ec == std::errc()) {
-            seqs.push_back(seq);
+            seen.insert(seq);
         }
     }
-    std::sort(seqs.begin(), seqs.end());
-    return make_ready_future(Result<std::vector<uint64_t>>(std::move(seqs)));
+    return make_ready_future(
+        Result<std::vector<uint64_t>>(std::vector<uint64_t>(seen.begin(), seen.end())));
 }
 
 std::future<Status> DynamoManifestCatalog::delete_generation(uint64_t generation) {

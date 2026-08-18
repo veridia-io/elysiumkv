@@ -32,12 +32,9 @@ static Aws::DynamoDB::DynamoDBClient raw_client(const char* endpoint) {
     return Aws::DynamoDB::DynamoDBClient(Aws::Auth::AWSCredentials("test", "test"), config);
 }
 
-static std::vector<std::string> snapshot_chunk_keys(const char* endpoint, const std::string& table,
-                                                    const std::string& store, uint64_t generation) {
-    char prefix[64];
-    std::snprintf(prefix, sizeof(prefix), "gen#%012llu#snap#",
-                  static_cast<unsigned long long>(generation));
-
+static std::vector<std::string> keys_with_prefix(const char* endpoint, const std::string& table,
+                                                 const std::string& store,
+                                                 const std::string& prefix) {
     auto client = raw_client(endpoint);
     Aws::DynamoDB::Model::QueryRequest request;
     request.SetTableName(table);
@@ -57,6 +54,23 @@ static std::vector<std::string> snapshot_chunk_keys(const char* endpoint, const 
     } while (!start.empty());
     std::sort(keys.begin(), keys.end());
     return keys;
+}
+
+static std::vector<std::string> snapshot_chunk_keys(const char* endpoint, const std::string& table,
+                                                    const std::string& store, uint64_t generation) {
+    char prefix[64];
+    std::snprintf(prefix, sizeof(prefix), "gen#%012llu#snap#",
+                  static_cast<unsigned long long>(generation));
+    return keys_with_prefix(endpoint, table, store, prefix);
+}
+
+static size_t count_edit_chunks(const char* endpoint, const std::string& table,
+                                const std::string& store, uint64_t generation, uint64_t seq) {
+    char prefix[64];
+    std::snprintf(prefix, sizeof(prefix), "gen#%012llu#edit#%012llu#",
+                  static_cast<unsigned long long>(generation),
+                  static_cast<unsigned long long>(seq));
+    return keys_with_prefix(endpoint, table, store, prefix).size();
 }
 
 static size_t count_snapshot_chunks(const char* endpoint, const std::string& table,
@@ -189,6 +203,23 @@ int main() {
     auto edits = c.list_edits(2).get();
     check(edits.has_value() && edits->size() == 2 && (*edits)[0] == 1 && (*edits)[1] == 2,
           "list_edits is sorted and complete");
+    // **The edit chunking path, structurally.** An edit used to be one raw item, so it had to fit
+    // the 400 KB cap whole — and a compaction edit carries a full record per output file. Same
+    // incompressible payload as the snapshot above, for the same reason: a compressible one would
+    // land in a single item and the round trip would pass anyway.
+    check(c.put_edit(2, 3, Slice::from(big)).get() == Status::Ok, "put_edit (1 MiB, chunked)");
+    check(count_edit_chunks(endpoint, o.table, run, 2, 3) > 1,
+          "the edit really did land in more than one item");
+    auto big_edit = c.get_edit(2, 3).get();
+    check(big_edit.has_value() && big_edit->size() == big.size(), "chunked edit round-trips");
+    check(big_edit.has_value() && std::string(big_edit->begin(), big_edit->end()) == big,
+          "reassembled edit bytes identical");
+    // Several items, one sequence number: replay asks for each sequence once.
+    auto after_big = c.list_edits(2).get();
+    check(after_big.has_value() &&
+              *after_big == std::vector<uint64_t>({1, 2, 3}),
+          "a chunked edit is listed once, not once per chunk");
+
     auto missing = c.get_edit(2, 99).get();
     check(!missing.has_value() && missing.error() == Status::NotFound,
           "a missing edit is NotFound, not Io");

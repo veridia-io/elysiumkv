@@ -1,6 +1,8 @@
 #include "fault/fault_injecting_blob_store.hpp"
 #include "support/temp_dir.hpp"
 #include "db/db_impl.hpp"
+#include "version/version.hpp"
+#include "version/version_edit.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_blob_store.hpp"
@@ -505,6 +507,49 @@ void BM_StatsScrape(benchmark::State& state) {
     state.counters["files"] = files;
 }
 BENCHMARK(BM_StatsScrape)->Arg(1000000)->Unit(benchmark::kMicrosecond);
+
+/// TTL reclamation over a large file set.
+///
+/// **Built as a `Version` directly** rather than through a DB, because the cost being measured is a
+/// pure function of the file list: `files_expired_before` asks, per expired candidate, whether any
+/// *older* file still holds keys in its range. Driving it through writes would spend all the time
+/// producing files instead.
+void BM_TtlReclamation(benchmark::State& state) {
+    const int files = static_cast<int>(state.range(0));
+
+    // Three levels, disjoint and sorted within each — the shape the level invariant guarantees and
+    // the one the search relies on. Every file is old enough to be a candidate, which is the case
+    // that walks the whole list.
+    VersionEdit edit;
+    uint64_t number = 1;
+    for (int level = 0; level < 3; ++level) {
+        const int at_level = level == 0 ? 8 : (files - 8) / 2;
+        for (int i = 0; i < at_level; ++i) {
+            char lo[32];
+            char hi[32];
+            std::snprintf(lo, sizeof(lo), "key:%09d", i * 1000);
+            std::snprintf(hi, sizeof(hi), "key:%09d", i * 1000 + 999);
+            edit.added.push_back(FileMetadata{.level = level,
+                                              .file_number = number++,
+                                              .store_id = "bench",
+                                              .smallest_key = lo,
+                                              .largest_key = hi,
+                                              .file_bytes = 1000,
+                                              .num_entries = 10,
+                                              .min_write_time_ms = 100,
+                                              .max_write_time_ms = 100});
+        }
+    }
+    const Version base({}, 1, {}, {});
+    const std::shared_ptr<const Version> version = Version::apply(base, edit);
+
+    for (auto _ : state) {
+        auto dead = version->files_expired_before(1'000'000);
+        benchmark::DoNotOptimize(dead);
+    }
+    state.counters["files"] = static_cast<double>(files);
+}
+BENCHMARK(BM_TtlReclamation)->Arg(2000)->Arg(10000)->Unit(benchmark::kMicrosecond);
 
 /// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
 ///
