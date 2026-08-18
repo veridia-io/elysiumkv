@@ -1,11 +1,13 @@
 #include "fault/fault_injecting_blob_store.hpp"
 #include "support/temp_dir.hpp"
+#include "db/db_impl.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_blob_store.hpp"
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -246,6 +248,83 @@ void BM_RemotePrefixScan(benchmark::State& state) {
         benchmark::Counter(static_cast<double>(spent) / static_cast<double>(scans ? scans : 1));
 }
 BENCHMARK(BM_RemotePrefixScan)->Arg(0)->Arg(200)->Unit(benchmark::kMicrosecond);
+
+// --- the write path --------------------------------------------------------------
+//
+// **Every benchmark above is a read against a store that was already built.** Nothing measured the
+// cost of building it, so nothing gated write amplification, flush cost or compaction throughput —
+// and write amplification is the number the level configuration exists to control. A change that
+// doubles the bytes compaction writes per byte the application writes passes every other gate here.
+//
+// Reported as a ratio rather than a duration because that is the part which is a property of the
+// engine rather than of the disk under it: `compaction_bytes_written / bytes_the_caller_wrote`.
+
+/// Writes a fixed volume into a fresh store and compacts to quiescence, so the numbers describe one
+/// complete cycle rather than wherever the background happened to be when time ran out.
+void BM_WriteAmplification(benchmark::State& state) {
+    const int keys = static_cast<int>(state.range(0));
+
+    double amplification = 0;
+    double flushes = 0;
+    double compactions = 0;
+    for (auto _ : state) {
+        state.PauseTiming();
+        test::TempDir dir;
+        std::filesystem::create_directories(dir.path() / "store");
+        auto store = std::make_shared<DiskBlobStore>(dir.path() / "store", "bench");
+        store->set_sync_writes(false);
+
+        Options options;
+        options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir.path());
+        options.memtable_bytes = 1u << 20;
+        options.background = BackgroundMode::Inline;
+        LevelOptions l0;
+        l0.max_files = 4;
+        LevelOptions l1;
+        l1.max_bytes = 4u << 20;
+        LevelOptions l2;
+        options.levels = {{0, l0}, {1, l1}, {2, l2}};
+        options.tiers = {Tier{.store = store, .durability = Durability::Durable}};
+
+        auto db = std::move(*DB::open(options));
+        const std::string value(200, 'v');
+        state.ResumeTiming();
+
+        // **Shuffled, not ascending.** Written in key order every L0 file holds a disjoint range,
+        // so each compaction is a trivial move and the amplification is zero — a true number about
+        // a workload nothing has, and a benchmark that could not see a regression in the merge.
+        std::vector<int> order(static_cast<size_t>(keys));
+        for (int i = 0; i < keys; ++i) order[static_cast<size_t>(i)] = i;
+        std::mt19937 shuffle(7);
+        std::shuffle(order.begin(), order.end(), shuffle);
+
+        uint64_t written = 0;
+        for (const int i : order) {
+            const std::string key = key_at(i);
+            (void)db->put(Slice::from(key), Slice::from(value));
+            written += key.size() + value.size();
+        }
+        (void)db->flush();
+        (void)static_cast<DbImpl&>(*db).compact_until_quiet();
+
+        state.PauseTiming();
+        const Stats stats = db->stats();
+        amplification = written == 0 ? 0
+                                     : static_cast<double>(stats.compaction_bytes_written) /
+                                           static_cast<double>(written);
+        flushes = static_cast<double>(stats.flushes);
+        compactions = static_cast<double>(stats.compactions);
+        state.ResumeTiming();
+    }
+
+    // **The gate.** Bytes compaction rewrote per byte the caller wrote, for one full cycle. It is a
+    // property of the level configuration and the picker, not of the machine, so it moves only when
+    // one of those changes.
+    state.counters["write_amp"] = benchmark::Counter(amplification);
+    state.counters["flushes"] = benchmark::Counter(flushes);
+    state.counters["compactions"] = benchmark::Counter(compactions);
+}
+BENCHMARK(BM_WriteAmplification)->Arg(50000)->Unit(benchmark::kMillisecond);
 
 /// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
 ///

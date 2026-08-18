@@ -41,6 +41,128 @@ jobs:
       - name: Sources compile under the full warning set
         run: tools/check-gcc.sh
 
+  # The four decoders are the surface a store this binary did not write reaches — a rolled-back
+  # writer, a partially-written object, a bucket somebody else can write to. Every other gate here
+  # drives the engine through its own encoders, so it only ever decodes bytes it produced.
+  #
+  # A short run over the checked-in corpus, not a hunt: the point on a pull request is that the
+  # targets still build and still survive their seeds. Finding *new* inputs is the nightly's job,
+  # where it has minutes rather than seconds.
+  fuzz:
+    name: clang / decoder fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build clang
+          CMAKE_DIR=cmake-4.4.0-linux-x86_64
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-fuzz-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-fuzz-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      # `-fsanitize=fuzzer` is clang-only, which is why this job does not join the matrix: that one
+      # builds with whatever `/usr/bin/c++` is, and on the Linux legs that is gcc.
+      - name: Configure and build
+        run: |
+          cmake -S . -B build/fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build/fuzz
+
+      - name: Survive the corpus
+        run: ctest --test-dir build/fuzz -R Fuzz --output-on-failure
+
+  # What the compilers cannot see. The warning set here is already severe — -Wall -Wextra
+  # -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror, on two compilers and three
+  # platforms — so this is for lifetime and correctness analysis, and it runs on the **diff**:
+  # a whole-tree run on a codebase that adopted a linter late is a wall of warnings nobody reads.
+  clang-tidy:
+    name: clang-tidy / changed files
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build clang clang-tidy
+          CMAKE_DIR=cmake-4.4.0-linux-x86_64
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-tidy-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-tidy-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+
+      # A compile database, and nothing built: clang-tidy needs the flags, not the objects.
+      - name: Generate a compile database
+        run: |
+          cmake -S . -B build/tidy -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Lint the diff
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          FILES=$(git diff --name-only --diff-filter=d "$BASE"...HEAD \
+                  | grep -E '^(src|include|aws|cli)/.*\.(cpp|hpp)$' || true)
+          if [ -z "$FILES" ]; then
+            echo "no engine sources changed"
+            exit 0
+          fi
+          echo "$FILES"
+          # Headers have no entry in the compile database, so they are checked through the
+          # translation units that include them rather than on their own.
+          SOURCES=$(echo "$FILES" | grep -E '\.cpp$' || true)
+          [ -z "$SOURCES" ] && { echo "only headers changed; covered by their translation units"; exit 0; }
+          # shellcheck disable=SC2086
+          clang-tidy -p build/tidy --warnings-as-errors='*' $SOURCES
+
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
     runs-on: ${{ matrix.os }}

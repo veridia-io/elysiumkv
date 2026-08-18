@@ -1,4 +1,4 @@
-name: Nightly full differential
+name: Nightly
 
 # Split out of "Build and Test" so a nightly failure is distinguishable at a glance and can be
 # re-run on its own. It is also the only job here that takes hours, which makes it the one you
@@ -13,6 +13,108 @@ env:
   VCPKG_DISABLE_METRICS: '1'
 
 jobs:
+  # The hunt, as opposed to the pull-request job's "still survives its seeds". Minutes per target
+  # instead of seconds, and anything new it finds is uploaded — a crashing input is the whole
+  # artifact, since the corpus that produced it is checked in and the seed is in the log.
+  fuzz-long:
+    name: decoder fuzzing (10 min per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build clang
+          CMAKE_DIR=cmake-4.4.0-linux-x86_64
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      - run: |
+          cmake -S . -B build/fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build/fuzz
+      # Each target writes anything it discovers back into a scratch corpus, which is what gets
+      # uploaded. The checked-in corpus is left alone: growing it belongs in a reviewed commit,
+      # not in a nightly that nobody reads when it is green.
+      - name: Fuzz
+        run: |
+          mkdir -p /tmp/found
+          status=0
+          for target in edit snapshot block footer; do
+            mkdir -p "/tmp/found/$target"
+            ./build/fuzz/fuzz/elysiumkv_fuzz_$target \
+              "/tmp/found/$target" "fuzz/corpus/$target" \
+              -max_total_time=600 -print_final_stats=1 || status=1
+          done
+          exit $status
+      - name: Upload anything found
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: /tmp/found
+          if-no-files-found: ignore
+
+  # A map, not a gate. The suite is good enough that the interesting question is which branches
+  # nothing reaches — and a coverage *threshold* would answer a different, worse question, by
+  # rewarding tests written to touch lines rather than to state properties.
+  coverage:
+    name: coverage map
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build gcovr
+          CMAKE_DIR=cmake-4.4.0-linux-x86_64
+          curl -fsSL --retry 3 \
+            "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
+            | sudo tar xz -C /opt
+          echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+      - name: Resolve the vcpkg pin
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          echo "VCPKG_COMMIT=$BASELINE" >> "$GITHUB_ENV"
+      - name: Set up vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          git -C "$HOME/vcpkg" checkout "$VCPKG_COMMIT"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      - run: |
+          cmake -S . -B build/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -O0 -g" -DCMAKE_EXE_LINKER_FLAGS="--coverage" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build/coverage
+      - run: ctest --test-dir build/coverage --parallel "$(getconf _NPROCESSORS_ONLN)" || true
+      - name: Summarise
+        run: |
+          gcovr --root . --filter 'src/' --filter 'include/' \
+                --exclude-unreachable-branches --print-summary \
+                --html-details /tmp/coverage.html --txt /tmp/coverage.txt
+          echo '### Coverage' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -30 /tmp/coverage.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: /tmp/coverage*
+
   differential-full:
     name: full differential (1M ops x 100 seeds)
     runs-on: ubuntu-latest
