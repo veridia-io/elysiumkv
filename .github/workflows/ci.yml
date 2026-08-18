@@ -58,7 +58,11 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo apt-get update && sudo apt-get install -y ninja-build clang
+          # **libc++, not the runner's libstdc++.** `std::expected` is C++23 and the pairing of
+          # apt's clang with the system libstdc++ on this image does not provide it — the header
+          # exists and the template does not. The build matrix is unaffected because it uses gcc;
+          # this is the first job here to compile the engine with clang at all.
+          sudo apt-get update && sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
@@ -91,6 +95,7 @@ jobs:
           cmake -S . -B build/fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build/fuzz
 
@@ -112,7 +117,9 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo apt-get update && sudo apt-get install -y ninja-build clang clang-tidy
+          # See the fuzz job for why libc++ rather than the runner's libstdc++.
+          sudo apt-get update && sudo apt-get install -y ninja-build clang clang-tidy \
+                                                         libc++-dev libc++abi-dev
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
@@ -144,6 +151,7 @@ jobs:
           cmake -S . -B build/tidy -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Lint the diff
@@ -160,6 +168,10 @@ jobs:
           # translation units that include them rather than on their own.
           SOURCES=$(echo "$FILES" | grep -E '\.cpp$' || true)
           [ -z "$SOURCES" ] && { echo "only headers changed; covered by their translation units"; exit 0; }
+          # Warnings are errors here, which makes the job mean something — and makes a clang-tidy
+          # upgrade that adds checks to `bugprone-*` able to fail an unrelated pull request. That
+          # is the trade: the alternative is a job nobody reads. When it happens, the fix is a line
+          # in `.clang-tidy` with the reason, as the ones already there have.
           # shellcheck disable=SC2086
           clang-tidy -p build/tidy --warnings-as-errors='*' $SOURCES
 
