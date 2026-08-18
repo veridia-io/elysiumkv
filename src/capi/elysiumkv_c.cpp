@@ -124,16 +124,21 @@ public:
         size_t produced = 0;
         const elysiumkv_status status =
             vtable_.get(vtable_.context, name_z.c_str(), offset, want, buffer.data(), &produced);
-        // Counted here rather than at each return, so a path added later cannot escape it.
-        const auto record = [this](GetResult result) {
-            note_get(result);
-            return make_ready_future(std::move(result));
-        };
-        if (status != ELYSIUMKV_OK) return record(GetResult(std::unexpected(from_c(status))));
-        if (produced > want) return record(GetResult(std::unexpected(Status::Corrupt)));
-
-        buffer.resize(produced);
-        return record(GetResult(std::move(buffer)));
+        // **One result and one return**, so a path added later cannot escape the counter. Built by
+        // assignment rather than handed to a helper by value: gcc 13's `-Wmaybe-uninitialized`
+        // reads the copy of an `expected` whose error arm is active as a read of the uninitialised
+        // vector arm, and fails the build over it.
+        GetResult result = std::unexpected(Status::Io);
+        if (status != ELYSIUMKV_OK) {
+            result = std::unexpected(from_c(status));
+        } else if (produced > want) {
+            result = std::unexpected(Status::Corrupt);
+        } else {
+            buffer.resize(produced);
+            result = std::move(buffer);
+        }
+        note_get(result);
+        return make_ready_future(std::move(result));
     }
 
     std::future<Status> put(std::string_view name, Slice bytes) override {
@@ -178,12 +183,15 @@ public:
                 static_cast<std::vector<std::string>*>(context)->emplace_back(name);
             },
             &names);
-        const auto record = [this](ListResult result) {
-            note_list(result);
-            return make_ready_future(std::move(result));
-        };
-        if (status != ELYSIUMKV_OK) return record(ListResult(std::unexpected(from_c(status))));
-        return record(ListResult(std::move(names)));
+        // One result and one return, for the reason `get` above gives.
+        ListResult result = std::unexpected(Status::Io);
+        if (status != ELYSIUMKV_OK) {
+            result = std::unexpected(from_c(status));
+        } else {
+            result = std::move(names);
+        }
+        note_list(result);
+        return make_ready_future(std::move(result));
     }
 
 private:

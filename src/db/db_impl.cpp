@@ -2359,7 +2359,14 @@ std::vector<ListResult> DbImpl::list_all_stores() const {
     stores.reserve(tiers_.stores.size());
     for (const auto& [store_id, store] : tiers_.stores) stores.push_back(&store);
 
-    std::vector<ListResult> results(stores.size(), ListResult(std::unexpected(Status::Io)));
+    // Built in place rather than fill-constructed from one prototype: the fill copies an
+    // `expected` whose error arm is active, which gcc 13's `-Wmaybe-uninitialized` reads as a read
+    // of the uninitialised vector arm. `Io` and not a default-constructed empty listing, so a slot
+    // nothing writes reads as "could not look" rather than "this store is empty" — the difference
+    // between failing open and discarding a tier.
+    std::vector<ListResult> results;
+    results.reserve(stores.size());
+    for (size_t i = 0; i < stores.size(); ++i) results.emplace_back(std::unexpected(Status::Io));
     if (stores.empty()) return results;
 
     std::vector<std::thread> listers;
