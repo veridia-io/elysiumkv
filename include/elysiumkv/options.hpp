@@ -283,8 +283,12 @@ struct Options {
     /// compaction is read concurrently — the merge interleaves them — so the windows are all live
     /// at once, and each input holds two of them: the one being merged and the one being fetched
     /// ahead of it. The footprint is `2 x this x inputs x concurrent compactions`, and with the
-    /// default `max_compaction_bytes` and a 16 MiB `target_file_bytes` that is about 25 inputs. It
-    /// is charged to `memory_budget` when one is set, so the cost is visible rather than inferred.
+    /// default `max_compaction_bytes` and a 16 MiB `target_file_bytes` that is about 25 inputs.
+    ///
+    /// **Charged to `memory_budget`, but not bounded by it.** The charge is unconditional — refusing
+    /// a compaction's buffer would turn a memory decision into a durability one — so the budget
+    /// reports this memory rather than limiting it. `open` therefore refuses a window two of which
+    /// would exceed the whole budget, since nothing downstream would.
     size_t compaction_window_bytes = 2ull << 20;
 
     /// Serve reads while a discarded transient store is still unreplayed.
