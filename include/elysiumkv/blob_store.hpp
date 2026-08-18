@@ -2,8 +2,10 @@
 #define ELYSIUMKV_BLOB_STORE_HPP
 
 #include "elysiumkv/slice.hpp"
+#include "elysiumkv/io_counters.hpp"
 #include "elysiumkv/status.hpp"
 
+#include <atomic>
 #include <future>
 #include <limits>
 #include <string>
@@ -86,6 +88,65 @@ public:
     }
 
     virtual std::future<ListResult> list(std::string_view prefix) = 0;
+
+    /// This layer's traffic. Read without a lock, so the seven values are individually atomic and
+    /// not a consistent snapshot — which is what a counter scrape wants anyway.
+    IoCounters counters() const {
+        return IoCounters{gets_.load(std::memory_order_relaxed),
+                          puts_.load(std::memory_order_relaxed),
+                          removes_.load(std::memory_order_relaxed),
+                          lists_.load(std::memory_order_relaxed),
+                          bytes_read_.load(std::memory_order_relaxed),
+                          bytes_written_.load(std::memory_order_relaxed),
+                          errors_.load(std::memory_order_relaxed)};
+    }
+
+protected:
+    /// **Called by each implementation, not by a decorator wrapping it.** `authoritative_store`
+    /// walks a chain while `as_cache()` answers, so a counting decorator would stop that walk and
+    /// be mistaken for the store that holds the bytes.
+    ///
+    /// `NotFound` is a request and not an error: the sweep asks about objects precisely to learn
+    /// they are gone, and would otherwise read as a store in trouble.
+    void note_get(const GetResult& result) {
+        gets_.fetch_add(1, std::memory_order_relaxed);
+        if (result) {
+            bytes_read_.fetch_add(result->size(), std::memory_order_relaxed);
+        } else if (result.error() != Status::NotFound) {
+            errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    void note_put(Status status, size_t bytes) {
+        puts_.fetch_add(1, std::memory_order_relaxed);
+        if (status == Status::Ok) {
+            bytes_written_.fetch_add(bytes, std::memory_order_relaxed);
+        } else {
+            errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    void note_remove(Status status, size_t count = 1) {
+        removes_.fetch_add(count, std::memory_order_relaxed);
+        if (status != Status::Ok && status != Status::NotFound) {
+            errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    void note_list(const ListResult& result) {
+        lists_.fetch_add(1, std::memory_order_relaxed);
+        if (!result && result.error() != Status::NotFound) {
+            errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+private:
+    std::atomic<uint64_t> gets_{0};
+    std::atomic<uint64_t> puts_{0};
+    std::atomic<uint64_t> removes_{0};
+    std::atomic<uint64_t> lists_{0};
+    std::atomic<uint64_t> bytes_read_{0};
+    std::atomic<uint64_t> bytes_written_{0};
+    std::atomic<uint64_t> errors_{0};
+
+public:
 
     /// A view suitable for large sequential reads that will not be reread —
     /// compaction inputs, bulk scans. Caches override this to return their

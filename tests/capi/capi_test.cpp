@@ -543,7 +543,10 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
 
     EXPECT_EQ(header_bytes, 240u);
     EXPECT_EQ(level_record_bytes, 48u);
-    EXPECT_EQ(tier_record_bytes, 32u);
+    // 32 original fields plus the store's seven I/O counters. The header carries the width, so a
+    // decoder written against 32 steps correctly over the wider record — which is the whole reason
+    // the width is in the header.
+    EXPECT_EQ(tier_record_bytes, 88u);
     EXPECT_LE(buffer[24], 1u) << "requires_recovery is a 0/1 byte";
     for (size_t i = 25; i < 32; ++i) EXPECT_EQ(buffer[i], 0u) << "header padding at " << i;
 
@@ -572,6 +575,19 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     const size_t tier0 = header_bytes + level_count * level_record_bytes;
     EXPECT_LE(buffer[tier0 + 28], 1u) << "stalling";
     for (size_t i = 29; i < 32; ++i) EXPECT_EQ(buffer[tier0 + i], 0u);
+
+    // The I/O counters, appended after that padding. A put has happened, so the store has
+    // been written to — a zero here would mean the fields were reserved and never filled.
+    auto u64 = [&buffer](size_t offset) {
+        uint64_t value = 0;
+        for (size_t i = 0; i < 8; ++i) {
+            value |= static_cast<uint64_t>(buffer[offset + i]) << (8 * i);
+        }
+        return value;
+    };
+    EXPECT_GT(u64(tier0 + 32) + u64(tier0 + 40) + u64(tier0 + 48) + u64(tier0 + 56), 0u)
+        << "gets/puts/removes/lists";
+    EXPECT_EQ(u64(tier0 + 80), 0u) << "errors, on a store nothing has gone wrong with";
 
     elysiumkv_close(db);
 }

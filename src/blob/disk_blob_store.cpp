@@ -81,16 +81,24 @@ fs::path DiskBlobStore::path_for(std::string_view name) const {
 }
 
 std::future<GetResult> DiskBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
-    return make_ready_future(do_get(name, offset, len));
+    auto result = do_get(name, offset, len);
+    note_get(result);
+    return make_ready_future(std::move(result));
 }
 std::future<Status> DiskBlobStore::put(std::string_view name, Slice bytes) {
-    return make_ready_future(do_put(name, bytes));
+    const Status status = do_put(name, bytes);
+    note_put(status, bytes.size());
+    return make_ready_future(status);
 }
 std::future<Status> DiskBlobStore::remove(std::string_view name) {
-    return make_ready_future(do_remove(name));
+    const Status status = do_remove(name);
+    note_remove(status);
+    return make_ready_future(status);
 }
 std::future<ListResult> DiskBlobStore::list(std::string_view prefix) {
-    return make_ready_future(do_list(prefix));
+    auto result = do_list(prefix);
+    note_list(result);
+    return make_ready_future(std::move(result));
 }
 
 GetResult DiskBlobStore::do_get(std::string_view name, uint64_t offset, size_t len) {

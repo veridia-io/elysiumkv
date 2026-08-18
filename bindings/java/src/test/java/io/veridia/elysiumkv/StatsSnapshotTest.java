@@ -136,6 +136,48 @@ class StatsSnapshotTest {
         }
     }
 
+    @Test
+    void aTierReportsTheIoItsStoreHasServed(@TempDir Path dir) throws Exception {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.open());
+            for (int i = 0; i < 2000; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v" + i));
+            db.flush();
+            for (int i = 0; i < 2000; ++i) db.getCopy(TestSupport.key(i));
+
+            ElysiumKVStats.Tier tier = db.stats().tiers().get(0);
+            assertTrue(tier.puts() > 0, "a flush writes objects");
+            assertTrue(tier.bytesWritten() > 0);
+            assertEquals(0L, tier.errors(), "nothing has gone wrong with this store");
+            db.close();
+        }
+    }
+
+    /** The other direction from {@link #aNewerFormatWithWiderRecordsStillDecodes}: a native library
+     *  predating a field reports a shorter record, and the decoder must read the prefix rather than
+     *  run into the next record. */
+    @Test
+    void anOlderFormatWithNarrowerTierRecordsStillDecodes(@TempDir Path dir) throws Exception {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.open());
+            for (int i = 0; i < 500; ++i) db.put(TestSupport.key(i), TestSupport.bytes("v"));
+            db.flush();
+            ElysiumKVStats actual = db.stats();
+
+            byte[] narrowed = narrowTierRecords(rawSnapshot(db), actual.levels().size(),
+                                                actual.tiers().size(), 32);
+            ElysiumKVStats decoded = ElysiumKVStats.decode(narrowed, narrowed.length);
+
+            assertEquals(actual.tiers().size(), decoded.tiers().size());
+            assertEquals(actual.tierBytesTotal(), decoded.tierBytesTotal());
+            for (int i = 0; i < actual.tiers().size(); ++i) {
+                assertEquals(actual.tiers().get(i).fileCount(), decoded.tiers().get(i).fileCount());
+                assertEquals(0L, decoded.tiers().get(i).puts(),
+                             "a field this record is too short to hold reads as zero");
+            }
+            db.close();
+        }
+    }
+
     private static byte[] rawSnapshot(ElysiumKV db) {
         byte[] buffer = new byte[Native.statsSnapshot(db.handle(), null)];
         int written = Native.statsSnapshot(db.handle(), buffer);
@@ -164,6 +206,23 @@ class StatsSnapshotTest {
         for (int i = 0; i < tierCount; ++i) {
             System.arraycopy(original, header + levelCount * levelBytes + i * tierBytes, out,
                              grownHeader + levelCount * grownLevel + i * grownTier, tierBytes);
+        }
+        return out;
+    }
+
+    /** Re-encodes with a shorter tier record, as an earlier version would. */
+    private static byte[] narrowTierRecords(byte[] original, int levelCount, int tierCount,
+                                            int shrunkTier) {
+        final int header = readInt(original, 4);
+        final int levelBytes = readInt(original, 8);
+        final int tierBytes = readInt(original, 12);
+
+        byte[] out = new byte[header + levelCount * levelBytes + tierCount * shrunkTier];
+        System.arraycopy(original, 0, out, 0, header + levelCount * levelBytes);
+        writeInt(out, 12, shrunkTier);
+        for (int i = 0; i < tierCount; ++i) {
+            System.arraycopy(original, header + levelCount * levelBytes + i * tierBytes, out,
+                             header + levelCount * levelBytes + i * shrunkTier, shrunkTier);
         }
         return out;
     }

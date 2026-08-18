@@ -155,6 +155,12 @@ size_t DiskCacheBlobStore::cached_bytes() const {
 }
 
 std::future<GetResult> DiskCacheBlobStore::get(std::string_view name, uint64_t offset, size_t len) {
+    GetResult result = serve_get(name, offset, len);
+    note_get(result);
+    return make_ready_future(std::move(result));
+}
+
+GetResult DiskCacheBlobStore::serve_get(std::string_view name, uint64_t offset, size_t len) {
     std::optional<Buffer> cached;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex_);
@@ -170,7 +176,7 @@ std::future<GetResult> DiskCacheBlobStore::get(std::string_view name, uint64_t o
             verify_cache_hit(*impl_->delegate, "DiskCacheBlobStore", name, offset, len, *cached);
         }
 #endif
-        return make_ready_future(GetResult(std::move(*cached)));
+        return GetResult(std::move(*cached));
     }
     impl_->misses.fetch_add(1, std::memory_order_relaxed);
 
@@ -178,7 +184,7 @@ std::future<GetResult> DiskCacheBlobStore::get(std::string_view name, uint64_t o
     // of the request, never a subset, so what comes back can always answer it.
     const FetchPlan plan = plan_fetch(offset, len, impl_->fetch_granularity);
     auto fetched = impl_->delegate->get(name, plan.offset, plan.len).get();
-    if (!fetched) return make_ready_future(std::move(fetched));
+    if (!fetched) return fetched;
 
     {
         std::lock_guard<std::mutex> lock(impl_->mutex_);
@@ -189,12 +195,12 @@ std::future<GetResult> DiskCacheBlobStore::get(std::string_view name, uint64_t o
     // The caller asked for a window inside the chunk. Truncating at what actually arrived keeps the
     // contract for a read overlapping the end of the object: short is an answer, not an error.
     const size_t skip = static_cast<size_t>(offset - plan.offset);
-    if (skip >= fetched->size()) return make_ready_future(GetResult(Buffer{}));
+    if (skip >= fetched->size()) return GetResult(Buffer{});
     size_t available = fetched->size() - skip;
     if (len != kReadToEnd) available = std::min(available, len);
-    return make_ready_future(
+    return 
         GetResult(Buffer(fetched->begin() + static_cast<std::ptrdiff_t>(skip),
-                         fetched->begin() + static_cast<std::ptrdiff_t>(skip + available))));
+                         fetched->begin() + static_cast<std::ptrdiff_t>(skip + available)));
 }
 
 std::future<Status> DiskCacheBlobStore::put(std::string_view name, Slice bytes) {
@@ -202,6 +208,7 @@ std::future<Status> DiskCacheBlobStore::put(std::string_view name, Slice bytes) 
     // (ARCHITECTURE.md "Caches chain"). `cache_on_write` pays mostly for L0, whose files are read almost
     // immediately by the next L0→L1 compaction.
     const Status status = impl_->delegate->put(name, bytes).get();
+    note_put(status, bytes.size());
     if (status != Status::Ok) return make_ready_future(status);
 
     if (impl_->cache_on_write) {
@@ -221,7 +228,9 @@ std::future<Status> DiskCacheBlobStore::remove(std::string_view name) {
         std::lock_guard<std::mutex> lock(impl_->mutex_);
         impl_->core.invalidate(name);
     }
-    return impl_->delegate->remove(name);
+    const Status status = impl_->delegate->remove(name).get();
+    note_remove(status);
+    return make_ready_future(status);
 }
 
 std::future<Status> DiskCacheBlobStore::remove_many(const std::vector<std::string>& names) {
@@ -229,11 +238,15 @@ std::future<Status> DiskCacheBlobStore::remove_many(const std::vector<std::strin
         std::lock_guard<std::mutex> lock(impl_->mutex_);
         for (const std::string& name : names) impl_->core.invalidate(name);
     }
-    return impl_->delegate->remove_many(names);
+    const Status status = impl_->delegate->remove_many(names).get();
+    note_remove(status, names.size());
+    return make_ready_future(status);
 }
 
 std::future<ListResult> DiskCacheBlobStore::list(std::string_view prefix) {
-    return impl_->delegate->list(prefix);
+    ListResult result = impl_->delegate->list(prefix).get();
+    note_list(result);
+    return make_ready_future(std::move(result));
 }
 
 }  // namespace elysiumkv

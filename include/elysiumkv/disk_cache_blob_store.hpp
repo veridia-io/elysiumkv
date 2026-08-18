@@ -48,6 +48,13 @@ public:
     std::future<Status> remove_many(const std::vector<std::string>& names) override;
     std::future<ListResult> list(std::string_view prefix) override;
 
+private:
+    /// The body of `get`. Split out so the counters are noted on one path rather
+    /// than on each of the four the lookup can take.
+    GetResult serve_get(std::string_view name, uint64_t offset, size_t len);
+
+public:
+
     /// ARCHITECTURE.md "Invariants and sanitizers" — **the cache checks itself.** Under `ELYSIUMKV_PARANOID` every hit is
     /// re-fetched from the delegate and compared, and a mismatch aborts naming the
     /// object and the range. A cache serving wrong bytes does not crash and does not

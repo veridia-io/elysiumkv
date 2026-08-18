@@ -1708,6 +1708,10 @@ Stats DbImpl::stats() const {
             // Over capacity: eviction is pending even though nothing has aged out.
             tier_stats.files_pending_migration = tier_stats.file_count;
         }
+        // The store that holds the bytes, so a cache chain in front of this tier reports its
+        // delegate's traffic rather than its own — see `TierStats::io`.
+        tier_stats.io = authoritative_store(*tier.store).counters();
+
         if (oldest_write != 0) {
             tier_stats.oldest_file_age = Duration(now > oldest_write ? now - oldest_write : 0);
             if (tier.durability == Durability::Transient && tier.stall_age.has_value() &&
