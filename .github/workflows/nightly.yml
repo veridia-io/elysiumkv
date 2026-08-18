@@ -24,12 +24,14 @@ jobs:
         with:
           fetch-depth: 1
       - run: |
-          # A pinned clang and its own libc++ — see the fuzz job in ci.yml for why.
+          # A pinned clang and the *default* standard library — see the fuzz job in ci.yml: the
+          # libFuzzer runtime LLVM ships for Linux is built against libstdc++, so asking for
+          # libc++ here fails to link.
           sudo apt-get update
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 20
-          sudo apt-get install -y -qq ninja-build libc++-20-dev libc++abi-20-dev
+          sudo apt-get install -y -qq ninja-build
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
@@ -48,8 +50,8 @@ jobs:
       - run: |
           cmake -S . -B build/fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
+            -DELYSIUMKV_BUILD_TESTS=OFF -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF \
             -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
-            -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build/fuzz
       # Each target writes anything it discovers back into a scratch corpus, which is what gets
