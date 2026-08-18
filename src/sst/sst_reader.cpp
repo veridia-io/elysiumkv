@@ -292,8 +292,10 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
 }
 
 Status SstReader::ensure_filter() {
+    if (filter_loaded_.load(std::memory_order_acquire)) return Status::Ok;
+
     std::lock_guard<std::mutex> lock(lazy_mutex_);
-    if (filter_loaded_) return Status::Ok;
+    if (filter_loaded_.load(std::memory_order_relaxed)) return Status::Ok;
 
     auto filter = store_.get(name_, footer_.filter.offset, footer_.filter.length).get();
     if (!filter) return filter.error();
@@ -301,7 +303,7 @@ Status SstReader::ensure_filter() {
     if (!content) return content.error();
 
     filter_ = std::move(*content);
-    filter_loaded_ = true;
+    filter_loaded_.store(true, std::memory_order_release);
     return Status::Ok;
 }
 
@@ -367,9 +369,10 @@ Result<bool> SstReader::range_deletes(Slice key) {
 /// block fetch and the decode, not the caller's copy.
 Result<std::vector<RangeTombstone>> SstReader::range_tombstones() {
     if (!has_range_tombstones()) return std::vector<RangeTombstone>{};
+    if (ranges_loaded_.load(std::memory_order_acquire)) return ranges_;
 
     std::lock_guard<std::mutex> lock(lazy_mutex_);
-    if (ranges_loaded_) return ranges_;
+    if (ranges_loaded_.load(std::memory_order_relaxed)) return ranges_;
 
     auto block = load_block(footer_.range_del);
     if (!block) return std::unexpected(block.error());
@@ -385,7 +388,7 @@ Result<std::vector<RangeTombstone>> SstReader::range_tombstones() {
     if (it.status() != Status::Ok) return std::unexpected(it.status());
 
     ranges_ = std::move(out);
-    ranges_loaded_ = true;
+    ranges_loaded_.store(true, std::memory_order_release);
     return ranges_;
 }
 

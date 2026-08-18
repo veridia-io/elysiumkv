@@ -8,6 +8,7 @@
 #include "sst/internal_iterator.hpp"
 #include "elysiumkv/blob_store.hpp"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -105,9 +106,14 @@ private:
     /// every path that touches them acquires this first — which is what orders the single write
     /// against every later read.
     std::mutex lazy_mutex_;
-    bool filter_loaded_ = false;
+    /// **Atomic, and read before the lock.** `get` consults the filter for every file it opens, so
+    /// taking a mutex to discover that a one-time load already happened put a lock acquisition on
+    /// the hottest path in the engine — worth about a fifth of a point lookup. Once either flag is
+    /// set the value beside it is immutable, so the fast path needs an acquire load and nothing
+    /// else; the release store below is what it pairs with.
+    std::atomic<bool> filter_loaded_{false};
     Buffer filter_;
-    bool ranges_loaded_ = false;
+    std::atomic<bool> ranges_loaded_{false};
     std::vector<RangeTombstone> ranges_;
 };
 

@@ -678,10 +678,23 @@ jobs:
             --benchmark_min_warmup_time=0.5 \
             --benchmark_report_aggregates_only=true \
             --benchmark_format=json > bench-results.json
-      # The first run on a given OS has nothing to compare against: it writes the
-      # baseline and passes. The gate is live from the second main build onward.
+      # **The pull request is where a regression is caught; main is where the reference is
+      # recorded.** Gating both is what deadlocks: the ratchet cannot run until the check passes,
+      # so the first failure — a real regression, or the runner fleet moving to different hardware
+      # and slowing everything by a fifth at once — freezes the baseline, and every run afterwards
+      # fails against numbers no machine can reach again. A newly added benchmark is stuck the same
+      # way, reporting "NEW: rerun with --update" for ever because nothing ever does.
+      #
+      # So: compare on a pull request, record on main. A regression that reaches main was missed by
+      # the job below on the pull request that introduced it, which is the right place to look for
+      # it anyway.
       - name: Check against baseline
+        if: github.event_name == 'pull_request'
         run: python3 bench/check_regression.py bench-results.json
+
+      - name: Record the baseline
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: python3 bench/check_regression.py bench-results.json --update
 
       # Only main ratchets the stored baseline, so a slow PR cannot raise the bar
       # for the PRs behind it. The run number keeps the key unique — cache
