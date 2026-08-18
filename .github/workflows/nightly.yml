@@ -24,8 +24,12 @@ jobs:
         with:
           fetch-depth: 1
       - run: |
-          # libc++ rather than the runner's libstdc++ — see the fuzz job in ci.yml.
-          sudo apt-get update && sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev
+          # A pinned clang and its own libc++ — see the fuzz job in ci.yml for why.
+          sudo apt-get update
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 20
+          sudo apt-get install -y -qq ninja-build libc++-20-dev libc++abi-20-dev
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
@@ -44,7 +48,7 @@ jobs:
       - run: |
           cmake -S . -B build/fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
             -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build/fuzz

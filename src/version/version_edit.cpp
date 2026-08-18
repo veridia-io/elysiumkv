@@ -53,7 +53,11 @@ bool get_watermark(const uint8_t*& p, const uint8_t* limit, WatermarkInterval& w
     watermark.low = (flags & 1u) != 0 ? std::optional<uint64_t>(low) : std::nullopt;
     watermark.high = (flags & 2u) != 0 ? std::optional<uint64_t>(high) : std::nullopt;
     // An inverted interval cannot arise from `min` over lows and `max` over highs.
-    return !(watermark.low.has_value() && *watermark.low > *watermark.high);
+    // Both presences tested, though the flag check above already rules out low-without-high. This
+    // decodes bytes from outside the process, and leaning on an invariant established three lines
+    // earlier is how a decoder acquires an unchecked dereference during a later edit.
+    return !watermark.low.has_value() || !watermark.high.has_value() ||
+           *watermark.low <= *watermark.high;
 }
 
 void put_file(std::string& out, const FileMetadata& file) {
