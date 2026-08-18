@@ -441,6 +441,71 @@ void BM_FullScanFirstKey(benchmark::State& state) {
 }
 BENCHMARK(BM_FullScanFirstKey)->Arg(1000000)->Unit(benchmark::kMicrosecond);
 
+/// A many-file store on two tiers, with store ids the length real ones are.
+///
+/// **Both details are load-bearing, and `BenchStore` has neither.** `stats()` walks per tier, so
+/// one tier hides the multiplication; and it compares `file.store_id` against `store->id()`, which
+/// returns by value — so an id short enough for the small-string buffer allocates nothing while a
+/// real one, defaulting to the canonicalised root path and in production an S3 bucket and prefix,
+/// allocates once per file per tier.
+class StatsBenchStore {
+public:
+    explicit StatsBenchStore(int keys) {
+        std::filesystem::create_directories(dir_.path() / "hot");
+        std::filesystem::create_directories(dir_.path() / "cold");
+        auto hot = std::make_shared<DiskBlobStore>(
+            dir_.path() / "hot", "elysiumkv-segmentation-engine-hot-tier-partition-00");
+        auto cold = std::make_shared<DiskBlobStore>(
+            dir_.path() / "cold", "elysiumkv-segmentation-engine-cold-tier-partition-00");
+        hot->set_sync_writes(false);
+        cold->set_sync_writes(false);
+
+        Options options;
+        options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
+        options.memtable_bytes = 256u << 10;
+        options.background = BackgroundMode::Inline;
+
+        LevelOptions l0;
+        l0.max_files = 100;
+        l0.target_file_bytes = 256u << 10;
+        LevelOptions l1;
+        l1.target_file_bytes = 256u << 10;
+        options.levels = {{0, l0}, {1, l1}};
+        options.tiers = {
+            Tier{.store = hot, .durability = Durability::Durable, .max_age = Duration(3600000)},
+            Tier{.store = cold, .durability = Durability::Durable},
+        };
+
+        db_ = std::move(*DB::open(options));
+        const std::string value(100, 'v');
+        for (int i = 0; i < keys; ++i) {
+            (void)db_->put(Slice::from(key_at(i)), Slice::from(value));
+        }
+        (void)db_->flush();
+    }
+
+    DB& db() { return *db_; }
+
+private:
+    test::TempDir dir_;
+    std::unique_ptr<DB> db_;
+};
+
+/// A `stats()` scrape. **The one call an operator is told to make continuously**, paid per instance
+/// in the process — so an embedder running sixty partitions pays this sixty times per interval.
+void BM_StatsScrape(benchmark::State& state) {
+    static StatsBenchStore store(static_cast<int>(state.range(0)));
+    double files = 0;
+    for (const LevelStats& level : store.db().stats().levels) files += level.file_count;
+
+    for (auto _ : state) {
+        Stats snapshot = store.db().stats();
+        benchmark::DoNotOptimize(snapshot);
+    }
+    state.counters["files"] = files;
+}
+BENCHMARK(BM_StatsScrape)->Arg(1000000)->Unit(benchmark::kMicrosecond);
+
 /// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
 ///
 /// The gate under test is `check_regression.py`, not the engine, so the engine

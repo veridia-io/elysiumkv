@@ -1706,28 +1706,94 @@ Stats DbImpl::stats() const {
 
     // ARCHITECTURE.md "Statistics are a buffer, not a struct" — the tier axis: where files physically live, and what a loss of each
     // store would reach back to.
-    for (int index = 0; index <= tiers_.last(); ++index) {
+    //
+    // **One pass over every file, and the store ids read once.** This was a full walk of every
+    // level per tier, and the walk compared `file.store_id` against `tier.store->id()` — which
+    // returns a `std::string` **by value**, so it allocated once per file per tier. The watermark
+    // below was a second walk, and its `store_is_discardable` allocated per tier per file again.
+    // `stats()` is the one call an operator is told to make continuously, times every instance in
+    // the process; at ten thousand files and two tiers that was forty thousand allocations a
+    // scrape to produce a few dozen integers.
+    const int last_tier = tiers_.last();
+    std::vector<std::string> tier_store_ids;
+    tier_store_ids.reserve(static_cast<size_t>(last_tier) + 1);
+    for (int index = 0; index <= last_tier; ++index) {
+        tier_store_ids.push_back(tiers_.tiers[static_cast<size_t>(index)].store->id());
+    }
+
+    // **A store id maps to every tier that names it, not to one.** Nothing forbids two tiers
+    // sharing a store, and a file on it belongs to both — which is what the per-tier loop did by
+    // construction and what a single pass has to be told.
+    std::unordered_map<std::string_view, std::vector<int>> tiers_by_store;
+    std::unordered_set<std::string_view> discardable_stores;
+    for (int index = 0; index <= last_tier; ++index) {
+        tiers_by_store[tier_store_ids[static_cast<size_t>(index)]].push_back(index);
+    }
+    for (const auto& [store_id, claimants] : tiers_by_store) {
+        // Discardable only if *every* tier naming it is Transient, resolving the ambiguity toward
+        // the non-destructive reading exactly as `ResolvedTiers::store_is_discardable` does.
+        const bool all_transient = std::ranges::all_of(claimants, [this](int index) {
+            return tiers_.tiers[static_cast<size_t>(index)].durability == Durability::Transient;
+        });
+        if (all_transient) discardable_stores.emplace(store_id);
+    }
+
+    struct TierAccumulator {
+        int file_count = 0;
+        uint64_t bytes = 0;
+        uint64_t oldest_write = 0;
+        int pending_migration = 0;
+    };
+    std::vector<TierAccumulator> per_tier(static_cast<size_t>(last_tier) + 1);
+
+    // The **live** watermark frontier, accumulated in the same pass. Deliberately not the maximum
+    // watermark over current files: that is tier-blind, so a flush to a transient tier would
+    // advance it while changing nothing an operator can rely on. This is the same expression
+    // recovery uses, evaluated live — the position whose state would survive losing every
+    // transient tier.
+    std::optional<uint64_t> transient_low;
+    bool transient_low_missing = false;
+    bool any_transient = false;
+    std::optional<uint64_t> high;
+
+    for (const auto& level : version->levels()) {
+        for (const FileMetadata& file : level) {
+            accumulate_max(high, file.watermark.high);
+            if (discardable_stores.contains(file.store_id)) {
+                any_transient = true;
+                if (file.watermark.low.has_value()) {
+                    accumulate_min(transient_low, file.watermark.low);
+                } else {
+                    transient_low_missing = true;
+                }
+            }
+
+            const auto claimed = tiers_by_store.find(file.store_id);
+            if (claimed == tiers_by_store.end()) continue;  // a store no tier names
+            const int placed = placement(tiers_, file.file_number, file.min_write_time_ms, now);
+            for (const int index : claimed->second) {
+                TierAccumulator& accumulated = per_tier[static_cast<size_t>(index)];
+                ++accumulated.file_count;
+                accumulated.bytes += file.file_bytes;
+                if (accumulated.oldest_write == 0 ||
+                    file.min_write_time_ms < accumulated.oldest_write) {
+                    accumulated.oldest_write = file.min_write_time_ms;
+                }
+                if (placed > index) ++accumulated.pending_migration;
+            }
+        }
+    }
+
+    for (int index = 0; index <= last_tier; ++index) {
         const Tier& tier = tiers_.tiers[static_cast<size_t>(index)];
+        const TierAccumulator& accumulated = per_tier[static_cast<size_t>(index)];
+
         TierStats tier_stats;
         tier_stats.tier = index;
+        tier_stats.file_count = accumulated.file_count;
+        tier_stats.bytes = accumulated.bytes;
+        tier_stats.files_pending_migration = accumulated.pending_migration;
 
-        // Iterated in place. This is inside a per-tier loop and `stats()` is the one call an
-        // operator is told to make continuously, so a copy of every file's metadata per tier per
-        // scrape is paid at the scrape rate, times the number of instances in the process.
-        uint64_t oldest_write = 0;
-        for (const auto& level : version->levels()) {
-          for (const FileMetadata& file : level) {
-            if (file.store_id != tier.store->id()) continue;
-            ++tier_stats.file_count;
-            tier_stats.bytes += file.file_bytes;
-            if (oldest_write == 0 || file.min_write_time_ms < oldest_write) {
-                oldest_write = file.min_write_time_ms;
-            }
-            if (placement(tiers_, file.file_number, file.min_write_time_ms, now) > index) {
-                ++tier_stats.files_pending_migration;
-            }
-          }
-        }
         if (tier.max_bytes.has_value() && tier_stats.bytes > *tier.max_bytes &&
             tier_stats.files_pending_migration == 0) {
             // Over capacity: eviction is pending even though nothing has aged out.
@@ -1737,8 +1803,9 @@ Stats DbImpl::stats() const {
         // delegate's traffic rather than its own — see `TierStats::io`.
         tier_stats.io = authoritative_store(*tier.store).counters();
 
-        if (oldest_write != 0) {
-            tier_stats.oldest_file_age = Duration(now > oldest_write ? now - oldest_write : 0);
+        if (accumulated.oldest_write != 0) {
+            tier_stats.oldest_file_age =
+                Duration(now > accumulated.oldest_write ? now - accumulated.oldest_write : 0);
             if (tier.durability == Durability::Transient && tier.stall_age.has_value() &&
                 tier_stats.oldest_file_age > *tier.stall_age) {
                 tier_stats.stalling = true;
@@ -1747,55 +1814,43 @@ Stats DbImpl::stats() const {
         stats.tiers.push_back(tier_stats);
     }
 
+    // **The lock covers taking the memtables, not reading them**, which is what `get` and
+    // `make_iterator` already do. Every figure below is an atomic the arena and the skiplist
+    // maintain for exactly this reader, so holding the write path's mutex across them bought
+    // nothing — and `stats()` is scraped continuously.
+    std::shared_ptr<SkiplistMemtable> mem;
+    std::shared_ptr<SkiplistMemtable> imm;
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
         ELYSIUMKV_LOCK_AUDIT();
-        // Everything not yet in an SST, live and frozen alike: a frozen memtable
-        // waiting on a flush is exactly as unwritten as the live one.
-        uint64_t oldest_write = 0;
-        for (const auto& memtable : {mem_, imm_}) {
-            if (memtable == nullptr) continue;
-            stats.memtable_bytes += memtable->approximate_bytes();
-            stats.memtable_entries += memtable->num_entries();
-            stats.memtable_tombstones += memtable->num_tombstones();
-            if (memtable->empty()) continue;
-            const uint64_t created = memtable->creation_time_ms();
-            if (oldest_write == 0 || created < oldest_write) oldest_write = created;
-        }
-        stats.memtable_age =
-            Duration(oldest_write == 0 || now <= oldest_write ? 0 : now - oldest_write);
+        mem = mem_;
+        imm = imm_;
     }
 
-    // The **live** frontier, and deliberately not the maximum watermark over current files: that
-    // is tier-blind, so a flush to a transient tier would advance it while changing nothing an
-    // operator can rely on. This is the same expression recovery uses, evaluated live — the
-    // position whose state would survive losing every transient tier.
-    {
-        std::optional<uint64_t> transient_low;
-        bool transient_low_missing = false;
-        bool any_transient = false;
-        std::optional<uint64_t> high;
-        for (const auto& level : version->levels()) {
-          for (const FileMetadata& file : level) {
-            accumulate_max(high, file.watermark.high);
-            if (!tiers_.store_is_discardable(file.store_id)) continue;
-            any_transient = true;
-            if (file.watermark.low.has_value()) {
-                accumulate_min(transient_low, file.watermark.low);
-            } else {
-                transient_low_missing = true;
-            }
-          }
-        }
-        if (!any_transient) {
-            stats.durable_watermark = high;
-        } else if (transient_low_missing) {
-            // A transient file with no lower bound: losing it would certify nothing, so neither
-            // does the gauge. Absent rather than zero, which is a valid position.
-            stats.durable_watermark = std::nullopt;
-        } else {
-            stats.durable_watermark = transient_low;
-        }
+    // Everything not yet in an SST, live and frozen alike: a frozen memtable waiting on a flush is
+    // exactly as unwritten as the live one.
+    uint64_t oldest_unwritten = 0;
+    for (const auto& memtable : {mem, imm}) {
+        if (memtable == nullptr) continue;
+        stats.memtable_bytes += memtable->approximate_bytes();
+        stats.memtable_entries += memtable->num_entries();
+        stats.memtable_tombstones += memtable->num_tombstones();
+        if (memtable->empty()) continue;
+        const uint64_t created = memtable->creation_time_ms();
+        if (oldest_unwritten == 0 || created < oldest_unwritten) oldest_unwritten = created;
+    }
+    stats.memtable_age =
+        Duration(oldest_unwritten == 0 || now <= oldest_unwritten ? 0 : now - oldest_unwritten);
+
+    // Accumulated in the pass above; only the verdict is left.
+    if (!any_transient) {
+        stats.durable_watermark = high;
+    } else if (transient_low_missing) {
+        // A transient file with no lower bound: losing it would certify nothing, so neither does
+        // the gauge. Absent rather than zero, which is a valid position.
+        stats.durable_watermark = std::nullopt;
+    } else {
+        stats.durable_watermark = transient_low;
     }
 
     stats.requires_recovery = requires_recovery_.load();
