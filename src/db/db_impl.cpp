@@ -2375,7 +2375,11 @@ Status DbImpl::verify_stores_and_discard() {
             // version unrepaired is worse than refusing: dropping newer files uncovers older values,
             // so reads would return *stale* data presented as current. A reader is the wrong process
             // to improvise with a damaged store — let the writer perform the discard first.
-            return fail_terminal(transient ? Status::Corrupt : Status::Corrupt,
+            // Corrupt either way, and the ternary that used to be here said `Corrupt : Corrupt`
+            // — implying the two cases differ when they do not. A reader cannot repair either one:
+            // a durable store missing files is damaged, and a transient one needs the *writer* to
+            // discard and replay, which is not a reader's manifest write to make.
+            return fail_terminal(Status::Corrupt,
                                  "read-only open found store '" + store_id +
                                      "' missing files; a writer must discard and repair it first");
         }

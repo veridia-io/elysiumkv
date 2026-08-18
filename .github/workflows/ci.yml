@@ -58,16 +58,35 @@ jobs:
 
       - name: Install build tools
         run: |
-          # **libc++, not the runner's libstdc++.** `std::expected` is C++23 and the pairing of
-          # apt's clang with the system libstdc++ on this image does not provide it — the header
-          # exists and the template does not. The build matrix is unaffected because it uses gcc;
-          # this is the first job here to compile the engine with clang at all.
-          sudo apt-get update && sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev
+          # **A pinned toolchain, not whatever the image calls `clang`.** These jobs are the only
+          # ones here that compile the engine with clang — the matrix uses `/usr/bin/c++`, which is
+          # gcc on the Linux legs — and the runner's default clang paired with the system libstdc++
+          # has an `<expected>` that does not define the template. Pinning the compiler *and* its
+          # standard library removes both variables, and matches the version this was verified
+          # against locally.
+          sudo apt-get update
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 20
+          sudo apt-get install -y -qq ninja-build libc++-20-dev libc++abi-20-dev
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
             | sudo tar xz -C /opt
           echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+
+      # Printed rather than assumed. The failure this job hit first — a standard library whose
+      # <expected> does not define std::expected — is invisible in a compiler error that only says
+      # the template is missing, and cost a round trip to diagnose.
+      - name: Report the toolchain
+        run: |
+          clang++-20 --version
+          echo '#include <expected>
+          #include <cstdio>
+          int main() { std::expected<int, int> e{1}; std::printf("std::expected ok %d\\n", *e); }' > /tmp/probe.cpp
+          clang++-20 -std=c++23 -stdlib=libc++ /tmp/probe.cpp -o /tmp/probe
+          /tmp/probe
 
       - name: Resolve the vcpkg pin
         run: |
@@ -94,7 +113,7 @@ jobs:
         run: |
           cmake -S . -B build/fuzz -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DELYSIUMKV_FUZZ=ON \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
             -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build/fuzz
@@ -117,14 +136,35 @@ jobs:
 
       - name: Install build tools
         run: |
-          # See the fuzz job for why libc++ rather than the runner's libstdc++.
-          sudo apt-get update && sudo apt-get install -y ninja-build clang clang-tidy \
-                                                         libc++-dev libc++abi-dev
+          # **A pinned toolchain, not whatever the image calls `clang`.** These jobs are the only
+          # ones here that compile the engine with clang — the matrix uses `/usr/bin/c++`, which is
+          # gcc on the Linux legs — and the runner's default clang paired with the system libstdc++
+          # has an `<expected>` that does not define the template. Pinning the compiler *and* its
+          # standard library removes both variables, and matches the version this was verified
+          # against locally.
+          sudo apt-get update
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 20
+          sudo apt-get install -y -qq ninja-build libc++-20-dev libc++abi-20-dev clang-tidy-20
           CMAKE_DIR=cmake-4.4.0-linux-x86_64
           curl -fsSL --retry 3 \
             "https://github.com/Kitware/CMake/releases/download/v4.4.0/${CMAKE_DIR}.tar.gz" \
             | sudo tar xz -C /opt
           echo "/opt/${CMAKE_DIR}/bin" >> "$GITHUB_PATH"
+
+
+      # Printed rather than assumed. The failure this job hit first — a standard library whose
+      # <expected> does not define std::expected — is invisible in a compiler error that only says
+      # the template is missing, and cost a round trip to diagnose.
+      - name: Report the toolchain
+        run: |
+          clang++-20 --version && clang-tidy-20 --version
+          echo '#include <expected>
+          #include <cstdio>
+          int main() { std::expected<int, int> e{1}; std::printf("std::expected ok %d\\n", *e); }' > /tmp/probe.cpp
+          clang++-20 -std=c++23 -stdlib=libc++ /tmp/probe.cpp -o /tmp/probe
+          /tmp/probe
 
       - name: Resolve the vcpkg pin
         run: |
@@ -150,30 +190,35 @@ jobs:
         run: |
           cmake -S . -B build/tidy -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
             -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 
+      # **Only the lines this change touches.** The full check set finds about forty things in code
+      # written before it existed — almost all of them checks that cannot see an invariant
+      # established three lines earlier — so linting whole files would mean either gutting the set
+      # or failing every pull request that opens a file. `clang-tidy-diff` restricts findings to
+      # changed lines, which keeps the set honest and the backlog out of the way.
       - name: Lint the diff
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          FILES=$(git diff --name-only --diff-filter=d "$BASE"...HEAD \
-                  | grep -E '^(src|include|aws|cli)/.*\.(cpp|hpp)$' || true)
-          if [ -z "$FILES" ]; then
-            echo "no engine sources changed"
-            exit 0
+          DIFF_TOOL=$(ls /usr/lib/llvm-20/share/clang/clang-tidy-diff.py 2>/dev/null \
+                      || command -v clang-tidy-diff-20.py \
+                      || command -v clang-tidy-diff.py)
+          if [ -z "$DIFF_TOOL" ]; then
+            echo "clang-tidy-diff.py not found in the llvm-20 install" >&2
+            exit 1
           fi
-          echo "$FILES"
-          # Headers have no entry in the compile database, so they are checked through the
-          # translation units that include them rather than on their own.
-          SOURCES=$(echo "$FILES" | grep -E '\.cpp$' || true)
-          [ -z "$SOURCES" ] && { echo "only headers changed; covered by their translation units"; exit 0; }
-          # Warnings are errors here, which makes the job mean something — and makes a clang-tidy
-          # upgrade that adds checks to `bugprone-*` able to fail an unrelated pull request. That
-          # is the trade: the alternative is a job nobody reads. When it happens, the fix is a line
-          # in `.clang-tidy` with the reason, as the ones already there have.
-          # shellcheck disable=SC2086
-          clang-tidy -p build/tidy --warnings-as-errors='*' $SOURCES
+          BASE="${{ github.event.pull_request.base.sha }}"
+          # -U0 so only changed lines are considered; -p1 strips the a/ b/ prefixes.
+          git diff -U0 "$BASE"...HEAD -- 'src/*' 'include/*' 'aws/*' 'cli/*' \
+            | python3 "$DIFF_TOOL" -p1 -path build/tidy \
+                -clang-tidy-binary clang-tidy-20 \
+            | tee /tmp/tidy.log
+          # clang-tidy-diff exits 0 even when it reports, so the log is what decides.
+          if grep -qE "(warning|error): " /tmp/tidy.log; then
+            echo "clang-tidy reported findings on the changed lines" >&2
+            exit 1
+          fi
 
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
