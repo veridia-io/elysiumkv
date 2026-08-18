@@ -228,7 +228,9 @@ public:
     /// use removes the window instead of narrowing it, and leaves exactly one place that knows the
     /// pin exists.
     bool transient_stalled() const {
-        const int pinned = pinned_transient_stall_.load();
+        // Widened explicitly: the stored type is signed and the sign is the state — negative
+        // means unpinned, so this is not a `signed char` leaking into an `int` by accident.
+        const int pinned = static_cast<int>(pinned_transient_stall_.load());
         if (pinned >= 0) return pinned != 0;
         return transient_stalled_.load();
     }

@@ -18,11 +18,27 @@
 #                          false-positives on anything declared in a header the analysis did not
 #                          resolve, which is most of `src/` when the compile database and the tidy
 #                          binary come from different toolchains.
+#   bugprone-empty-catch   the empty catches here are in destructors, which are `noexcept`: a
+#                          throwing logger sink must not take the process with it, and there is
+#                          nowhere to rethrow to. Each one carries that comment already.
+#   bugprone-infinite-loop reports the varint encoders as infinite loops. `value >>= 7` plainly
+#                          updates the condition variable; the check simply does not see a compound
+#                          assignment there. Wrong about the most-executed code in the format.
+#   performance-unnecessary-value-param
+#                          fires on sink-by-value parameters that *are* moved from — the analysis
+#                          does not see through the move into an assignment. Rewriting those to
+#                          const-ref would make them worse, not better.
+#   readability-simplify-boolean-expr
+#                          its DeMorgan rewrites land on the range-overlap comparisons, where the
+#                          current shape reads as "not excluded by this bound" and the suggestion
+#                          does not. Not worth restructuring correctness-critical comparisons for.
 Checks: >
   -*,
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   -bugprone-branch-clone,
+  -bugprone-empty-catch,
+  -bugprone-infinite-loop,
   cert-dcl21-cpp,
   cert-dcl58-cpp,
   cert-err34-c,
@@ -36,15 +52,18 @@ Checks: >
   performance-*,
   -performance-avoid-endl,
   -performance-enum-size,
+  -performance-unnecessary-value-param,
   portability-*,
   readability-container-size-empty,
   readability-misleading-indentation,
   readability-redundant-smartptr-get,
-  readability-simplify-boolean-expr,
   readability-string-compare
 
 # The engine builds with -fno-rtti, so anything suggesting dynamic_cast is proposing code that
 # will not compile — the `as_cache()` virtual exists precisely because of that.
 WarningsAsErrors: ''
-HeaderFilterRegex: '(src|include)/.*'
+# Anchored on the project's own directories anywhere in an absolute path: the compile database
+# holds absolute paths, so a relative pattern matches nothing and silently suppresses every
+# finding in a header — which reads as a clean run.
+HeaderFilterRegex: '.*/(src|include)/.*'
 FormatStyle: none
