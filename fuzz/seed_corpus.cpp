@@ -90,14 +90,38 @@ int main(int argc, char** argv) {
     auto built = writer.finish();
     if (!built) return 1;
 
+    // **Located exactly as a reader locates it**, rather than by slicing the width of whatever the
+    // newest version happened to be when this was written. That spelling — `kFooterLengthV2` — was
+    // in three places, and adding v3 broke every one of them: two in the reader, and this, which
+    // no preset but the fuzz job builds. Reading the trailer first is the sequence the format
+    // exists to support, so a seed produced this way also cannot encode a width that never occurs.
     const std::string& bytes = built->bytes;
-    const Slice tail(reinterpret_cast<const uint8_t*>(bytes.data()) + bytes.size() -
-                         Footer::kFooterLengthV2,
-                     Footer::kFooterLengthV2);
-    emit(root + "/footer", "v2", tail.data(), tail.size());
+    const Slice trailer(
+        reinterpret_cast<const uint8_t*>(bytes.data()) + bytes.size() - Footer::kTrailerLength,
+        Footer::kTrailerLength);
+    auto width = Footer::footer_length_from_trailer(trailer);
+    if (!width) return 1;
+
+    const Slice tail(
+        reinterpret_cast<const uint8_t*>(bytes.data()) + bytes.size() - static_cast<size_t>(*width),
+        static_cast<size_t>(*width));
 
     auto footer = Footer::decode(tail);
     if (!footer) return 1;
+
+    // Named for the version it actually is, so a stale seed is visible in the directory listing
+    // rather than only in what it decodes to.
+    emit(root + "/footer", "v" + std::to_string(footer->format_version), tail.data(), tail.size());
+
+    // **One seed per version the decoder still accepts.** The writer emits only the newest, so a
+    // seed taken from a real file exercises one of three live branches — and the two it skips are
+    // exactly the ones nothing else writes any more and therefore the ones most likely to rot.
+    for (uint32_t version : {Footer::kFormatVersion1, Footer::kFormatVersion2}) {
+        Footer older = *footer;
+        older.format_version = version;
+        const std::string encoded = older.encode();
+        emit(root + "/footer", "v" + std::to_string(version), encoded.data(), encoded.size());
+    }
     // The framed index block, taken by its recorded handle: a whole valid block for the framing
     // decoder, compression byte and CRC included.
     emit(root + "/block", "index", bytes.data() + footer->index.offset, footer->index.length);
