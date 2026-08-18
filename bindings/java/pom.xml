@@ -82,7 +82,7 @@
          partitioned store: it takes a log through three callbacks and knows nothing about who
          implements them. The version tracks bindings/kafka-streams-v3 so the worked examples are
          checked against the same client the Streams adapter is. -->
-    <kafka.version>3.9.1</kafka.version>
+    <kafka.version>3.9.2</kafka.version>
     <testcontainers.version>1.21.3</testcontainers.version>
     <!-- Must match the slf4j-api Testcontainers brings (1.7.x): a 2.x binding
          on a 1.x api silently binds nothing and logs "Failed to load class

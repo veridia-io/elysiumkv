@@ -36,7 +36,7 @@ import org.testcontainers.kafka.KafkaContainer;
  * machine was supposed to be able to run it.
  */
 final class KafkaEnvironment {
-    private static final String IMAGE = "apache/kafka:3.9.1";
+    private static final String IMAGE = "apache/kafka:3.9.2";
 
     private static KafkaContainer container;
     private static String bootstrap;
