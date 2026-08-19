@@ -97,12 +97,19 @@ public:
                        ? make_transient_options(store_, Duration(60'000), Duration(120'000),
                                                 config.memtable_bytes)
                    : config.split_stores
-                       ? make_tiered_options(store_, Duration(50), config.compression,
-                                             config.memtable_bytes)
+                       ? make_tiered_options(
+                             store_,
+                             Duration(config.tier_max_age_ms != 0
+                                          ? static_cast<int64_t>(config.tier_max_age_ms)
+                                          : 50),
+                             config.compression, config.memtable_bytes)
                        : make_options(store_, config.compression, config.memtable_bytes);
         // Owned here, so it outlives the close-and-reopen: a budget that reset with the
         // instance would not be a *shared* budget, and the interesting moment is the one
         // where the closed instance's arena comes back off it.
+        if (config.tier0_max_bytes != 0 && options_.tiers.size() > 1) {
+            options_.tiers[0].max_bytes = config.tier0_max_bytes;
+        }
         if (config.budget_bytes != 0) {
             budget_ = std::make_shared<MemoryBudget>(config.budget_bytes);
             options_.memory_budget = budget_;
@@ -206,6 +213,41 @@ public:
                                "configuration tested nothing: lower it, or raise the write volume "
                                "until an L0 closure exceeds it"};
         }
+        // **A tiered configuration that never moves a file tests placement, not migration.** The
+        // migrator copies an object between stores byte for byte and *renumbers* it, under reads —
+        // which is exactly the shape an oracle catches and a unit test has to think to check. This
+        // suite ran with `migrations == 0` in every configuration, including the one named for it,
+        // until the byte cap replaced the age bound as the driver.
+        if (config_.tier0_max_bytes != 0 && migrations_seen_ + db_->stats().migrations == 0) {
+            return DiffFailure{ops.size(),
+                               "no file was ever migrated between tiers, so this configuration "
+                               "tested nothing: lower tier0_max_bytes, or raise the write volume "
+                               "until the hot tier exceeds it"};
+        }
+        // **A cache that never misses tests half of a cache.** `cache_on_write` populates on every
+        // write, so a layer sized above the working set serves everything and the refill path —
+        // walk outward, fetch, fill on the way back, and slice the fetched chunk back to what was
+        // asked for — never runs. That path is also the only place `cache_fetch_granularity` has
+        // any effect, so this check covers both knobs: with a granularity set and misses > 0,
+        // every one of those misses went through `plan_fetch` with it.
+        if (config_.cached) {
+            uint64_t hits = 0;
+            uint64_t misses = 0;
+            for (const auto& tier : options_.tiers) {
+                if (tier.store == nullptr) continue;
+                if (CacheBlobStore* cache = tier.store->as_cache()) {
+                    hits += cache->hits();
+                    misses += cache->misses();
+                }
+            }
+            if (hits == 0 || misses == 0) {
+                return DiffFailure{ops.size(),
+                                   std::string("the blob cache ") +
+                                       (misses == 0 ? "never missed" : "never hit") +
+                                       ", so this configuration tested half a cache: resize the "
+                                       "layers in wrap_in_cache_chain relative to the working set"};
+            }
+        }
         return std::nullopt;
     }
 
@@ -218,6 +260,7 @@ private:
             sheds_seen_ += db_->stats().budget_sheds;
             density_compactions_seen_ += engine().density_compactions_for_test();
             trims_seen_ += db_->stats().compactions_trimmed;
+            migrations_seen_ += db_->stats().migrations;
         }
         db_.reset();
     }
@@ -621,6 +664,7 @@ private:
     uint64_t sheds_seen_ = 0;
     uint64_t density_compactions_seen_ = 0;
     uint64_t trims_seen_ = 0;
+    uint64_t migrations_seen_ = 0;
     std::unique_ptr<DB> db_;
     Oracle oracle_;
     Oracle flushed_;

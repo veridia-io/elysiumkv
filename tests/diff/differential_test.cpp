@@ -157,10 +157,25 @@ INSTANTIATE_TEST_SUITE_P(
         // 1 MiB memtable, so this pressure had never been generated — and the first run of it
         // found a committed write reverting to its previous value
         // (`compact_l0_file_off_its_tier` choosing by write time rather than by file number).
+        //
+        // **That bug was in the L0-off-tier compaction, not in the migrator, and for a long time
+        // the migrator was the half this never reached.** The name promised migration; the counter
+        // said zero. The cause is worth writing down because it is not a tuning slip: a compaction
+        // output is placed by the age of the *oldest* write it contains, and an output that merges
+        // an existing L1 file inherits that file's age. Past the first few seconds of any run,
+        // every output is therefore already older than a 50 ms bound at the moment it is written,
+        // so placement puts it on the cold tier at birth and the migrator is left with nothing to
+        // move. Age cannot drive migration in a store that keeps rewriting.
+        //
+        // So the driver is capacity instead: the hot tier is unbounded by age and capped by bytes
+        // below what L1 actually holds, and eviction moves the oldest file down repeatedly. It
+        // depends on no clock, which also makes it reproducible — the property this suite is for.
         ReplayConfig{.name = "TieredHeavyMigration",
                      .compression = Compression::Zstd,
                      .split_stores = true,
-                     .memtable_bytes = 64u << 10},
+                     .memtable_bytes = 64u << 10,
+                     .tier0_max_bytes = 4u << 10,
+                     .tier_max_age_ms = 3'600'000},
         // ARCHITECTURE.md "A process-wide memory budget" — a budget *below* the memtable size, so the arena crosses it before the
         // memtable is full and the flush is forced for a reason unrelated to the memtable.
         // That is the perturbation worth putting under the oracle.
