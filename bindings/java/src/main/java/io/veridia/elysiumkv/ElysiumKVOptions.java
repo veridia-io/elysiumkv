@@ -282,6 +282,38 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * The same, keyed by a manager the engine implements rather than one of yours.
+     *
+     * <p>See {@link BuiltinEncryptionKeyManager} for why this is the shape to prefer when it fits:
+     * nothing crosses back into the JVM per object, and the envelope layout comes from a single
+     * implementation.
+     */
+    public ElysiumKVOptions encryptWith(String id, BuiltinEncryptionKeyManager keys,
+                                        long chunkBytes) {
+        register(id, keys, chunkBytes);
+        Native.optionsSetPrimaryEncryptionProvider(handle(), id);
+        return this;
+    }
+
+    /** Registers a built-in manager for reading without making it primary. */
+    public ElysiumKVOptions alsoDecryptWith(String id, BuiltinEncryptionKeyManager keys,
+                                            long chunkBytes) {
+        register(id, keys, chunkBytes);
+        return this;
+    }
+
+    private void register(String id, BuiltinEncryptionKeyManager keys, long chunkBytes) {
+        if (id == null || id.isEmpty()) {
+            throw new IllegalArgumentException("the empty provider id is reserved for the passthrough");
+        }
+        if (keys == null) throw new IllegalArgumentException("a key manager is required");
+        if (chunkBytes < 0) {
+            throw new IllegalArgumentException("chunkBytes must not be negative: " + chunkBytes);
+        }
+        keys.register(handle(), id, chunkBytes);
+    }
+
     public ElysiumKVOptions manifestEditsPerGeneration(int edits) {
         manifestEditsPerGeneration = edits;
         return this;

@@ -8,11 +8,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -203,6 +206,103 @@ class RemoteStorageTest {
                 assertEquals(KEYS - 1, scanned, "the scan agrees with the point reads");
             }
         }
+    }
+
+    private static final String KMS_CANARY = "CANARY-UNDER-KMS-0123456789abcdef";
+
+    /**
+     * Data keys minted by a real KMS, over a local store so the bytes can be looked at.
+     *
+     * <p><b>Compression is off at every level here, unlike the shared options.</b> ZSTD hides a
+     * canary just as thoroughly as a cipher does, so with it on the disk check below passes against
+     * a store that encrypted nothing — which is exactly the failure this test exists to catch.
+     */
+    @Test
+    void aKmsBackedStoreEncryptsAndReopens(@TempDir Path dir) throws IOException {
+        final String keyId = RemoteEnvironment.requireKmsKeyId();
+
+        try (Fixture fixture = new Fixture(dir)) {
+            ElysiumKV db = fixture.own(ElysiumKV.open(
+                    plainOptions(fixture, fixture.catalog(CatalogKind.DISK),
+                                 fixture.store(StoreKind.DISK, "hot"))
+                            .encryptWith("kms", kms(keyId), 0)));
+            for (int i = 0; i < 200; ++i) {
+                db.put(TestSupport.key(i), TestSupport.bytes(KMS_CANARY + i));
+            }
+            db.flush();
+            db.compactLevel(0);
+            db.close();
+
+            // **The disk check, not just a round trip.** A build that called KMS and then wrote
+            // plaintext would pass the read back, because the read back is what a passthrough does.
+            try (Stream<Path> files = Files.walk(dir)) {
+                List<Path> regular =
+                        files.filter(Files::isRegularFile).collect(Collectors.toList());
+                for (Path file : regular) {
+                    String contents =
+                            new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
+                    assertTrue(contents.indexOf(KMS_CANARY) < 0, "plaintext found in " + file);
+                }
+            }
+
+            // A second manager on the same key: the readers of the first run are gone, so every
+            // envelope goes back to KMS to be unwrapped.
+            ElysiumKV reopened = fixture.own(ElysiumKV.open(
+                    plainOptions(fixture, fixture.catalog(CatalogKind.DISK),
+                                 fixture.store(StoreKind.DISK, "hot"))
+                            .encryptWith("kms", kms(keyId), 0)));
+            for (int i = 0; i < 200; ++i) {
+                try (Pinned found = reopened.get(TestSupport.key(i))) {
+                    assertNotNull(found, "key " + i + " vanished under KMS");
+                    assertEquals(KMS_CANARY + i, TestSupport.string(found.toByteArray()));
+                }
+            }
+        }
+    }
+
+    /**
+     * The deployment shape: objects in S3, the manifest in DynamoDB, and the keys that protect them
+     * in KMS — none of the three on this machine.
+     */
+    @Test
+    void aRemoteStoreIsEncryptedByRemoteKeys(@TempDir Path dir) throws IOException {
+        final String keyId = RemoteEnvironment.requireKmsKeyId();
+
+        try (Fixture fixture = new Fixture(dir)) {
+            ElysiumKV db = fixture.own(ElysiumKV.open(
+                    options(fixture, fixture.catalog(CatalogKind.DYNAMO),
+                            fixture.store(StoreKind.S3, "cold"))
+                            .encryptWith("kms", kms(keyId), 0)));
+            for (int i = 0; i < KEYS; ++i) db.put(TestSupport.key(i), value(i));
+            db.flush();
+            db.compactLevel(0);
+
+            for (int i = 0; i < KEYS; ++i) {
+                try (Pinned found = db.get(TestSupport.key(i))) {
+                    assertArrayEquals(value(i), found.toByteArray());
+                }
+            }
+        }
+    }
+
+    /** The shared options with compression off, so a plaintext scan means what it says. */
+    private static ElysiumKVOptions plainOptions(Fixture fixture, ManifestCatalog catalog,
+                                                 BlobStore store) {
+        return fixture.own(new ElysiumKVOptions()
+                                   .manifestCatalog(catalog)
+                                   .memtableBytes(32 * 1024)
+                                   .blockBytes(1024)
+                                   .paranoidChecks(true)
+                                   .addTier(store, Durability.DURABLE, 0, 0, 0)
+                                   .level(0, Compression.NONE, 0, 4, 8, 12, 0)
+                                   .level(1, Compression.NONE, 0, 0, 0, 0, 0));
+    }
+
+    private static AwsKmsEncryptionKeyManager kms(String keyId) {
+        return AwsKmsEncryptionKeyManager.builder(keyId)
+                .endpoint(RemoteEnvironment.requireEndpoint())
+                .credentials(RemoteEnvironment.ACCESS_KEY, RemoteEnvironment.SECRET_KEY)
+                .build();
     }
 
     /**

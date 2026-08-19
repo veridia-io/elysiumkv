@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -592,6 +593,70 @@ TEST_F(CApiTest, AKeyManagerSuppliedThroughTheAbiEncryptsTheStore) {
                                    std::istreambuf_iterator<char>());
         EXPECT_EQ(contents.find(canary), std::string::npos) << entry.path();
     }
+}
+
+TEST_F(CApiTest, TheBuiltInStaticKeyManagerEncryptsTheStore) {
+    std::array<uint8_t, 32> master{};
+    for (size_t i = 0; i < master.size(); ++i) master[i] = static_cast<uint8_t>(i);
+
+    elysiumkv_options* options = make_options();
+    ASSERT_EQ(elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+                  options, "static", master.data(), master.size(), 0),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_primary_encryption_provider(options, "static"), ELYSIUMKV_OK);
+
+    elysiumkv_db* db = nullptr;
+    ASSERT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_OK);
+    elysiumkv_options_destroy(options);
+
+    const std::string canary = "CANARY-UNDER-A-STATIC-KEY-01234567";
+    for (int i = 0; i < 64; ++i) {
+        const std::string key = "k" + std::to_string(i);
+        ASSERT_EQ(put(db, key.c_str(), canary.c_str()), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    elysiumkv_close(db);
+
+    for (const auto& entry : std::filesystem::directory_iterator(store_dir_)) {
+        if (!entry.is_regular_file()) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string contents((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+        EXPECT_EQ(contents.find(canary), std::string::npos) << entry.path();
+    }
+}
+
+TEST_F(CApiTest, TheBuiltInManagersRefuseUnusableConfiguration) {
+    std::array<uint8_t, 32> master{};
+    elysiumkv_options* options = elysiumkv_options_create();
+
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+                  options, "", master.data(), master.size(), 0),
+              ELYSIUMKV_OK)
+        << "the empty id belongs to the passthrough";
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption_with_static_key(options, "short",
+                                                                         master.data(), 31, 0),
+              ELYSIUMKV_OK)
+        << "a 31-byte master key is not an AES-256 key";
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption_with_static_key(options, "null", nullptr,
+                                                                         32, 0),
+              ELYSIUMKV_OK);
+
+    EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption_with_kms(options, "kms", nullptr, nullptr,
+                                                                  nullptr, nullptr, nullptr, 0, 0),
+              ELYSIUMKV_OK)
+        << "a KMS manager without a key id is not a configuration";
+
+    // Without the AWS build this is refused for a different reason, and the message has to name the
+    // build option either way — the same contract the remote constructors keep.
+    if ((elysiumkv_features() & ELYSIUMKV_FEATURE_AWS) == 0) {
+        EXPECT_NE(elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+                      options, "kms", "alias/whatever", nullptr, nullptr, nullptr, nullptr, 0, 0),
+                  ELYSIUMKV_OK);
+        EXPECT_NE(std::string(elysiumkv_last_error()).find("ELYSIUMKV_BUILD_AWS"), std::string::npos)
+            << elysiumkv_last_error();
+    }
+    elysiumkv_options_destroy(options);
 }
 
 TEST_F(CApiTest, TheReservedProviderIdIsRefusedThroughTheAbi) {

@@ -977,6 +977,74 @@ void JNICALL options_add_aes256_gcm_encryption(JNIEnv* env, jclass, jlong option
     });
 }
 
+/* The engine zeroes the copy it keeps; this zeroes the one this file made. Spelled out rather than
+ * borrowed from the C++ header, because `elysiumkv.h` is the only engine header here by design. */
+void wipe(uint8_t* data, size_t size) {
+    volatile uint8_t* p = data;
+    while (size-- > 0) *p++ = 0;
+}
+
+void JNICALL options_add_aes256_gcm_encryption_with_static_key(JNIEnv* env, jclass, jlong options,
+                                                               jstring id, jbyteArray master_key,
+                                                               jlong chunk_bytes) {
+    guard_void(env, [&] {
+        if (id == nullptr || master_key == nullptr) {
+            throw_glue(env, "elysiumkv JNI: an encryption provider needs an id and a master key");
+            return;
+        }
+        const jsize length = env->GetArrayLength(master_key);
+        // Sized here as well as below, because the scratch buffer is fixed and a wrong length would
+        // otherwise be a read past it rather than a refusal.
+        if (length != 32) {
+            throw_glue(env, "elysiumkv JNI: the master key must be exactly 32 bytes");
+            return;
+        }
+
+        Utf8 id_utf8(env, id);
+        if (!id_utf8.valid()) return;
+
+        // Copied out rather than pinned: `JNI_ABORT` on a non-copying VM would leave the wipe
+        // reaching into the Java array itself, which is the caller's to decide about.
+        uint8_t key[32];
+        env->GetByteArrayRegion(master_key, 0, length, reinterpret_cast<jbyte*>(key));
+        if (env->ExceptionCheck() == JNI_FALSE) {
+            check(env, elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+                           as_options(options), id_utf8.c_str(), key, sizeof(key),
+                           static_cast<size_t>(chunk_bytes)));
+        }
+        wipe(key, sizeof(key));
+    });
+}
+
+void JNICALL options_add_aes256_gcm_encryption_with_kms(JNIEnv* env, jclass, jlong options,
+                                                        jstring id, jstring key_id, jstring region,
+                                                        jstring endpoint, jstring access_key,
+                                                        jstring secret_key, jlong timeout_ms,
+                                                        jlong chunk_bytes) {
+    guard_void(env, [&] {
+        if (id == nullptr || key_id == nullptr) {
+            throw_glue(env, "elysiumkv JNI: a KMS key manager needs a provider id and a key id");
+            return;
+        }
+        Utf8 id_utf8(env, id);
+        Utf8 key_utf8(env, key_id);
+        Utf8 region_utf8(env, region);
+        Utf8 endpoint_utf8(env, endpoint);
+        Utf8 access_utf8(env, access_key);
+        Utf8 secret_utf8(env, secret_key);
+        if (!id_utf8.valid() || !key_utf8.valid() || utf8_failed(region_utf8, region) ||
+            utf8_failed(endpoint_utf8, endpoint) || utf8_failed(access_utf8, access_key) ||
+            utf8_failed(secret_utf8, secret_key)) {
+            return;  // OOM already pending
+        }
+
+        check(env, elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+                       as_options(options), id_utf8.c_str(), key_utf8.c_str(), region_utf8.c_str(),
+                       endpoint_utf8.c_str(), access_utf8.c_str(), secret_utf8.c_str(), timeout_ms,
+                       static_cast<size_t>(chunk_bytes)));
+    });
+}
+
 void JNICALL options_set_primary_encryption_provider(JNIEnv* env, jclass, jlong options,
                                                      jstring id) {
     guard_void(env, [&] {
@@ -1313,6 +1381,13 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char*>("optionsAddAes256GcmEncryption"),
      const_cast<char*>("(JLjava/lang/String;Lio/veridia/elysiumkv/EncryptionKeyManager;J)V"),
      reinterpret_cast<void*>(options_add_aes256_gcm_encryption)},
+    {const_cast<char*>("optionsAddAes256GcmEncryptionWithStaticKey"),
+     const_cast<char*>("(JLjava/lang/String;[BJ)V"),
+     reinterpret_cast<void*>(options_add_aes256_gcm_encryption_with_static_key)},
+    {const_cast<char*>("optionsAddAes256GcmEncryptionWithKms"),
+     const_cast<char*>("(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+                       "Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JJ)V"),
+     reinterpret_cast<void*>(options_add_aes256_gcm_encryption_with_kms)},
     {const_cast<char*>("optionsSetPrimaryEncryptionProvider"),
      const_cast<char*>("(JLjava/lang/String;)V"),
      reinterpret_cast<void*>(options_set_primary_encryption_provider)},

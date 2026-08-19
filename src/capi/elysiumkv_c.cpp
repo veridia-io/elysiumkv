@@ -8,6 +8,7 @@
 #include "cache/sharded_lru.hpp"
 #include "elysiumkv/db.hpp"
 #include "elysiumkv/aes256_gcm_encryption_provider.hpp"
+#include "elysiumkv/static_encryption_key_manager.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
 #include "elysiumkv/disk_blob_store.hpp"
@@ -20,6 +21,7 @@
 // linkage here, so a second TU would get a second slot and a failure reported by
 // one would be invisible to `elysiumkv_last_error()` reading the other.
 #ifdef ELYSIUMKV_WITH_AWS
+#  include "elysiumkv/aws_kms_encryption_key_manager.hpp"
 #  include "elysiumkv/dynamo_manifest_catalog.hpp"
 #  include "elysiumkv/s3_blob_store.hpp"
 #  include "elysiumkv/s3_manifest_catalog.hpp"
@@ -130,11 +132,12 @@ constexpr size_t kDataKeyBytes = 32;
 
 /// A key manager supplied by a binding. Holds the vtable by value: the caller's struct is a
 /// description, not a handle, and copying it means the caller may let theirs go.
-class VtableKeyManager final : public EncryptionKeyManager {
+class VtableEncryptionKeyManager final : public EncryptionKeyManager {
 public:
-    explicit VtableKeyManager(const elysiumkv_encryption_key_manager& vtable) : vtable_(vtable) {}
+    explicit VtableEncryptionKeyManager(const elysiumkv_encryption_key_manager& vtable)
+        : vtable_(vtable) {}
 
-    ~VtableKeyManager() override {
+    ~VtableEncryptionKeyManager() override {
         if (vtable_.destroy != nullptr) vtable_.destroy(vtable_.context);
     }
 
@@ -503,7 +506,31 @@ elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
         }
 
         auto provider = Aes256GcmEncryptionProvider::open(
-            std::make_shared<VtableKeyManager>(*keys), chunk_bytes);
+            std::make_shared<VtableEncryptionKeyManager>(*keys), chunk_bytes);
+        if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
+        options->options.encryption.providers[id] = *provider;
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+    elysiumkv_options* options, const char* id, const uint8_t* master_key, size_t master_key_len,
+    size_t chunk_bytes) {
+    return guard([&]() -> elysiumkv_status {
+        if (const elysiumkv_status bad = check_provider_id(
+                options, id, "elysiumkv_options_add_aes256_gcm_encryption_with_static_key");
+            bad != ELYSIUMKV_OK) {
+            return bad;
+        }
+        if (master_key == nullptr || master_key_len != kDataKeyBytes) {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption_with_static_key: the master "
+                        "key must be exactly 32 bytes");
+        }
+
+        auto keys = StaticEncryptionKeyManager::open(Slice(master_key, master_key_len));
+        if (!keys) return fail(keys.error(), "master key rejected");
+        auto provider = Aes256GcmEncryptionProvider::open(*keys, chunk_bytes);
         if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
         options->options.encryption.providers[id] = *provider;
         return ELYSIUMKV_OK;
@@ -918,7 +945,7 @@ namespace {
 elysiumkv_status no_aws(const char* what) {
     return fail(Status::Config,
                 std::string(what) + ": this library was built without ELYSIUMKV_BUILD_AWS, so the "
-                                    "S3 and DynamoDB implementations are not compiled in "
+                                    "S3, DynamoDB and KMS implementations are not compiled in "
                                     "(elysiumkv_features() reports ELYSIUMKV_FEATURE_AWS when they are)");
 }
 }  // namespace
@@ -928,6 +955,12 @@ elysiumkv_status elysiumkv_s3_blob_store_create(const char*, const char*, const 
                                             const char*, void** out) {
     if (out != nullptr) *out = nullptr;
     return no_aws("elysiumkv_s3_blob_store_create");
+}
+
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+    elysiumkv_options*, const char*, const char*, const char*, const char*, const char*,
+    const char*, int64_t, size_t) {
+    return no_aws("elysiumkv_options_add_aes256_gcm_encryption_with_kms");
 }
 
 elysiumkv_status elysiumkv_s3_manifest_catalog_create(const char*, const char*, const char*,
@@ -1038,6 +1071,40 @@ elysiumkv_status elysiumkv_s3_manifest_catalog_create(const char* bucket, const 
         auto catalog = S3ManifestCatalog::open(*options);
         if (!catalog) return fail(catalog.error(), "elysiumkv_s3_manifest_catalog_create failed");
         *out = new std::shared_ptr<ManifestCatalog>(std::move(*catalog));
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+    elysiumkv_options* options, const char* id, const char* key_id, const char* region,
+    const char* endpoint, const char* access_key, const char* secret_key, int64_t timeout_ms,
+    size_t chunk_bytes) {
+    return guard([&]() -> elysiumkv_status {
+        if (const elysiumkv_status bad = check_provider_id(
+                options, id, "elysiumkv_options_add_aes256_gcm_encryption_with_kms");
+            bad != ELYSIUMKV_OK) {
+            return bad;
+        }
+        if (key_id == nullptr || *key_id == '\0') {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption_with_kms: key_id is required");
+        }
+
+        KmsOptions kms;
+        kms.key_id = key_id;
+        if (region != nullptr && *region != '\0') kms.region = region;
+        kms.endpoint = text(endpoint);
+        kms.access_key = text(access_key);
+        kms.secret_key = text(secret_key);
+        auto wait = duration(timeout_ms, kms.timeout);
+        if (!wait) return fail(wait.error(), "a negative KMS timeout is not a timeout");
+        kms.timeout = *wait;
+
+        auto keys = AwsKmsEncryptionKeyManager::open(std::move(kms));
+        if (!keys) return fail(keys.error(), "KMS key manager configuration rejected");
+        auto provider = Aes256GcmEncryptionProvider::open(*keys, chunk_bytes);
+        if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
+        options->options.encryption.providers[id] = *provider;
         return ELYSIUMKV_OK;
     });
 }

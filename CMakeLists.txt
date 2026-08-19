@@ -109,6 +109,7 @@ add_library(elysiumkv STATIC
     src/crypt/encryption.cpp
     src/crypt/aes256_gcm_encryption_provider.cpp
     src/crypt/no_encryption_provider.cpp
+    src/crypt/static_encryption_key_manager.cpp
     src/db/db_impl.cpp
     src/db/level_config.cpp
     src/blob/disk_blob_store.cpp

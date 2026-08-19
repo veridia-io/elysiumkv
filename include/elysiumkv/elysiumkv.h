@@ -402,6 +402,35 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
     elysiumkv_options*, const char* id, const elysiumkv_encryption_key_manager*,
     size_t chunk_bytes);
 
+/* The same construction, keyed by one master key held in this process rather than by a callback.
+ *
+ * **A data key is still minted per object and wrapped under the master key**, because the engine's
+ * nonces are derived from the chunk index: one key across every object would repeat nonces, which
+ * breaks GCM outright. So this is a key-custody choice, not a weaker construction.
+ *
+ * `master_key` must be exactly 32 bytes. It is copied into storage the engine zeroes
+ * deterministically; the caller's buffer is untouched and remains theirs to wipe.
+ *
+ * Suitable where the master key arrives from a secrets manager at startup. Where it must never
+ * enter the process at all, use the KMS form below or supply a manager through the vtable. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+    elysiumkv_options*, const char* id, const uint8_t* master_key, size_t master_key_len,
+    size_t chunk_bytes);
+
+/* The same construction over AWS KMS: `GenerateDataKey` per object, `Decrypt` to reopen one, so the
+ * key that wraps them never enters this process.
+ *
+ * Absent unless the library was built with the AWS SDK — ELYSIUMKV_CONFIG naming the build option
+ * otherwise, like the remote seams below. NULL for `region`, `endpoint` or the credentials means
+ * the same as it does there; zero for `timeout_ms` means the built-in default.
+ *
+ * **`key_id` is what a rotation changes.** The wrapped form records which key produced it, so files
+ * written under an earlier one keep opening without it being named here. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+    elysiumkv_options*, const char* id, const char* key_id, const char* region,
+    const char* endpoint, const char* access_key, const char* secret_key, int64_t timeout_ms,
+    size_t chunk_bytes);
+
 /* Registers an embedder's own construction under `id`. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_encryption_provider(
     elysiumkv_options*, const char* id, const elysiumkv_encryption_provider*);

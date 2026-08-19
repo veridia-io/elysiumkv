@@ -34,6 +34,7 @@ add_executable(elysiumkv_tests
     unit/concat_iterator_test.cpp
     unit/encrypted_object_test.cpp
     unit/encryption_test.cpp
+    unit/encryption_key_manager_test.cpp
     unit/reverse_iteration_test.cpp
     unit/truncate_test.cpp
     unit/delete_range_test.cpp

@@ -106,6 +106,110 @@ class EncryptionTest {
         }
     }
 
+    private static final String MASTER_HEX =
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    private static byte[] masterKey() {
+        byte[] key = new byte[32];
+        for (int i = 0; i < key.length; ++i) key[i] = (byte) i;
+        return key;
+    }
+
+    /**
+     * The built-in manager, end to end: the same disk check as the Java-implemented one, because
+     * "the call did not throw" is equally consistent with a store that encrypted nothing.
+     */
+    @Test
+    void theStaticKeyManagerEncryptsTheStore(@TempDir Path dir) throws IOException {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = PinLeakExtension.watch(support.own(ElysiumKV.open(
+                    support.options().encryptWith("static",
+                                                  StaticEncryptionKeyManager.of(masterKey()), 0))));
+            for (int i = 0; i < 200; ++i) {
+                db.put(TestSupport.key(i), TestSupport.bytes(CANARY + i));
+            }
+            db.flush();
+            db.compactLevel(0);
+            for (int i = 0; i < 200; ++i) {
+                try (Pinned found = db.get(TestSupport.key(i))) {
+                    assertEquals(CANARY + i, TestSupport.string(found.toByteArray()));
+                }
+            }
+            assertNoPlaintextUnder(dir);
+            db.close();
+        }
+    }
+
+    /**
+     * Reopening is what exercises the unwrap, and the two spellings of one key have to reach the
+     * same provider — a store written through {@code of} that {@code fromHex} could not read would
+     * be a parser bug nothing else here would catch.
+     */
+    @Test
+    void aStaticKeyStoreReopensUnderEitherSpellingOfTheKey(@TempDir Path dir) throws IOException {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = support.own(ElysiumKV.open(
+                    support.options().encryptWith("static",
+                                                  StaticEncryptionKeyManager.of(masterKey()), 0)));
+            for (int i = 0; i < 50; ++i) {
+                db.put(TestSupport.key(i), TestSupport.bytes(CANARY + i));
+            }
+            db.flush();
+            db.close();
+
+            ElysiumKV reopened = PinLeakExtension.watch(support.own(ElysiumKV.open(
+                    support.options().encryptWith("static",
+                                                  StaticEncryptionKeyManager.fromHex(MASTER_HEX),
+                                                  0))));
+            for (int i = 0; i < 50; ++i) {
+                try (Pinned found = reopened.get(TestSupport.key(i))) {
+                    assertEquals(CANARY + i, TestSupport.string(found.toByteArray()));
+                }
+            }
+            reopened.close();
+        }
+    }
+
+    /**
+     * <b>The wrong master key must fail, and fail as configuration.</b> An engine that served
+     * something anyway would be the worst outcome available here, so this is asserted rather than
+     * assumed from the cipher's C++ tests.
+     */
+    @Test
+    void anotherMasterKeyCannotReadTheStore(@TempDir Path dir) throws IOException {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV db = support.own(ElysiumKV.open(
+                    support.options().encryptWith("static",
+                                                  StaticEncryptionKeyManager.of(masterKey()), 0)));
+            db.put(TestSupport.key(1), TestSupport.bytes(CANARY));
+            db.flush();
+            db.close();
+
+            byte[] wrong = masterKey();
+            wrong[0] ^= 0x01;
+            ElysiumKV other = support.own(ElysiumKV.open(
+                    support.options().encryptWith("static", StaticEncryptionKeyManager.of(wrong),
+                                                  0)));
+            ElysiumKVException thrown =
+                    assertThrows(ElysiumKVException.class, () -> other.get(TestSupport.key(1)));
+            assertTrue(thrown instanceof ConfigException,
+                       () -> "a key that cannot unwrap is a configuration to fix, not damage to "
+                               + "restore from: " + thrown);
+            other.close();
+        }
+    }
+
+    private static void assertNoPlaintextUnder(Path dir) throws IOException {
+        try (Stream<Path> files = Files.walk(dir)) {
+            java.util.List<Path> regular =
+                    files.filter(Files::isRegularFile).collect(java.util.stream.Collectors.toList());
+            for (Path file : regular) {
+                String contents = new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
+                assertTrue(contents.indexOf(CANARY) < 0, "plaintext found in " + file);
+            }
+        }
+    }
+
     /** The reserved id belongs to the passthrough, and a null manager is not a configuration. */
     @Test
     void badConfigurationIsRefusedBeforeItReachesTheEngine(@TempDir Path dir) throws IOException {
@@ -113,10 +217,27 @@ class EncryptionTest {
             ElysiumKVOptions options = support.options();
             assertThrows(IllegalArgumentException.class,
                          () -> options.encryptWith("", new DirectKeys(), 0));
+            // The cast is required, not decorative: encryptWith is overloaded on the two kinds of
+            // key manager, so a bare null names neither.
             assertThrows(IllegalArgumentException.class,
-                         () -> options.encryptWith("id", null, 0));
+                         () -> options.encryptWith("id", (EncryptionKeyManager) null, 0));
             assertThrows(IllegalArgumentException.class,
                          () -> options.encryptWith("id", new DirectKeys(), -1));
+
+            assertThrows(IllegalArgumentException.class,
+                         () -> options.encryptWith("", StaticEncryptionKeyManager.of(new byte[32]),
+                                                   0));
+            assertThrows(IllegalArgumentException.class,
+                         () -> options.encryptWith("id", (BuiltinEncryptionKeyManager) null, 0));
+            assertThrows(IllegalArgumentException.class,
+                         () -> options.encryptWith("id", StaticEncryptionKeyManager.of(new byte[32]),
+                                                   -1));
+            assertThrows(IllegalArgumentException.class,
+                         () -> StaticEncryptionKeyManager.of(new byte[31]));
+            assertThrows(IllegalArgumentException.class,
+                         () -> StaticEncryptionKeyManager.fromHex("nothex"));
+            assertThrows(IllegalArgumentException.class,
+                         () -> AwsKmsEncryptionKeyManager.builder(""));
         }
     }
 }
