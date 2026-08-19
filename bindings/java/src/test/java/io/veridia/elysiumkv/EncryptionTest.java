@@ -174,6 +174,10 @@ class EncryptionTest {
      * <b>The wrong master key must fail, and fail as configuration.</b> An engine that served
      * something anyway would be the worst outcome available here, so this is asserted rather than
      * assumed from the cipher's C++ tests.
+     *
+     * <p>It fails at {@code open}, not at the first read, because the manifest is encrypted too —
+     * so the mistake is caught before the store is usable rather than by whichever query happened
+     * to touch an encrypted file first.
      */
     @Test
     void anotherMasterKeyCannotReadTheStore(@TempDir Path dir) throws IOException {
@@ -187,15 +191,17 @@ class EncryptionTest {
 
             byte[] wrong = masterKey();
             wrong[0] ^= 0x01;
-            ElysiumKV other = support.own(ElysiumKV.open(
-                    support.options().encryptWith("static", StaticEncryptionKeyManager.of(wrong),
-                                                  0)));
-            ElysiumKVException thrown =
-                    assertThrows(ElysiumKVException.class, () -> other.get(TestSupport.key(1)));
+            ElysiumKVException thrown = assertThrows(
+                    ElysiumKVException.class,
+                    () -> ElysiumKV.open(support.options().encryptWith(
+                            "static", StaticEncryptionKeyManager.of(wrong), 0)));
             assertTrue(thrown instanceof ConfigException,
                        () -> "a key that cannot unwrap is a configuration to fix, not damage to "
                                + "restore from: " + thrown);
-            other.close();
+            // The status alone would leave an operator bisecting their options; the binding has to
+            // carry the engine's explanation across the boundary too.
+            assertTrue(thrown.getMessage().contains("static"),
+                       () -> "the message must name the provider involved: " + thrown.getMessage());
         }
     }
 

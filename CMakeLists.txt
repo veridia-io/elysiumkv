@@ -126,6 +126,7 @@ add_library(elysiumkv STATIC
     src/memtable/skiplist_memtable.cpp
     src/manifest/disk_manifest_catalog.cpp
     src/version/version.cpp
+    src/version/manifest_payload.cpp
     src/version/version_edit.cpp
     src/version/version_set.cpp
     src/sst/block_builder.cpp

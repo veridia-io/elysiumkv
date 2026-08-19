@@ -515,9 +515,9 @@ private:
     bool published_level_counts_ = false;
 
     /// Resolved once at open: the configured providers plus the passthrough under `""`, and the id
-    /// new objects are written under. Immutable afterwards, so no lock guards it.
-    std::map<std::string, std::shared_ptr<EncryptionProvider>> providers_;
-    std::string primary_provider_;
+    /// new objects are written under. Immutable afterwards, so no lock guards it — which is also
+    /// what lets `VersionSet` hold a reference to it for the life of the database.
+    ProviderRegistry encryption_;
 
     mutable std::mutex mem_mutex_;
     /// The floor a write is refused against, **guarded by `mem_mutex_`** and published by

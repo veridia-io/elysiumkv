@@ -106,7 +106,9 @@ learns about it, and compression still sees real data.
 
 ### The manifest is snapshots plus edits
 
-The file list lives in numbered, fixed-width-named objects. A generation is one snapshot plus a
+The file list lives in numbered, fixed-width-named objects. Each payload is compressed and sealed by
+the engine before the catalog sees it — the catalog stores opaque bytes and chunks them if it must
+(see *Encryption sits at the object boundary*). A generation is one snapshot plus a
 sequence of edits: the snapshot bounds how much must be replayed at open, and the edits keep the
 common case — one flush, one compaction — a small append instead of a rewrite of the whole list.
 Rolling to a new generation is where the next snapshot is written.
@@ -537,10 +539,31 @@ registered until no file names it. The id is data: renaming one orphans every fi
 it. The passthrough holds the reserved empty id and is primary unless another is named, so an
 unencrypted store is not a special case and there is no null provider anywhere after open.
 
-**Scope: SST contents.** `FileMetadata` carries each file's smallest and largest key, so user key
-bytes reach the manifest in the clear. That is defence in depth against a leaked bucket or a lost
-disk, and it is deliberately not described as more than that; encrypting the manifest is a separate
-seam and a separate format change.
+**The manifest has a second boundary, and needs one.** `FileMetadata` carries each file's smallest
+and largest key, so an engine that sealed every SST and left the manifest readable would still put
+user keys in the bucket. Manifest payloads are therefore framed and sealed by the engine before the
+catalog ever sees them — `ManifestCatalog` promises bytes are opaque, and a catalog that encrypted
+would be a catalog that had to be trusted, including every embedder's own.
+
+Its shape differs from the object boundary in three ways, each forced:
+
+- **Compress, then encrypt, then chunk.** Ciphertext does not compress, so encrypting first would
+  inflate every manifest write; chunking belongs to whichever catalog has a size cap, so it stays
+  outermost. Compression moved out of the DynamoDB catalog and into the engine for exactly this —
+  below the seal it would have been work spent on random bytes.
+- **The payload is bound to its address, not to a file number.** There is no number inside a
+  manifest payload to authenticate against, and its meaning depends entirely on where it sits: an
+  edit replayed at another sequence number applies the wrong change. So `snap#<gen>` and
+  `edit#<gen>#<seq>` go into the associated data, along with the whole header.
+- **A payload this process cannot route fails loudly, not quietly.** Replay tolerates an
+  undecodable *last* edit — that is what an unacknowledged write looks like — so an unregistered
+  provider reported as corruption would stop replay and open on a truncated history. It is `Config`
+  instead, and the snapshot is read before any edit, so a wrong key fails at `open` rather than at
+  whichever read reached an encrypted file first.
+
+What stays plaintext is what carries no user data and could not work otherwise: object **names**,
+which are file numbers the orphan sweep reasons about, and the **manifest pointer**, whose
+generation and token are what the ownership compare-and-set arbitrates.
 
 ### A process-wide memory budget
 
@@ -577,6 +600,32 @@ The same distinction governs the watermark. `recovered_watermark()` returns a po
 and nothing is not zero — zero is a valid position, a store at the start of its log. A single
 integer could not express "nothing can be certified", which is the answer after a transient store
 loses data written before the first watermark existed.
+
+### A status says what failed; a message says which
+
+`Status` is a small closed set, and that is what makes it checkable — but it means one value stands
+for many distinct mistakes. `Config` is the worst of them: a dozen unrelated configuration errors
+all arrive as `Config`, and an operator holding only that has to bisect their options struct.
+
+So there is a second, **advisory** channel: `elysiumkv::last_error()`, a thread-local string set by
+the calls whose status cannot narrow the cause down. `open` is the case that forces it — every
+rejection there names the option that was wrong, and a recovery failure carries the explanation out
+of the instance that is about to be destroyed with it.
+
+**Not in the result type**, deliberately. Widening the error channel to carry a message would put an
+allocation on paths that are taken constantly and are not failures at all — `NotFound` above all.
+The status stays the thing programs branch on; the message is for the human reading the log.
+
+Three rules keep it honest:
+
+- **Thread-local, one slot, one translation unit.** Two definitions would be two slots, and a
+  failure recorded through one would be invisible through the other — the same trap the C ABI's
+  error slot documents.
+- **Empty means "nothing to add", never "no failure".** It is read immediately after the call that
+  failed, and a successful `open` clears it so a stale explanation cannot be blamed on the next one.
+- **The bindings carry it across.** A binding that reported only the status would reintroduce the
+  problem at its own boundary, so the C ABI appends it to `elysiumkv_last_error()` and Java surfaces
+  it in the exception message.
 
 ### The watermark is an interval, and only its lower bound is load-bearing
 

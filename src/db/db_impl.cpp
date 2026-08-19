@@ -279,14 +279,29 @@ void DbImpl::log_emit(LogLevel level, LogEvent event, const std::string& message
 
 Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable,
                                 bool read_only) {
-    auto config = resolve_levels(options.levels);
-    if (!config) return std::unexpected(config.error());
-    auto tiers = resolve_tiers(options.tiers, options.age_jitter);
-    if (!tiers) return std::unexpected(tiers.error());
-    if (!(options.flush_interval_jitter >= 0.0) || options.flush_interval_jitter > 1.0) {
+    // **Every rejection below says which one it was.** A dozen distinct configuration mistakes all
+    // report `Status::Config`, and an operator holding only that has to guess; the message is the
+    // whole difference between a five-minute fix and a bisect through the options struct.
+    const auto refuse = [](std::string_view why) {
+        internal::set_last_error(why);
         return std::unexpected(Status::Config);
+    };
+    internal::set_last_error("");
+
+    auto config = resolve_levels(options.levels);
+    if (!config) {
+        return refuse("levels are not a usable configuration: they must start at 0 and be "
+                      "contiguous, and each must be within its bounds");
     }
-    if (options.manifest_catalog == nullptr) return std::unexpected(Status::Config);
+    auto tiers = resolve_tiers(options.tiers, options.age_jitter);
+    if (!tiers) {
+        return refuse("tiers are not a usable configuration: at least one is required, each needs "
+                      "a store, and a cache may not be a tier's innermost store");
+    }
+    if (!(options.flush_interval_jitter >= 0.0) || options.flush_interval_jitter > 1.0) {
+        return refuse("flush_interval_jitter must be between 0.0 and 1.0");
+    }
+    if (options.manifest_catalog == nullptr) return refuse("no manifest_catalog was given");
     // Zero would make every block its own request, which is the shape the window exists to remove,
     // and it reads as "unset" rather than as a choice.
     //
@@ -297,13 +312,16 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
     // an error. Bounding it that way rejected `TinyCompactionBudget` outright.
     if (options.compaction_window_bytes == 0 ||
         options.compaction_window_bytes > std::numeric_limits<size_t>::max() / 2) {
-        return std::unexpected(Status::Config);
+        return refuse("compaction_window_bytes must be non-zero and below half the address space");
     }
 
     // ARCHITECTURE.md "A tier is not a level" — `open` is guarded rather than merely documented. Adding a Transient
     // tier later must not leave existing call sites compiling and silently
     // serving stale values.
-    if (require_all_durable && tiers->any_transient()) return std::unexpected(Status::Config);
+    if (require_all_durable && tiers->any_transient()) {
+        return refuse("a Transient tier is configured, so open_with_result() must be used instead "
+                      "of open(): a transient store can lose data and the caller has to see that");
+    }
 
     // **A `Transient` tier needs at least two levels.** An L0 file cannot be migrated — that
     // would reorder L0's positional recency — so it leaves its tier by being compacted into L1,
@@ -311,7 +329,10 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
     // level that is permanent exposure: L0 files can never leave the transient tier, no timer
     // helps, and the stall valve eventually holds every write — a store that is neither durable
     // nor writable. Rejected here, so a silent livelock is a configuration error instead.
-    if (tiers->any_transient() && config->last() < 1) return std::unexpected(Status::Config);
+    if (tiers->any_transient() && config->last() < 1) {
+        return refuse("a Transient tier needs at least two levels: an L0 file leaves its tier only "
+                      "by being compacted into L1, so with one level it can never leave");
+    }
 
     // **The orphan window must be at least the reader window.** An obsolete object is, to the
     // sweep, indistinguishable from an orphan — the edit that removed it is committed, so the
@@ -322,12 +343,19 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
     // restart. Checked rather than documented, like every other bound here.
     if (options.obsolete_retention.has_value() &&
         options.orphan_retention < *options.obsolete_retention) {
-        return std::unexpected(Status::Config);
+        return refuse("orphan_retention must be at least obsolete_retention: a crash turns "
+                      "superseded objects into orphans, protected by the orphan window alone");
     }
 
     std::unique_ptr<DbImpl> db(new DbImpl(options, std::move(*config), std::move(*tiers)));
     db->read_only_ = read_only;
-    if (Status status = db->recover(); status != Status::Ok) return std::unexpected(status);
+    if (Status status = db->recover(); status != Status::Ok) {
+        // The instance is about to be destroyed and its message with it, so it moves to the
+        // thread's slot first. This is the path that carries "which encryption provider is
+        // missing" and every other recovery failure worth naming.
+        internal::set_last_error(db->last_error());
+        return std::unexpected(status);
+    }
     db->start_background();
 
     OpenResult result;
@@ -370,40 +398,46 @@ Result<std::unique_ptr<ReadOnlyDB>> DB::open_read_only(const Options& options) {
 }
 
 Status DbImpl::recover() {
-    versions_ = std::make_unique<VersionSet>(
-        *options_.manifest_catalog, options_.manifest_edits_per_generation,
-        [this](const std::vector<FileMetadata>& files) { return delete_obsolete(files); },
-        [this] { return now_ms(); },
-        options_.obsolete_retention.value_or(Duration(0)));
-
-    // **Resolved before anything can read or write.** The passthrough is added rather than
-    // configured, so there is always a provider and never a null one; an embedder registering its
-    // reserved id is refused rather than silently overriding the one case the engine owns.
-    providers_ = options_.encryption.providers;
-    if (providers_.contains(std::string(kNoEncryptionProviderId))) {
+    // **Resolved before the manifest is touched**, because the manifest is itself encrypted: the
+    // first thing `VersionSet::recover` does is open a payload, and it needs the registry to do it.
+    // The passthrough is added rather than configured, so there is always a provider and never a
+    // null one; an embedder registering its reserved id is refused rather than silently overriding
+    // the one case the engine owns.
+    encryption_.providers = options_.encryption.providers;
+    if (encryption_.providers.contains(std::string(kNoEncryptionProviderId))) {
         last_error_ = "the empty encryption provider id is reserved for the passthrough";
         return Status::Config;
     }
-    for (const auto& [id, provider] : providers_) {
+    for (const auto& [id, provider] : encryption_.providers) {
         if (provider == nullptr) {
             last_error_ = "encryption provider '" + id + "' is null";
             return Status::Config;
         }
     }
-    providers_.emplace(std::string(kNoEncryptionProviderId),
-                       std::make_shared<NoEncryptionProvider>());
+    encryption_.providers.emplace(std::string(kNoEncryptionProviderId),
+                                  std::make_shared<NoEncryptionProvider>());
 
-    primary_provider_ = options_.encryption.primary_provider;
-    if (!providers_.contains(primary_provider_)) {
-        last_error_ = "primary encryption provider '" + primary_provider_ + "' is not registered";
+    encryption_.primary = options_.encryption.primary_provider;
+    if (!encryption_.providers.contains(encryption_.primary)) {
+        last_error_ = "primary encryption provider '" + encryption_.primary + "' is not registered";
         return Status::Config;
     }
+
+    versions_ = std::make_unique<VersionSet>(
+        *options_.manifest_catalog, options_.manifest_edits_per_generation,
+        [this](const std::vector<FileMetadata>& files) { return delete_obsolete(files); },
+        encryption_,
+        [this] { return now_ms(); },
+        options_.obsolete_retention.value_or(Duration(0)));
 
     published_level_counts_ = std::ranges::all_of(config_.levels, [](const ResolvedLevel& level) {
         return level.level < VersionSet::kPublishedLevels;
     });
 
     const Status status = versions_->recover();
+    if (status != Status::Ok && !versions_->last_error().empty()) {
+        last_error_ = versions_->last_error();
+    }
     if (status == Status::NotFound && read_only_) {
         // **A reader does not create a store.** Finding no manifest means it opened the wrong place
         // or arrived before the writer; either way that is not a reader's decision to make, and
@@ -1406,8 +1440,7 @@ Status DbImpl::check_invariants(Invariant* which) const {
 // --- read path ----------------------------------------------------------------
 
 EncryptionProvider* DbImpl::provider_for(const std::string& id) const {
-    const auto found = providers_.find(id);
-    return found == providers_.end() ? nullptr : found->second.get();
+    return encryption_.find(id);
 }
 
 /// **No special case for "not encrypted".** The empty id resolves to `NoEncryptionProvider` like
@@ -2309,7 +2342,7 @@ Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice byte
     // stores hold makes that rare, and renumbering makes it harmless when it happens anyway.
     // Resolved once rather than per attempt: the retry loop below changes the file number, not the
     // provider. The empty id resolves like any other, to the one that does nothing.
-    EncryptionProvider* provider = provider_for(primary_provider_);
+    EncryptionProvider* provider = provider_for(encryption_.primary);
     if (provider == nullptr) return std::unexpected(Status::Config);
 
     constexpr int kAttempts = 4;
@@ -2332,7 +2365,7 @@ Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice byte
             if (!material) return std::unexpected(material.error());
             sealed = std::move(*material);
             payload = Slice::from(sealed);
-            written.encryption_provider = primary_provider_;
+            written.encryption_provider = encryption_.primary;
             written.encryption_metadata = std::move(created->metadata);
         }
 

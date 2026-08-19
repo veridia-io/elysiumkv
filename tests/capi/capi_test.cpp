@@ -595,6 +595,31 @@ TEST_F(CApiTest, AKeyManagerSuppliedThroughTheAbiEncryptsTheStore) {
     }
 }
 
+/// **A binding gets the reason, not just `ELYSIUMKV_CONFIG`.** The instance that knew which check
+/// failed is destroyed by the time open returns, so the engine leaves the explanation where the ABI
+/// can pick it up. Without this an embedder sees "config" and has to bisect their options.
+TEST_F(CApiTest, AFailedOpenExplainsItself) {
+    elysiumkv_options* options = make_options();
+    ASSERT_EQ(elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+                  options, "static", std::array<uint8_t, 32>{}.data(), 32, 0),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_primary_encryption_provider(options, "static"), ELYSIUMKV_OK);
+
+    elysiumkv_db* db = nullptr;
+    ASSERT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_OK);
+    elysiumkv_close(db);
+    elysiumkv_options_destroy(options);
+
+    // Reopened with no provider at all: the manifest names one this configuration does not have.
+    elysiumkv_options* bare = make_options();
+    elysiumkv_db* reopened = nullptr;
+    EXPECT_EQ(elysiumkv_open(bare, &reopened), ELYSIUMKV_CONFIG);
+    const std::string message = elysiumkv_last_error();
+    EXPECT_NE(message.find("static"), std::string::npos)
+        << "the message must name the provider to register: " << message;
+    elysiumkv_options_destroy(bare);
+}
+
 TEST_F(CApiTest, TheBuiltInStaticKeyManagerEncryptsTheStore) {
     std::array<uint8_t, 32> master{};
     for (size_t i = 0; i < master.size(); ++i) master[i] = static_cast<uint8_t>(i);

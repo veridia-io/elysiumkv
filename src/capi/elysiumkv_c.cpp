@@ -1177,8 +1177,13 @@ elysiumkv_status open_common(const elysiumkv_options* options, elysiumkv_db** ou
     }) : DB::open_with_result(copy);
 
     if (!opened) {
-        return fail(opened.error(), std::string("open failed: ") +
-                                       std::string(status_name(opened.error())));
+        // **The engine's message, not just the status.** A dozen distinct configuration mistakes
+        // all arrive here as `config`, and the instance that knew which one is already destroyed —
+        // `elysiumkv::last_error()` is where it left the explanation.
+        std::string why = std::string("open failed: ") + std::string(status_name(opened.error()));
+        const std::string_view detail = elysiumkv::last_error();
+        if (!detail.empty()) why += ": " + std::string(detail);
+        return fail(opened.error(), std::move(why));
     }
 
     handle->db = std::move(opened->db);

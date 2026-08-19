@@ -15,6 +15,9 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,6 +48,19 @@ std::string all_stored_bytes(BlobStore& store) {
         auto bytes = store.get(name, 0, BlobStore::kReadToEnd).get();
         EXPECT_TRUE(bytes.has_value()) << name;
         if (bytes) all.append(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+    }
+    return all;
+}
+
+/// Every byte of every file under `root`, which for these fixtures is both the blob stores *and*
+/// the manifest catalog. Broader than `all_stored_bytes` on purpose: the manifest is where the key
+/// bounds live, so a scan that skipped it would miss the user data most easily overlooked.
+std::string all_bytes_under(const std::filesystem::path& root) {
+    std::string all;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file()) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        all.append((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     }
     return all;
 }
@@ -85,6 +101,18 @@ TEST_F(EncryptionAtRest, NoStoredByteIsPlaintext) {
     // The canary substring alone, in case a value were stored split across a boundary.
     EXPECT_EQ(stored.find("PLAINTEXT-CANARY"), std::string::npos);
 
+    // **And the manifest, which is where a key most easily escapes.** Every file record carries its
+    // file's smallest and largest key, so a manifest in the clear leaks user keys however well the
+    // SSTs are sealed. This is the assertion Phase 2 exists for.
+    const std::string everything = all_bytes_under(store_.path());
+    ASSERT_GT(everything.size(), stored.size()) << "the manifest was not included in the scan";
+    for (int i = 0; i < 400; ++i) {
+        EXPECT_EQ(everything.find(value_at(i)), std::string::npos)
+            << "value " << i << " is readable somewhere under the store root";
+        EXPECT_EQ(everything.find(key_at(i)), std::string::npos)
+            << "key " << i << " is readable somewhere under the store root";
+    }
+    EXPECT_EQ(everything.find("PLAINTEXT-CANARY"), std::string::npos);
 }
 
 TEST_F(EncryptionAtRest, EveryKeyReadsBackThroughGetAndIteration) {
@@ -175,7 +203,50 @@ TEST_F(EncryptionAtRest, PlaintextAndEncryptedFilesCoexist) {
 
 /// A file this configuration cannot read is a configuration failure, not damage. The operator's
 /// remedy is to register the provider, and `Corrupt` would send them to a restore instead.
+///
+/// **The manifest has to stay readable for this to be about the file at all.** So the store is
+/// reopened with a *different* provider primary and the file's own absent — which is the shape a
+/// half-finished rotation actually has. Dropping the provider entirely is the case below.
 TEST_F(EncryptionAtRest, AFileWhoseProviderIsNotRegisteredIsAConfigurationError) {
+    {
+        auto db = std::move(*DB::open(encrypted_options()));
+        for (int i = 0; i < 50; ++i) {
+            ASSERT_EQ(db->put(Slice::from(key_at(i)), Slice::from(value_at(i))), Status::Ok);
+        }
+        ASSERT_EQ(db->flush(), Status::Ok);
+    }
+
+    // Move the manifest onto the new provider while the old file stays where it is: one edit per
+    // generation, so the write below rolls and the fresh snapshot is written under `kms-gcm-2`.
+    {
+        Options rotating = make_options(store_, Compression::None, 64u << 10);
+        rotating.background = BackgroundMode::Inline;
+        rotating.manifest_edits_per_generation = 1;
+        rotating.encryption.providers["kms-gcm"] = make_test_provider(1);
+        rotating.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+        rotating.encryption.primary_provider = "kms-gcm-2";
+        auto db = std::move(*DB::open(rotating));
+        ASSERT_EQ(db->put(Slice::from(key_at(900)), Slice::from(value_at(900))), Status::Ok);
+        ASSERT_EQ(db->flush(), Status::Ok);
+    }
+
+    Options rotated = make_options(store_, Compression::None, 64u << 10);
+    rotated.background = BackgroundMode::Inline;
+    rotated.manifest_edits_per_generation = 1;
+    rotated.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+    rotated.encryption.primary_provider = "kms-gcm-2";
+    auto reopened = DB::open(rotated);
+    ASSERT_TRUE(reopened.has_value()) << "the manifest is readable; the files are read on demand";
+    EXPECT_EQ((*reopened)->get(Slice::from(key_at(0))).error(), Status::Config);
+    // And the file written under the surviving provider still reads, so this is about the one
+    // missing provider and not about the store being broken.
+    EXPECT_TRUE((*reopened)->get(Slice::from(key_at(900))).has_value());
+}
+
+/// **The manifest is encrypted too, so the same mistake is caught a step earlier.** Dropping the
+/// provider a store was written with now fails at `open` rather than at whichever read happened to
+/// touch an encrypted file first — and it says which provider is missing.
+TEST_F(EncryptionAtRest, AManifestWhoseProviderIsNotRegisteredRefusesToOpen) {
     {
         auto db = std::move(*DB::open(encrypted_options()));
         for (int i = 0; i < 50; ++i) {
@@ -187,25 +258,34 @@ TEST_F(EncryptionAtRest, AFileWhoseProviderIsNotRegisteredIsAConfigurationError)
     Options without = make_options(store_, Compression::None, 64u << 10);
     without.background = BackgroundMode::Inline;
     auto reopened = DB::open(without);
-    ASSERT_TRUE(reopened.has_value()) << "opening succeeds; the files are only read on demand";
-    EXPECT_EQ((*reopened)->get(Slice::from(key_at(0))).error(), Status::Config);
+    ASSERT_FALSE(reopened.has_value());
+    EXPECT_EQ(reopened.error(), Status::Config)
+        << "not Corrupt: the bytes are intact and the remedy is to register the provider";
+    // The status alone cannot say *which* provider, and that is the whole remedy.
+    EXPECT_NE(std::string(last_error()).find("kms-gcm"), std::string::npos)
+        << "the failure has to name the provider to register: " << last_error();
 }
 
-/// **I12.** A configuration the engine cannot honour is refused at open, not at first write.
+/// **I12.** A configuration the engine cannot honour is refused at open, not at first write — and
+/// each refusal says which one it was, because `Config` alone does not narrow it down at all.
 TEST_F(EncryptionAtRest, AnUnusableConfigurationIsRefusedAtOpen) {
     Options unknown_primary = make_options(store_, Compression::None, 64u << 10);
     unknown_primary.encryption.primary_provider = "never-registered";
     EXPECT_EQ(DB::open(unknown_primary).error(), Status::Config);
+    EXPECT_NE(std::string(last_error()).find("never-registered"), std::string::npos)
+        << last_error();
 
     Options reserved_id = make_options(store_, Compression::None, 64u << 10);
     reserved_id.encryption.providers[""] = make_test_provider();
     EXPECT_EQ(DB::open(reserved_id).error(), Status::Config)
         << "the empty id belongs to the passthrough";
+    EXPECT_NE(std::string(last_error()).find("reserved"), std::string::npos) << last_error();
 
     Options null_provider = make_options(store_, Compression::None, 64u << 10);
     null_provider.encryption.providers["broken"] = nullptr;
     null_provider.encryption.primary_provider = "broken";
     EXPECT_EQ(DB::open(null_provider).error(), Status::Config);
+    EXPECT_NE(std::string(last_error()).find("broken"), std::string::npos) << last_error();
 }
 
 /// With no encryption configured the passthrough is primary, files record the reserved empty id,

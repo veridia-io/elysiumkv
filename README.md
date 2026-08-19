@@ -74,10 +74,10 @@ useful rather than to be novel.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Encryption at rest** for SST contents: AES-256-GCM under envelope encryption,
-  with a fresh data key per object. Key custody is yours — a static master key and
-  AWS KMS both ship, and the key manager is an interface if neither fits (see
-  [below](#encryption-at-rest)).
+- **Encryption at rest**, covering SST contents and manifest payloads alike:
+  AES-256-GCM under envelope encryption, with a fresh data key per object. Key custody
+  is yours — a static master key and AWS KMS both ship, and the key manager is an
+  interface if neither fits (see [below](#encryption-at-rest)).
 - **Bindings**: a stable C ABI (70 functions, C99) and a Java binding over JNI
   needing only Java 11, plus Kafka Streams state stores in
   `bindings/kafka-streams-v3` — key-value, window and session stores in both plain
@@ -224,13 +224,17 @@ no path could reuse one. That is why "one key for the whole store" is not offere
 
 ### What is and is not covered
 
-**SST contents are encrypted. The manifest is not.** `FileMetadata` carries each
-file's smallest and largest key, so user key bytes are in the manifest in the clear.
-For defence in depth against a leaked bucket or a lost disk that is usually the right
-line; if you need every user byte encrypted — a compliance requirement rather than a
-threat model — this does not yet get you there.
+**SST contents and manifest payloads are both encrypted**, so no user byte — value, key,
+or the key bounds each file record carries — is stored in the clear. That last one is
+the easiest to overlook and the reason the manifest needed its own seam: an engine that
+sealed every SST and left `FileMetadata` readable would still leak the shape of the
+keyspace to anyone holding the bucket.
 
-Everything else follows from where the boundary sits, which is directly above the
+What stays plaintext is what carries no user data and could not work encrypted: object
+**names**, which are file numbers, and the **manifest pointer**, whose generation and
+token are what `compare_and_swap` arbitrates ownership on.
+
+The rest follows from where the two boundaries sit. For SSTs that is directly above the
 object store:
 
 - **Caches hold ciphertext.** A `DiskCacheBlobStore` in front of S3 stores encrypted
@@ -242,6 +246,13 @@ object store:
   encrypted file. A migrated copy is renumbered, so the identity a chunk is
   authenticated against is recorded at creation rather than read from the file's
   current number.
+
+A manifest payload has no ranged read to preserve, so it is sealed whole — compressed
+first, because ciphertext does not compress and encrypting first would inflate every
+manifest write. Each payload is bound to its own address, so an edit cannot be replayed
+at another sequence number, and **a provider the manifest names but you have not
+registered fails at `open`** rather than at whichever read reached an encrypted file
+first.
 
 ### The id is persisted, and that is what makes rotation work
 
@@ -489,6 +500,24 @@ crossover sits well above a kilobyte; measure against your own values.
 **Close what you pin.** A leaked pin holds a block-cache entry that can never be
 evicted. Both bindings track outstanding pins and report a non-zero count at close.
 
+### When something is refused
+
+`Status` is small and closed, so one value covers many causes — `Config` most of all. **Every way
+`open` can refuse leaves a sentence behind** naming the option that was wrong, which is the call
+where guessing costs the most:
+
+```cpp
+auto db = elysiumkv::DB::open(options);
+if (!db) {
+    log("open failed: {} — {}", elysiumkv::status_name(db.error()), elysiumkv::last_error());
+}
+```
+
+Java puts it in the exception message and C callers read `elysiumkv_last_error()`. It is advisory
+and thread-local: read it immediately after the call that failed, and treat empty as "no more than
+the status says" rather than as "nothing failed". Other calls set it where they have something to
+add; the status is what you branch on.
+
 ## Limits
 
 | Constraint    | Value                                                  |
@@ -601,10 +630,6 @@ and a 1M-key store must cost about the same, or file pruning is not working.
   the log, so duplicating it would double every write. The watermark is what
   makes that trade workable — it tells you where to resume, and an unflushed
   memtable is still lost.
-- **Manifest encryption.** SST contents are encrypted; `FileMetadata` still carries
-  each file's smallest and largest key in the clear, so user key bytes reach the
-  manifest. Enough for defence in depth, not enough to call the store encrypted at
-  rest without qualification — see [Encryption at rest](#encryption-at-rest).
 - **Windows.**
 
 ## Contributing
