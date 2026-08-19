@@ -21,6 +21,7 @@ useful rather than to be novel.
 - [What it does](#what-it-does)
 - [Storage tiers](#storage-tiers)
 - [Remote storage](#remote-storage)
+- [Encryption at rest](#encryption-at-rest)
 - [Quick start (C++)](#quick-start-c)
 - [Quick start (Java)](#quick-start-java)
 - [Memory](#memory)
@@ -73,7 +74,11 @@ useful rather than to be novel.
 - **Pluggable storage**: the object store and the manifest catalog are interfaces.
   A local-directory implementation of each ships, and the C ABI exposes them as
   function-pointer vtables so a binding can supply its own.
-- **Bindings**: a stable C ABI (61 functions, C99) and a Java binding over JNI
+- **Encryption at rest** for SST contents: AES-256-GCM under envelope encryption,
+  with a fresh data key per object. Key custody is yours — a static master key and
+  AWS KMS both ship, and the key manager is an interface if neither fits (see
+  [below](#encryption-at-rest)).
+- **Bindings**: a stable C ABI (70 functions, C99) and a Java binding over JNI
   needing only Java 11, plus Kafka Streams state stores in
   `bindings/kafka-streams-v3` — key-value, window and session stores in both plain
   and timestamped form, and a versioned store (KIP-889). The windowed kinds keep
@@ -189,6 +194,105 @@ Build with `-DELYSIUMKV_BUILD_AWS=ON`. The constructors exist either way and fai
 a configuration error naming the missing option when they are absent, because an ABI
 whose shape depends on how it was compiled cannot be checked by a binding;
 `ElysiumKV.hasAwsSupport()` answers the question up front.
+
+## Encryption at rest
+
+SST contents are encrypted with AES-256-GCM under envelope encryption: a **fresh data
+key per object**, wrapped by a key manager you choose and recorded beside the file in
+the manifest.
+
+```java
+options.encryptWith("v1", StaticEncryptionKeyManager.fromHex(masterKeyHex), 0);
+
+// or, with the wrapping key held outside the process
+options.encryptWith("v1", AwsKmsEncryptionKeyManager.builder(keyArn).build(), 0);
+```
+
+```cpp
+auto keys = elysiumkv::StaticEncryptionKeyManager::from_hex(master_key_hex);
+auto cipher = elysiumkv::Aes256GcmEncryptionProvider::open(*keys);
+options.encryption.providers["v1"] = *cipher;
+options.encryption.primary_provider = "v1";
+```
+
+**The per-object key is what makes the nonce safe**, not a detail of the
+implementation. Nonce reuse under one key breaks GCM completely, and the nonce here is
+a function of the chunk index with nothing persisted and nothing coordinated. A fresh
+key per object confines the nonce space to that object — and since objects are
+write-once and file numbers are never reused, an object is encrypted exactly once and
+no path could reuse one. That is why "one key for the whole store" is not offered.
+
+### What is and is not covered
+
+**SST contents are encrypted. The manifest is not.** `FileMetadata` carries each
+file's smallest and largest key, so user key bytes are in the manifest in the clear.
+For defence in depth against a leaked bucket or a lost disk that is usually the right
+line; if you need every user byte encrypted — a compliance requirement rather than a
+threat model — this does not yet get you there.
+
+Everything else follows from where the boundary sits, which is directly above the
+object store:
+
+- **Caches hold ciphertext.** A `DiskCacheBlobStore` in front of S3 stores encrypted
+  bytes, because it is below the boundary. The block cache is above it and holds
+  plaintext, as any in-memory read path must.
+- **Compression is unaffected**, and still worth having: blocks are compressed before
+  the object is sealed, so ZSTD sees the real data.
+- **Migration between tiers is a byte-for-byte copy**, which stays true for an
+  encrypted file. A migrated copy is renumbered, so the identity a chunk is
+  authenticated against is recorded at creation rather than read from the file's
+  current number.
+
+### The id is persisted, and that is what makes rotation work
+
+Every object records **which provider wrote it**, so reads route on the file rather
+than on the current configuration. Rotating to a new construction or a new key is
+therefore: register the new one as primary, keep the old one registered for reading,
+and let compaction rewrite files under the new one over time.
+
+```java
+options.encryptWith("v2", AwsKmsEncryptionKeyManager.builder(newKeyArn).build(), 0);
+options.alsoDecryptWith("v1", AwsKmsEncryptionKeyManager.builder(oldKeyArn).build(), 0);
+```
+
+Drop `v1` only once no file records it. **Renaming an id orphans every file written
+under the old name** — the id is data, not configuration.
+
+Rotating the KMS *key* underneath one id needs none of this: a wrapped data key names
+the key that produced it, so `Decrypt` resolves it and files written under the
+previous key keep opening.
+
+### Key custody
+
+Three options, in the order most embedders want them:
+
+- **`StaticEncryptionKeyManager`** — one 32-byte master key held in this process,
+  wrapping each object's data key with AES-256-GCM. For a key that arrives from a
+  secrets manager at startup.
+- **`AwsKmsEncryptionKeyManager`** — `GenerateDataKey` and `Decrypt`, so the wrapping
+  key never enters the process. Needs `-DELYSIUMKV_BUILD_AWS=ON`; without it,
+  registering one fails with a configuration error naming the missing option, as the
+  remote seams do.
+- **Your own** — implement `EncryptionKeyManager` (a Java interface, a C ABI vtable, a
+  C++ virtual) and the engine keeps the cryptography. Supplying a whole
+  `EncryptionProvider` is also possible and is for an organisation that must use a
+  specific construction; almost nobody needs it.
+
+**A KMS call is a network round trip**, so it is worth knowing when they happen: once
+per object written, and once per object whose reader is not resident. A reader holds
+its unwrapped key for as long as the cache keeps it, which is what stops this from
+being per-block — but a reader cache well below the working set turns evictions into
+KMS traffic.
+
+### Cost, and the unencrypted case
+
+Chunks default to 4096 bytes with a 16-byte tag each, so an encrypted object is about
+0.4% larger. Reads stay ranged: a lookup fetches only the chunks its range covers.
+
+**An unencrypted store is not a special case.** A passthrough provider is registered
+under the reserved empty id and is primary unless you name another, so the code path
+is the same one and a file written before encryption existed records the same thing as
+one written with it off. There is no branch to get wrong.
 
 ## Quick start (C++)
 
@@ -400,9 +504,10 @@ an exception and switches on continuous internal verification.
 ## Building
 
 Requires **CMake 3.25+**, **Ninja**, and a **C++23** compiler (`std::expected` is
-in the public API). Dependencies — zstd, lz4, GoogleTest, Google Benchmark — come
-from [vcpkg](https://github.com/microsoft/vcpkg) in manifest mode, pinned by
-`builtin-baseline` in `vcpkg.json`.
+in the public API). Dependencies — zstd, lz4, OpenSSL, GoogleTest,
+Google Benchmark — come from [vcpkg](https://github.com/microsoft/vcpkg) in manifest
+mode, pinned by `builtin-baseline` in `vcpkg.json`. OpenSSL is pinned to the 3.5 LTS
+line and is what the built-in AES-256-GCM provider uses.
 
 ```sh
 git clone https://github.com/microsoft/vcpkg.git ~/vcpkg   # full clone; versioning needs the history
@@ -496,6 +601,10 @@ and a 1M-key store must cost about the same, or file pruning is not working.
   the log, so duplicating it would double every write. The watermark is what
   makes that trade workable — it tells you where to resume, and an unflushed
   memtable is still lost.
+- **Manifest encryption.** SST contents are encrypted; `FileMetadata` still carries
+  each file's smallest and largest key in the clear, so user key bytes reach the
+  manifest. Enough for defence in depth, not enough to call the store encrypted at
+  rest without qualification — see [Encryption at rest](#encryption-at-rest).
 - **Windows.**
 
 ## Contributing

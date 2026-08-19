@@ -100,6 +100,10 @@ The bloom filter is per file and sized in bits per key. It only helps point look
 for iteration or compaction — so it earns its space on a read-heavy keyspace and very little on a
 write-mostly one.
 
+Encryption, where configured, wraps the finished object rather than any of this: blocks are built and
+compressed first, then the whole file is sealed in fixed-size chunks. So the block format never
+learns about it, and compression still sees real data.
+
 ### The manifest is snapshots plus edits
 
 The file list lives in numbered, fixed-width-named objects. A generation is one snapshot plus a
@@ -129,7 +133,9 @@ of them in a store that never calls `delete_range` — take the search.
 
 Within a file: consult the bloom filter, then the index block, then the data block. Blocks come from
 the block cache as pins — no copy on a hit. On a miss the cache chain is walked outward (memory,
-then disk, then the authoritative store), and each layer fills on the way back.
+then disk, then the authoritative store), and each layer fills on the way back. Decryption happens
+above the whole chain, on the byte range the reader asked for — so the caches hold ciphertext and the
+block cache holds plaintext.
 
 A key's tier affects only *where the bytes come from*, never the order candidates are tried. That is
 why a fresh local L0 entry correctly shadows a stale copy of the same key sitting in S3.
@@ -157,7 +163,9 @@ swapped in by a manifest edit, and the old object is deleted.
 The copy is byte-for-byte: nothing is decoded or recompressed, because compression is a property of
 the *level* and migration does not change a file's level. So a migration costs exactly the bytes
 moved — which is what makes it safe to treat as a background cost optimisation rather than as work
-that competes with compaction.
+that competes with compaction. It is not re-encrypted either, which is why an encrypted object's
+identity is recorded at creation rather than derived from its current file number; see
+*Encryption sits at the object boundary*.
 
 Three priorities, in order: rescuing files off a *transient* tier that may lose them; evicting to
 respect a tier's capacity; then age. The last is a cost optimisation, so starving it wastes money
@@ -487,6 +495,53 @@ and the engine above cannot tell the difference. Three rules keep it honest:
 - **Bulk reads bypass the chain.** Compaction streams whole files it will never re-read; caching
   them would evict everything useful.
 
+### Encryption sits at the object boundary
+
+SST contents are encrypted with AES-256-GCM under envelope encryption: a fresh data key per object,
+wrapped by the embedder's key manager, with the wrapped form recorded in the file's manifest entry.
+Almost everything worth knowing here follows from *where* it sits.
+
+**It is a view over an object, not a decorator in the store chain.** The obvious shape — a
+`BlobStore` that wraps another and encrypts on the way through — is unavailable, and not by
+preference: `authoritative_store` walks the chain while `as_cache()` keeps answering, so a decorator
+that is not a cache terminates the walk and is mistaken for the authority. The boundary is instead a
+per-object view built when a reader is opened, over whatever store the file's tier resolves to. That
+placement is also what gives caches the right property for free — every cache is *below* the
+boundary, so a disk cache in front of S3 holds ciphertext, while the block cache is above it and
+holds plaintext.
+
+**One key per object is what makes the nonce safe.** Nonce reuse under a single key breaks GCM
+outright. A fresh key per object confines the nonce space to that object, so the nonce can be a pure
+function of the chunk index — nothing persisted, nothing coordinated. This is only sound because two
+earlier decisions hold: objects are write-once, and file numbers are never reused. An object is
+therefore encrypted exactly once and no path can reach a second attempt. A mode where one key covers
+the whole store is not offered, because that reasoning would not survive it.
+
+**Chunking is the engine's, not the cipher's.** A cipher declares a chunk size and a constant
+per-chunk overhead; the logical-to-physical offset mapping is computed in one place from those two
+numbers. A cipher free to choose its own layout would have to reimplement that mapping and would
+eventually disagree with the reader. The consequence is that reads stay ranged — a lookup fetches
+only the chunks its range covers, rather than the whole object — and that everything above the
+boundary speaks logical offsets and sizes. Only migration and the compaction read window sit below
+it, and both are given physical sizes explicitly.
+
+**A chunk is authenticated against an identity recorded at creation, not the file's current
+number.** Migration copies an object byte for byte and renumbers the copy; binding the AAD to the
+live number would strand every migrated file. So the id travels in the provider's metadata, and
+migration stays the byte-for-byte copy it is everywhere else.
+
+**Providers are a map from id to provider, plus which one is primary.** Every object records the id
+that wrote it, so a read routes on the file rather than on the current configuration — which is what
+makes rotation a matter of registering the new construction as primary and leaving the old one
+registered until no file names it. The id is data: renaming one orphans every file recorded against
+it. The passthrough holds the reserved empty id and is primary unless another is named, so an
+unencrypted store is not a special case and there is no null provider anywhere after open.
+
+**Scope: SST contents.** `FileMetadata` carries each file's smallest and largest key, so user key
+bytes reach the manifest in the clear. That is defence in depth against a leaked bucket or a lost
+disk, and it is deliberately not described as more than that; encrypting the manifest is a separate
+seam and a separate format change.
+
 ### A process-wide memory budget
 
 The budget is an object you create once and hand to every database and cache — not a size on
@@ -632,7 +687,7 @@ are silent ones.
   why the whole ABI is a single translation unit: a second one would get a second thread-local slot,
   and a failure reported through one would be invisible through the other.
 - **The set of exported symbols does not change with build configuration.** Optional features
-  (S3, DynamoDB) are absent as *behaviour*, reporting a configuration error, never as absent
+  (S3, DynamoDB, KMS) are absent as *behaviour*, reporting a configuration error, never as absent
   symbols — so a binding can verify the ABI with a set comparison.
 - **Symbol visibility is correctness, not hygiene.** The shared library exports the C ABI and
   nothing else. Default visibility re-exports statically linked dependencies, which can interpose
@@ -790,3 +845,5 @@ defects:
 | Upgrade across a manifest format change | The store will not open, and says `unsupported` rather than `corrupt` | A `0.x` format change is a clean break; rebuild from the log |
 | Shorten `maintenance_interval` to tighten exposure | Almost nothing changes | The interval is the smallest of four terms in the window |
 | Alert on a counter with an absolute threshold | The alarm silently re-arms on every rebalance | Counters are per instance and in memory |
+| Rename an encryption provider id | Every file recorded under the old name stops opening | The id is data, written into each object; reads route on it |
+| Run KMS with a reader cache below the working set | Evictions turn into KMS traffic | A reader holds its unwrapped data key; nothing else caches one |

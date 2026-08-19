@@ -13,6 +13,9 @@
 
 namespace elysiumkv {
 
+// The seams an embedder fills; ARCHITECTURE.md "Encryption sits at the object boundary" is where the
+// split between them and the engine is argued.
+
 /// Key material, and the handling rules that come with it.
 ///
 /// **Move-only, and zeroed on destruction.** A value that copies key material freely leaves plaintext

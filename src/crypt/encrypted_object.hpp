@@ -9,7 +9,8 @@
 
 namespace elysiumkv {
 
-/// One encrypted object, presented as a `BlobStore` so that everything above it is unchanged.
+/// One encrypted object, presented as a `BlobStore` so that everything above it is unchanged
+/// (ARCHITECTURE.md "Encryption sits at the object boundary").
 ///
 /// **The engine's half of the boundary, not the provider's.** A provider owns cryptography — keys,
 /// nonces, suites, its own metadata. This owns the mapping between the offsets the engine reads at
