@@ -118,15 +118,22 @@ INSTANTIATE_TEST_SUITE_P(
         // runs throughout. The oracle is unchanged by it: which files a compaction takes is a
         // scheduling decision, and every answer must be identical to the same stream without it.
         //
-        // **The trim's *direction* is not pinned here** — inverting it leaves this config passing.
-        // That is pinned by `PickerTest.TrimmingAnOverlappingLevelKeepsTheOldestFiles` and, as an
-        // observable stale read, by
-        // `CompactionTest.TrimmingAnOversizedL0CompactionKeepsTheNewestValues`. What this adds is
-        // that a trimmed input set still produces answers the oracle accepts at all.
+        // **The budget is sized against the files this config actually produces, and that is the
+        // whole point.** It was 48 KiB, chosen against the 32 KiB memtable — but Zstd over 40
+        // distinct keys makes an L0 file about 1.4 KB, so the closure of five came to ~7 KB and
+        // the trim never once ran. The config named for the trim path never reached it, and a
+        // reordering bug in that path went out and had to be found by hand. 4 KiB against a ~1.4 KB
+        // file trims constantly and keeps two to four files most of the time, which is what makes
+        // the defect reachable: a single-file input set has no duplicate keys to resolve, so
+        // nothing about the merge's recency ordering is observable in it.
+        //
+        // Sized by measurement rather than by intent, and worth re-measuring if the compression,
+        // the memtable size or `distinct_keys` here change — any of the three moves the file size
+        // this is a multiple of.
         ReplayConfig{.name = "TinyCompactionBudget",
                      .compression = Compression::Zstd,
                      .memtable_bytes = 32u << 10,
-                     .max_compaction_bytes = 48u << 10,
+                     .max_compaction_bytes = 4096u,
                      .distinct_keys = 40},
         // The same transient band with the age trigger spread. Jitter decides *when* a file
         // crosses to the colder tier, so every answer here must be identical to `TransientBand`
@@ -150,10 +157,25 @@ INSTANTIATE_TEST_SUITE_P(
         // 1 MiB memtable, so this pressure had never been generated — and the first run of it
         // found a committed write reverting to its previous value
         // (`compact_l0_file_off_its_tier` choosing by write time rather than by file number).
+        //
+        // **That bug was in the L0-off-tier compaction, not in the migrator, and for a long time
+        // the migrator was the half this never reached.** The name promised migration; the counter
+        // said zero. The cause is worth writing down because it is not a tuning slip: a compaction
+        // output is placed by the age of the *oldest* write it contains, and an output that merges
+        // an existing L1 file inherits that file's age. Past the first few seconds of any run,
+        // every output is therefore already older than a 50 ms bound at the moment it is written,
+        // so placement puts it on the cold tier at birth and the migrator is left with nothing to
+        // move. Age cannot drive migration in a store that keeps rewriting.
+        //
+        // So the driver is capacity instead: the hot tier is unbounded by age and capped by bytes
+        // below what L1 actually holds, and eviction moves the oldest file down repeatedly. It
+        // depends on no clock, which also makes it reproducible — the property this suite is for.
         ReplayConfig{.name = "TieredHeavyMigration",
                      .compression = Compression::Zstd,
                      .split_stores = true,
-                     .memtable_bytes = 64u << 10},
+                     .memtable_bytes = 64u << 10,
+                     .tier0_max_bytes = 4u << 10,
+                     .tier_max_age_ms = 3'600'000},
         // ARCHITECTURE.md "A process-wide memory budget" — a budget *below* the memtable size, so the arena crosses it before the
         // memtable is full and the flush is forced for a reason unrelated to the memtable.
         // That is the perturbation worth putting under the oracle.

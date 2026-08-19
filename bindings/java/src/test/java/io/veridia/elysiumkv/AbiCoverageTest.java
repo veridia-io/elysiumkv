@@ -178,6 +178,37 @@ class AbiCoverageTest {
             // is what every other test here already crosses. LoggerTest covers a real one.
             exercise("optionsSetLogger");
 
+            // **Called for real, not marked.** A wrong JNI signature on these compiles and links,
+            // and fails only when an application first encrypts something; registering a provider
+            // here is what turns that into a test failure.
+            ElysiumKVOptions encrypted = support.options();
+            encrypted.encryptWith("abi-coverage", new EncryptionTest.DirectKeys(), 0);
+            exercise("optionsAddAes256GcmEncryption");
+            exercise("optionsSetPrimaryEncryptionProvider");
+
+            encrypted.alsoDecryptWith("abi-coverage-static",
+                                      StaticEncryptionKeyManager.of(new byte[32]), 0);
+            exercise("optionsAddAes256GcmEncryptionWithStaticKey");
+
+            // Registering a KMS manager performs no I/O, so a dead endpoint is enough to reach the
+            // native call — which is the point here. Without the AWS build it must refuse and say
+            // which build option is missing, exactly as the remote constructors do.
+            exercise("optionsAddAes256GcmEncryptionWithKms");
+            AwsKmsEncryptionKeyManager kms = AwsKmsEncryptionKeyManager.builder("alias/abi")
+                                                     .endpoint("http://127.0.0.1:1")
+                                                     .credentials("test", "test")
+                                                     .build();
+            if (ElysiumKV.hasAwsSupport()) {
+                encrypted.alsoDecryptWith("abi-coverage-kms", kms, 0);
+            } else {
+                ConfigException thrown = assertThrows(
+                        ConfigException.class, () -> encrypted.alsoDecryptWith("abi-coverage-kms",
+                                                                               kms, 0));
+                assertTrue(thrown.getMessage().contains("ELYSIUMKV_BUILD_AWS"),
+                           () -> "a build without KMS must name the missing build option: "
+                                   + thrown.getMessage());
+            }
+
             ElysiumKV db = PinLeakExtension.watch(support.open());
             exercise("open");
 

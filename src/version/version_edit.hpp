@@ -106,6 +106,19 @@ struct FileMetadata {
     /// `min_write_time_ms` is persisted, and the only reason either is in the manifest.
     WatermarkInterval watermark;
 
+    /// Which registered `EncryptionProvider` wrote this file's bytes, and whatever that provider
+    /// needs to reopen them — a wrapped data key, a nonce basis, its own suite identifier.
+    ///
+    /// **Reserved ahead of the feature that fills them.** Both are written empty today. Adding
+    /// fields to the manifest is free only while its format version is unreleased, and format 6 is
+    /// exactly that until 0.7.0 ships; afterwards it would cost a bump and a rebuild of every store
+    /// from its changelog. Reserving now is a few lines and no behaviour change.
+    ///
+    /// An empty provider is the reserved id of the passthrough, so a file written before encryption
+    /// existed and one written with encryption disabled are the same case rather than two.
+    std::string encryption_provider;
+    std::string encryption_metadata;
+
     bool operator==(const FileMetadata&) const = default;
 };
 

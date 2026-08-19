@@ -39,6 +39,13 @@ struct Compaction {
     /// like coverage.
     bool triggered_by_density = false;
 
+    /// Whether `max_compaction_bytes` cut this compaction's input set down from the closure.
+    ///
+    /// Carried for the same reason as the flag above: afterwards a trimmed set is indistinguishable
+    /// from a closure that happened to be small, so a configuration claiming to exercise the trim
+    /// has no other way to show that it did.
+    bool inputs_trimmed = false;
+
     /// Every input and overlap, oldest-source-last: the order the merging
     /// iterator needs, since recency is positional (ARCHITECTURE.md "Positional recency").
     std::vector<FileMetadata> all_inputs() const;

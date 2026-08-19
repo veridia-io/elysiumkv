@@ -17,7 +17,6 @@
 #include <aws/dynamodb/model/UpdateItemRequest.h>
 #include <aws/dynamodb/model/WriteRequest.h>
 
-#include <zstd.h>
 
 #include <algorithm>
 #include <charconv>
@@ -129,37 +128,6 @@ std::string generation_prefix(uint64_t generation) {
     return buf;
 }
 
-Status compress(Slice content, std::string& out) {
-    const size_t bound = ZSTD_compressBound(content.size());
-    out.resize(8 + bound);
-    const uint64_t original = content.size();
-    for (int i = 0; i < 8; ++i) out[static_cast<size_t>(i)] = static_cast<char>(original >> (8 * i));
-    const size_t written = ZSTD_compress(out.data() + 8, bound, content.data(), content.size(), 3);
-    if (ZSTD_isError(written) != 0) return Status::Io;
-    out.resize(8 + written);
-    return Status::Ok;
-}
-
-GetResult decompress(const std::string& raw) {
-    if (raw.size() < 8) return std::unexpected(Status::Corrupt);
-    uint64_t original = 0;
-    for (int i = 0; i < 8; ++i) {
-        original |= static_cast<uint64_t>(static_cast<unsigned char>(raw[static_cast<size_t>(i)]))
-                    << (8 * i);
-    }
-    if (original > (1ull << 30)) return std::unexpected(Status::Corrupt);
-
-    Buffer out(original);
-    if (original > 0) {
-        const size_t produced =
-            ZSTD_decompress(out.data(), original, raw.data() + 8, raw.size() - 8);
-        if (ZSTD_isError(produced) != 0 || produced != original) {
-            return std::unexpected(Status::Corrupt);
-        }
-    }
-    return out;
-}
-
 bool is_conditional_failure(const Aws::DynamoDB::DynamoDBError& error) {
     return error.GetErrorType() ==
            Aws::DynamoDB::DynamoDBErrors::CONDITIONAL_CHECK_FAILED;
@@ -213,14 +181,17 @@ struct DynamoManifestCatalog::Impl {
         return Status::Io;
     }
 
-    /// Compresses, splits and writes `bytes` as chunks addressed by `sort_key(index)`.
+    /// Splits and writes `bytes` as chunks addressed by `sort_key(index)`.
     ///
-    /// **Chunked unconditionally, not above a threshold.** Items cap at 400 KB, and a threshold
-    /// would mean the chunking path only ever runs in production, where it is least welcome to be
-    /// wrong.
+    /// **Chunking only. The engine compresses.** This used to compress too, which stopped paying
+    /// once manifest payloads became encrypted: ciphertext does not compress, so the work would be
+    /// spent on every write for nothing. Compression now runs above the seal where it still sees
+    /// real data, and chunking stays here because the 400 KB item cap is DynamoDB's alone.
+    ///
+    /// **Chunked unconditionally, not above a threshold.** A threshold would mean the chunking path
+    /// only ever runs in production, where it is least welcome to be wrong.
     Status put_chunked(const std::function<std::string(uint32_t)>& sort_key, Slice bytes) {
-        std::string packed;
-        if (const Status status = compress(bytes, packed); status != Status::Ok) return status;
+        const std::string packed(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
         const uint32_t total =
             static_cast<uint32_t>((packed.size() + kChunkPayloadBytes - 1) / kChunkPayloadBytes);
@@ -259,15 +230,15 @@ struct DynamoManifestCatalog::Impl {
         // the difference between a loud failure and a truncated manifest.
         if (declared != 0 && declared != items->size()) return std::unexpected(Status::Corrupt);
 
-        std::string packed;
+        Buffer packed;
         for (const auto& item : *items) {
             const auto payload = item.find(attr::kPayload);
             if (payload == item.end()) return std::unexpected(Status::Corrupt);
             const auto& bytes = payload->second.GetB();
-            packed.append(reinterpret_cast<const char*>(bytes.GetUnderlyingData()),
-                          bytes.GetLength());
+            packed.insert(packed.end(), bytes.GetUnderlyingData(),
+                          bytes.GetUnderlyingData() + bytes.GetLength());
         }
-        return decompress(packed);
+        return packed;
     }
 
     Result<std::vector<Aws::Map<Aws::String, Aws::DynamoDB::Model::AttributeValue>>> query_prefix(
@@ -453,7 +424,7 @@ std::future<GetResult> DynamoManifestCatalog::get_snapshot(uint64_t generation) 
     return make_ready_future(impl_->get_chunked(snapshot_prefix(generation)));
 }
 
-/// **Chunked and compressed exactly as a snapshot is.** This wrote one raw item, so an edit had to
+/// **Chunked exactly as a snapshot is.** This wrote one raw item, so an edit had to
 /// fit the 400 KB cap whole — and an edit carries a full `FileMetadata` per output file, five
 /// strings each. The bound was `max_compaction_bytes / target_file_bytes x per-file record`, both
 /// of which an embedder sets: lowering `target_file_bytes` to 256 KiB, which `options.hpp`

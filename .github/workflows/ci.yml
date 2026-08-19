@@ -475,7 +475,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: s3,dynamodb
+          SERVICES: s3,dynamodb,kms
         options: >-
           --health-cmd "curl -fs http://localhost:4566/_localstack/health || exit 1"
           --health-interval 10s --health-timeout 5s --health-retries 30

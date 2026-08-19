@@ -56,6 +56,17 @@ struct ReplayConfig {
     /// newer than the output. Get that direction wrong and reads return stale values, which is
     /// exactly what the oracle sees.
     size_t max_compaction_bytes = 0;
+    /// `Tier::max_bytes` on the hot tier of a `split_stores` configuration; zero leaves it
+    /// unbounded. **The deterministic way to drive migration**, and the only one that works here:
+    /// age-driven placement puts a compaction output on the tier its *oldest* write belongs to at
+    /// the moment it is written, so with a bound short relative to the run every output is born
+    /// cold and the migrator never has anything to move. A byte cap does not depend on the clock
+    /// at all, which also keeps the replay reproducible.
+    size_t tier0_max_bytes = 0;
+    /// `Tier::max_age` on the hot tier, in milliseconds; zero leaves the 50 ms default. Set it far
+    /// past the run's duration to take age out of the placement decision, so `tier0_max_bytes` is
+    /// the only thing moving files.
+    uint64_t tier_max_age_ms = 0;
     /// Distinct keys the op stream draws from; zero leaves the generator's default. A narrow
     /// keyspace makes every operation land on top of another, which is what puts a *stale* value
     /// under a newer one — without that there is nothing for a mis-ordered compaction to uncover.

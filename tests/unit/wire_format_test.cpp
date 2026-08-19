@@ -288,6 +288,11 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     EXPECT_EQ(take_varint(content, at), 3u) << "watermark flags: both bounds present";
     EXPECT_EQ(take_varint(content, at), 80u) << "watermark_low";
     EXPECT_EQ(take_varint(content, at), 100u) << "watermark_high";
+    // Reserved for encryption and written empty until the feature lands, so that adding it later
+    // costs no format version. A reserved field still occupies a position, which is the whole
+    // reason this test exists.
+    EXPECT_EQ(take_string(content, at), "") << "encryption_provider";
+    EXPECT_EQ(take_string(content, at), "") << "encryption_metadata";
 
     ASSERT_EQ(take_varint(content, at), 1u) << "deleted_count";
     EXPECT_EQ(take_varint(content, at), 1u) << "deleted level";

@@ -42,6 +42,7 @@ public final class RemoteEnvironment {
 
     private static GenericContainer<?> container;
     private static String endpoint;
+    private static String kmsKeyId;
 
     private RemoteEnvironment() {}
 
@@ -76,7 +77,7 @@ public final class RemoteEnvironment {
         if (endpoint == null) {
             container = new GenericContainer<>(IMAGE)
                                 .withExposedPorts(PORT)
-                                .withEnv("SERVICES", "s3,dynamodb")
+                                .withEnv("SERVICES", "s3,dynamodb,kms")
                                 // The health endpoint, not a log line: a log
                                 // message can appear before the service is
                                 // actually answering, and the first failure would
@@ -90,6 +91,40 @@ public final class RemoteEnvironment {
             createBucket();
         }
         return endpoint;
+    }
+
+    /**
+     * A KMS key for the encryption tests, made on first use.
+     *
+     * <p>LocalStack starts with none, and a key is cheap enough that one shared across the suite is
+     * fine: what the tests vary is the store, not the key. Call {@link #requireEndpoint()} first —
+     * this assumes the container is up.
+     */
+    public static synchronized String requireKmsKeyId() {
+        requireEndpoint();
+        if (kmsKeyId == null) {
+            kmsKeyId = exec("creating a KMS key", "awslocal", "kms", "create-key", "--query",
+                            "KeyMetadata.KeyId", "--output", "text")
+                               .trim();
+            if (kmsKeyId.isEmpty()) throw new IllegalStateException("KMS returned no key id");
+        }
+        return kmsKeyId;
+    }
+
+    /** Runs a CLI command in the container, failing loudly rather than returning a bad value. */
+    private static String exec(String what, String... command) {
+        try {
+            GenericContainer.ExecResult result = container.execInContainer(command);
+            if (result.getExitCode() != 0) {
+                throw new IllegalStateException(
+                        what + " failed: " + result.getStdout() + result.getStderr());
+            }
+            return result.getStdout();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException(what + " failed", e);
+        }
     }
 
     /**

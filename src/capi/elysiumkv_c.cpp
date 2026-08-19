@@ -7,6 +7,8 @@
 #include "elysiumkv/memory_budget.hpp"
 #include "cache/sharded_lru.hpp"
 #include "elysiumkv/db.hpp"
+#include "elysiumkv/aes256_gcm_encryption_provider.hpp"
+#include "elysiumkv/static_encryption_key_manager.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 #include "elysiumkv/disk_cache_blob_store.hpp"
 #include "elysiumkv/disk_blob_store.hpp"
@@ -19,6 +21,7 @@
 // linkage here, so a second TU would get a second slot and a failure reported by
 // one would be invisible to `elysiumkv_last_error()` reading the other.
 #ifdef ELYSIUMKV_WITH_AWS
+#  include "elysiumkv/aws_kms_encryption_key_manager.hpp"
 #  include "elysiumkv/dynamo_manifest_catalog.hpp"
 #  include "elysiumkv/s3_blob_store.hpp"
 #  include "elysiumkv/s3_manifest_catalog.hpp"
@@ -105,6 +108,176 @@ elysiumkv_status fail(Status status, std::string message) {
 Slice as_slice(const uint8_t* data, size_t len) {
     return data == nullptr ? Slice() : Slice(data, len);
 }
+
+/// The C enum back to a `Status`. A free function because three unrelated adapters need it; the
+/// one inside `VtableBlobStore` predates them.
+Status status_from_c(elysiumkv_status status) {
+    switch (status) {
+        case ELYSIUMKV_OK: return Status::Ok;
+        case ELYSIUMKV_NOT_FOUND: return Status::NotFound;
+        case ELYSIUMKV_CORRUPT: return Status::Corrupt;
+        case ELYSIUMKV_UNUSABLE: return Status::Unusable;
+        case ELYSIUMKV_FENCED: return Status::Fenced;
+        case ELYSIUMKV_CONFIG: return Status::Config;
+        case ELYSIUMKV_IO: return Status::Io;
+        case ELYSIUMKV_STALLED: return Status::Stalled;
+        case ELYSIUMKV_UNSUPPORTED: return Status::Unsupported;
+        case ELYSIUMKV_STALE: return Status::Stale;
+        case ELYSIUMKV_RECOVERY_REQUIRED: return Status::RecoveryRequired;
+    }
+    return Status::Io;
+}
+
+constexpr size_t kDataKeyBytes = 32;
+
+/// A key manager supplied by a binding. Holds the vtable by value: the caller's struct is a
+/// description, not a handle, and copying it means the caller may let theirs go.
+class VtableEncryptionKeyManager final : public EncryptionKeyManager {
+public:
+    explicit VtableEncryptionKeyManager(const elysiumkv_encryption_key_manager& vtable)
+        : vtable_(vtable) {}
+
+    ~VtableEncryptionKeyManager() override {
+        if (vtable_.destroy != nullptr) vtable_.destroy(vtable_.context);
+    }
+
+    Result<DataKey> new_data_key() override {
+        // **Zeroed before returning, whatever happened.** Key material sits in this buffer for as
+        // long as it takes to copy it, and nobody else is placed to clear it.
+        std::array<uint8_t, kDataKeyBytes> key{};
+        std::vector<uint8_t> envelope(kMaxEnvelopeBytes);
+        size_t envelope_len = 0;
+
+        const elysiumkv_status status = vtable_.new_data_key(
+            vtable_.context, key.data(), key.size(), envelope.data(), envelope.size(),
+            &envelope_len);
+        if (status != ELYSIUMKV_OK || envelope_len > envelope.size()) {
+            secure_zero(key.data(), key.size());
+            return std::unexpected(status == ELYSIUMKV_OK ? Status::Config : status_from_c(status));
+        }
+
+        DataKey made;
+        made.key = SecretKey(key.data(), key.size());
+        made.envelope.assign(reinterpret_cast<const char*>(envelope.data()), envelope_len);
+        secure_zero(key.data(), key.size());
+        return made;
+    }
+
+    Result<SecretKey> open_data_key(Slice envelope) override {
+        std::array<uint8_t, kDataKeyBytes> key{};
+        const elysiumkv_status status = vtable_.open_data_key(
+            vtable_.context, envelope.data(), envelope.size(), key.data(), key.size());
+        if (status != ELYSIUMKV_OK) {
+            secure_zero(key.data(), key.size());
+            return std::unexpected(status_from_c(status));
+        }
+        SecretKey secret(key.data(), key.size());
+        secure_zero(key.data(), key.size());
+        return secret;
+    }
+
+    /// Generous: a KMS-wrapped 256-bit key is a few hundred bytes, and this buffer lives for the
+    /// duration of one call.
+    static constexpr size_t kMaxEnvelopeBytes = 4096;
+
+private:
+    elysiumkv_encryption_key_manager vtable_;
+};
+
+/// One cipher behind the binding's vtable. The handle is opaque here and is closed exactly once.
+class VtableObjectCipher final : public ObjectCipher {
+public:
+    VtableObjectCipher(const elysiumkv_encryption_provider& vtable, void* cipher)
+        : vtable_(vtable), cipher_(cipher) {}
+
+    ~VtableObjectCipher() override { vtable_.destroy_cipher(vtable_.context, cipher_); }
+
+    size_t chunk_bytes() const override { return vtable_.chunk_bytes(vtable_.context, cipher_); }
+    size_t overhead_bytes() const override {
+        return vtable_.overhead_bytes(vtable_.context, cipher_);
+    }
+    uint64_t object_id() const override { return vtable_.object_id(vtable_.context, cipher_); }
+
+    Status seal(uint64_t chunk, Slice plaintext, Slice aad, std::string& out) override {
+        return transform(vtable_.seal, chunk, plaintext, aad,
+                         plaintext.size() + overhead_bytes(), out);
+    }
+    Status open(uint64_t chunk, Slice ciphertext, Slice aad, std::string& out) override {
+        const size_t overhead = overhead_bytes();
+        if (ciphertext.size() < overhead) return Status::Corrupt;
+        return transform(vtable_.open_chunk, chunk, ciphertext, aad,
+                         ciphertext.size() - overhead, out);
+    }
+
+private:
+    using Transform = elysiumkv_status (*)(void*, void*, uint64_t, const uint8_t*, size_t,
+                                           const uint8_t*, size_t, uint8_t*, size_t, size_t*);
+
+    /// Appends to `out` in place. **Sized from the declared overhead rather than by asking the
+    /// callback twice**: that is the contract `chunk_bytes` and `overhead_bytes` exist to state, and
+    /// a provider that breaks it is refused here rather than silently truncated.
+    Status transform(Transform call, uint64_t chunk, Slice in, Slice aad, size_t capacity,
+                     std::string& out) {
+        const size_t at = out.size();
+        out.resize(at + capacity);
+        size_t produced = 0;
+        const elysiumkv_status status =
+            call(vtable_.context, cipher_, chunk, in.data(), in.size(), aad.data(), aad.size(),
+                 reinterpret_cast<uint8_t*>(out.data()) + at, capacity, &produced);
+        if (status != ELYSIUMKV_OK || produced != capacity) {
+            out.resize(at);
+            return status == ELYSIUMKV_OK ? Status::Corrupt : status_from_c(status);
+        }
+        return Status::Ok;
+    }
+
+    elysiumkv_encryption_provider vtable_;
+    void* cipher_;
+};
+
+/// A construction supplied by a binding.
+class VtableEncryptionProvider final : public EncryptionProvider {
+public:
+    explicit VtableEncryptionProvider(const elysiumkv_encryption_provider& vtable)
+        : vtable_(vtable) {}
+
+    ~VtableEncryptionProvider() override {
+        if (vtable_.destroy != nullptr) vtable_.destroy(vtable_.context);
+    }
+
+    Result<NewObject> create(uint64_t object_id) override {
+        std::vector<uint8_t> metadata(kMaxMetadataBytes);
+        size_t metadata_len = 0;
+        void* cipher = nullptr;
+        const elysiumkv_status status =
+            vtable_.create(vtable_.context, object_id, &cipher, metadata.data(), metadata.size(),
+                           &metadata_len);
+        if (status != ELYSIUMKV_OK) return std::unexpected(status_from_c(status));
+        if (cipher == nullptr || metadata_len > metadata.size()) {
+            return std::unexpected(Status::Config);
+        }
+
+        NewObject made;
+        made.cipher = std::make_shared<VtableObjectCipher>(vtable_, cipher);
+        made.metadata.assign(reinterpret_cast<const char*>(metadata.data()), metadata_len);
+        return made;
+    }
+
+    Result<std::shared_ptr<ObjectCipher>> open(uint64_t object_id, Slice metadata) override {
+        void* cipher = nullptr;
+        const elysiumkv_status status = vtable_.open(vtable_.context, object_id, metadata.data(),
+                                                     metadata.size(), &cipher);
+        if (status != ELYSIUMKV_OK) return std::unexpected(status_from_c(status));
+        if (cipher == nullptr) return std::unexpected(Status::Corrupt);
+        return std::shared_ptr<ObjectCipher>(
+            std::make_shared<VtableObjectCipher>(vtable_, cipher));
+    }
+
+    static constexpr size_t kMaxMetadataBytes = 8192;
+
+private:
+    elysiumkv_encryption_provider vtable_;
+};
 
 /// A store supplied by a binding (the vtable seam). The engine sees an ordinary
 /// `BlobStore`; the callbacks see plain C.
@@ -302,6 +475,103 @@ elysiumkv_options* elysiumkv_options_create(void) {
 }
 
 void elysiumkv_options_destroy(elysiumkv_options* options) { delete options; }
+
+namespace {
+
+/// Shared by the three registration calls below: an id must be non-null and non-empty, because the
+/// empty one belongs to the passthrough the engine registers itself.
+elysiumkv_status check_provider_id(elysiumkv_options* options, const char* id, const char* call) {
+    if (options == nullptr) return fail(Status::Config, std::string(call) + ": null options");
+    if (id == nullptr || *id == '\0') {
+        return fail(Status::Config,
+                    std::string(call) + ": the empty provider id is reserved for the passthrough");
+    }
+    return ELYSIUMKV_OK;
+}
+
+}  // namespace
+
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
+    elysiumkv_options* options, const char* id, const elysiumkv_encryption_key_manager* keys,
+    size_t chunk_bytes) {
+    return guard([&]() -> elysiumkv_status {
+        if (const elysiumkv_status bad =
+                check_provider_id(options, id, "elysiumkv_options_add_aes256_gcm_encryption");
+            bad != ELYSIUMKV_OK) {
+            return bad;
+        }
+        if (keys == nullptr || keys->new_data_key == nullptr || keys->open_data_key == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption: incomplete key manager");
+        }
+
+        auto provider = Aes256GcmEncryptionProvider::open(
+            std::make_shared<VtableEncryptionKeyManager>(*keys), chunk_bytes);
+        if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
+        options->options.encryption.providers[id] = *provider;
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+    elysiumkv_options* options, const char* id, const uint8_t* master_key, size_t master_key_len,
+    size_t chunk_bytes) {
+    return guard([&]() -> elysiumkv_status {
+        if (const elysiumkv_status bad = check_provider_id(
+                options, id, "elysiumkv_options_add_aes256_gcm_encryption_with_static_key");
+            bad != ELYSIUMKV_OK) {
+            return bad;
+        }
+        if (master_key == nullptr || master_key_len != kDataKeyBytes) {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption_with_static_key: the master "
+                        "key must be exactly 32 bytes");
+        }
+
+        auto keys = StaticEncryptionKeyManager::open(Slice(master_key, master_key_len));
+        if (!keys) return fail(keys.error(), "master key rejected");
+        auto provider = Aes256GcmEncryptionProvider::open(*keys, chunk_bytes);
+        if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
+        options->options.encryption.providers[id] = *provider;
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_options_add_encryption_provider(
+    elysiumkv_options* options, const char* id, const elysiumkv_encryption_provider* provider) {
+    return guard([&]() -> elysiumkv_status {
+        if (const elysiumkv_status bad =
+                check_provider_id(options, id, "elysiumkv_options_add_encryption_provider");
+            bad != ELYSIUMKV_OK) {
+            return bad;
+        }
+        // Every callback but `destroy` is load-bearing on the read path, and a null one would be a
+        // crash the first time a chunk is opened rather than a refusal here.
+        if (provider == nullptr || provider->create == nullptr || provider->open == nullptr ||
+            provider->destroy_cipher == nullptr || provider->chunk_bytes == nullptr ||
+            provider->overhead_bytes == nullptr || provider->object_id == nullptr ||
+            provider->seal == nullptr || provider->open_chunk == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_encryption_provider: incomplete vtable");
+        }
+        options->options.encryption.providers[id] =
+            std::make_shared<VtableEncryptionProvider>(*provider);
+        return ELYSIUMKV_OK;
+    });
+}
+
+elysiumkv_status elysiumkv_options_set_primary_encryption_provider(elysiumkv_options* options,
+                                                               const char* id) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_set_primary_encryption_provider: null options");
+        }
+        // Null and empty both mean the passthrough, which is the default and is always registered.
+        options->options.encryption.primary_provider = id == nullptr ? "" : id;
+        return ELYSIUMKV_OK;
+    });
+}
 
 elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* store,
                                         elysiumkv_durability durability, int64_t max_age_ms,
@@ -675,7 +945,7 @@ namespace {
 elysiumkv_status no_aws(const char* what) {
     return fail(Status::Config,
                 std::string(what) + ": this library was built without ELYSIUMKV_BUILD_AWS, so the "
-                                    "S3 and DynamoDB implementations are not compiled in "
+                                    "S3, DynamoDB and KMS implementations are not compiled in "
                                     "(elysiumkv_features() reports ELYSIUMKV_FEATURE_AWS when they are)");
 }
 }  // namespace
@@ -685,6 +955,12 @@ elysiumkv_status elysiumkv_s3_blob_store_create(const char*, const char*, const 
                                             const char*, void** out) {
     if (out != nullptr) *out = nullptr;
     return no_aws("elysiumkv_s3_blob_store_create");
+}
+
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+    elysiumkv_options*, const char*, const char*, const char*, const char*, const char*,
+    const char*, int64_t, size_t) {
+    return no_aws("elysiumkv_options_add_aes256_gcm_encryption_with_kms");
 }
 
 elysiumkv_status elysiumkv_s3_manifest_catalog_create(const char*, const char*, const char*,
@@ -799,6 +1075,40 @@ elysiumkv_status elysiumkv_s3_manifest_catalog_create(const char* bucket, const 
     });
 }
 
+elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+    elysiumkv_options* options, const char* id, const char* key_id, const char* region,
+    const char* endpoint, const char* access_key, const char* secret_key, int64_t timeout_ms,
+    size_t chunk_bytes) {
+    return guard([&]() -> elysiumkv_status {
+        if (const elysiumkv_status bad = check_provider_id(
+                options, id, "elysiumkv_options_add_aes256_gcm_encryption_with_kms");
+            bad != ELYSIUMKV_OK) {
+            return bad;
+        }
+        if (key_id == nullptr || *key_id == '\0') {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption_with_kms: key_id is required");
+        }
+
+        KmsOptions kms;
+        kms.key_id = key_id;
+        if (region != nullptr && *region != '\0') kms.region = region;
+        kms.endpoint = text(endpoint);
+        kms.access_key = text(access_key);
+        kms.secret_key = text(secret_key);
+        auto wait = duration(timeout_ms, kms.timeout);
+        if (!wait) return fail(wait.error(), "a negative KMS timeout is not a timeout");
+        kms.timeout = *wait;
+
+        auto keys = AwsKmsEncryptionKeyManager::open(std::move(kms));
+        if (!keys) return fail(keys.error(), "KMS key manager configuration rejected");
+        auto provider = Aes256GcmEncryptionProvider::open(*keys, chunk_bytes);
+        if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
+        options->options.encryption.providers[id] = *provider;
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_dynamo_manifest_catalog_create(const char* table, const char* store_id,
                                                       const char* region, const char* endpoint,
                                                       const char* access_key,
@@ -867,8 +1177,13 @@ elysiumkv_status open_common(const elysiumkv_options* options, elysiumkv_db** ou
     }) : DB::open_with_result(copy);
 
     if (!opened) {
-        return fail(opened.error(), std::string("open failed: ") +
-                                       std::string(status_name(opened.error())));
+        // **The engine's message, not just the status.** A dozen distinct configuration mistakes
+        // all arrive here as `config`, and the instance that knew which one is already destroyed —
+        // `elysiumkv::last_error()` is where it left the explanation.
+        std::string why = std::string("open failed: ") + std::string(status_name(opened.error()));
+        const std::string_view detail = elysiumkv::last_error();
+        if (!detail.empty()) why += ": " + std::string(detail);
+        return fail(opened.error(), std::move(why));
     }
 
     handle->db = std::move(opened->db);
@@ -1410,7 +1725,7 @@ constexpr uint32_t kStatsFormatVersion = 1;
 // the header declares its own length, so a decoder that starts records at `header_bytes` skips
 // what it does not recognise — which is the property that made the previous seven appended
 // scalars a non-event too.
-constexpr uint32_t kStatsHeaderBytes = 240;
+constexpr uint32_t kStatsHeaderBytes = 248;
 constexpr uint32_t kStatsLevelRecordBytes = 48;
 // 32 for the original fields, then the store's seven I/O counters. Appended, and the header says
 // how wide a record is — so a decoder written against 32 reads the prefix of each and steps
@@ -1489,6 +1804,7 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.u64(stats.memtable_entries);
     out.u64(stats.memtable_tombstones);
     out.u64(stats.background_failures);
+    out.u64(stats.compactions_trimmed);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);

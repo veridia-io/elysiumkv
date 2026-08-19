@@ -1,6 +1,7 @@
 #ifndef ELYSIUMKV_VERSION_VERSION_SET_HPP
 #define ELYSIUMKV_VERSION_VERSION_SET_HPP
 
+#include "crypt/provider_registry.hpp"
 #include "elysiumkv/manifest_catalog.hpp"
 #include "version/version.hpp"
 
@@ -41,8 +42,16 @@ public:
     /// collector cannot see: `live_versions_` is a process-local list of weak pointers, so without
     /// a delay a compaction here deletes objects a reader elsewhere is still reading. Zero
     /// retention is today's behaviour and is correct when there are no readers.
+    /// `encryption` frames every manifest payload this instance writes and routes every one it
+    /// reads. **The same registry the SST path uses**, so a file and the edit recording it can
+    /// never disagree about what a provider id means.
     VersionSet(ManifestCatalog& catalog, int edits_per_generation, DeleteObjects deleter,
+               const ProviderRegistry& encryption,
                std::function<uint64_t()> clock = nullptr, Duration obsolete_retention = Duration(0));
+
+    /// Set when a recovery failure has something an operator can act on — an encryption provider
+    /// the manifest names and this process has not registered, most of all. Empty otherwise.
+    const std::string& last_error() const { return last_error_; }
 
     /// Every file number the current version references. The orphan sweep diffs a store listing
     /// against this, and against `pending_deletions()`, to decide what is unreferenced.
@@ -172,6 +181,8 @@ private:
     std::array<std::atomic<uint32_t>, kPublishedLevels> file_counts_{};
 
     ManifestCatalog& catalog_;
+    const ProviderRegistry& encryption_;
+    std::string last_error_;
     int edits_per_generation_;
     DeleteObjects deleter_;
 

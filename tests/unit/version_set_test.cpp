@@ -18,6 +18,14 @@ namespace {
 
 using test::TempDir;
 
+/// **Every `VersionSet` here frames its manifest payloads**, through the passthrough, exactly as an
+/// unencrypted store does. There is no unframed mode to fall back to, which is what keeps one
+/// format rather than two.
+const ProviderRegistry& plain_encryption() {
+    static const ProviderRegistry registry = passthrough_registry();
+    return registry;
+}
+
 FileMetadata file(int level, uint64_t number) {
     return FileMetadata{.level = level,
                         .file_number = number,
@@ -42,7 +50,8 @@ protected:
     }
 
     std::unique_ptr<VersionSet> make(int edits_per_generation = 1000) {
-        auto set = std::make_unique<VersionSet>(*catalog_, edits_per_generation, recorder());
+        auto set = std::make_unique<VersionSet>(*catalog_, edits_per_generation, recorder(),
+                                               plain_encryption());
         return set;
     }
 
@@ -230,7 +239,8 @@ TEST_F(VersionSetTest, FilesThatCouldNotBeDeletedStayPending) {
                             ++delete_calls_;
                             for (const FileMetadata& f : files) deleted_.push_back(f.file_number);
                             return refusing ? files : std::vector<FileMetadata>{};
-                        });
+                        },
+                        plain_encryption());
     ASSERT_EQ(versions.create(), Status::Ok);
 
     VersionEdit add;
@@ -367,7 +377,8 @@ private:
         VersionSet roller(inner_, /*edits_per_generation=*/1,
                           [](const std::vector<FileMetadata>&) {
                               return std::vector<FileMetadata>{};
-                          });
+                          },
+                          plain_encryption());
         if (roller.recover() != Status::Ok) return;
         VersionEdit nudge;
         nudge.added.push_back(file(0, roller.allocate_file_number()));
@@ -392,7 +403,7 @@ TEST_F(VersionSetTest, AGenerationRolledWhileTheSnapshotIsReadIsNotCorruption) {
 
     DiskManifestCatalog inner(dir_.path());
     RollingCatalog rolling(inner, RollingCatalog::When::WhileReadingTheSnapshot);
-    VersionSet reader(rolling, 1000, recorder());
+    VersionSet reader(rolling, 1000, recorder(), plain_encryption());
 
     EXPECT_EQ(reader.recover(), Status::Ok) << "the reader did nothing wrong";
     EXPECT_GT(rolling.rolls, 0) << "no roll happened, so this configuration tested nothing";
@@ -414,14 +425,14 @@ TEST_F(VersionSetTest, AGenerationRolledWhileTheEditsAreListedDoesNotMoveAReader
     }
 
     DiskManifestCatalog plain(dir_.path());
-    VersionSet before(plain, 1000, recorder());
+    VersionSet before(plain, 1000, recorder(), plain_encryption());
     ASSERT_EQ(before.recover(), Status::Ok);
     const size_t seen = before.current()->file_count(0);
     ASSERT_EQ(seen, 3u) << "three edits, three files";
 
     DiskManifestCatalog inner(dir_.path());
     RollingCatalog rolling(inner, RollingCatalog::When::WhileListingTheEdits);
-    VersionSet reader(rolling, 1000, recorder());
+    VersionSet reader(rolling, 1000, recorder(), plain_encryption());
 
     ASSERT_EQ(reader.recover(), Status::Ok);
     EXPECT_GT(rolling.rolls, 0) << "no roll happened, so this configuration tested nothing";
@@ -436,7 +447,7 @@ TEST_F(VersionSetTest, AnEditAddressTakenByAnotherWriterFencesTheInstance) {
     // A second writer on the same catalog, recovering the state ours just created —
     // so both allocate the same next edit sequence.
     DiskManifestCatalog other_catalog(dir_.path());
-    VersionSet theirs(other_catalog, 1000, recorder());
+    VersionSet theirs(other_catalog, 1000, recorder(), plain_encryption());
     ASSERT_EQ(theirs.recover(), Status::Ok);
 
     VersionEdit theirs_edit;

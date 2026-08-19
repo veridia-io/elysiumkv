@@ -22,6 +22,14 @@ struct SstReaderOptions {
     /// Block-cache key component; also what `evict_file` addresses.
     uint64_t file_number = 0;
     BlockCache* block_cache = nullptr;
+
+    /// Kept alive for the reader's lifetime, and used in place of the `store` argument when set.
+    ///
+    /// **For the encryption boundary, which is a view of one object rather than a store.** The
+    /// reader holds a `BlobStore&`, so a per-object wrapper needs an owner that outlives it — and
+    /// the reader is the only thing that knows how long that is. Null leaves the reader reading the
+    /// store it was handed, which is every unencrypted path.
+    std::shared_ptr<BlobStore> owned_store;
 };
 
 /// ARCHITECTURE.md "Inside an SST" — lazy: open reads the footer, the index and the filter, and nothing else.
@@ -87,9 +95,25 @@ public:
     }
 
 private:
-    SstReader(BlobStore& store, std::string name, uint64_t file_size, SstReaderOptions options)
-        : store_(store), name_(std::move(name)), file_size_(file_size), options_(options) {}
+    /// Unconstructible outside this class, which is what keeps the constructor below effectively
+    /// private while `make_unique` can still reach it.
+    struct Private {
+        explicit Private() = default;
+    };
 
+public:
+    /// **Public only so `make_unique` can call it** — `Private` is the actual access control.
+    /// Worth the indirection because the alternative is a raw `new` handed to a `unique_ptr`, and
+    /// the analyzer cannot follow that ownership into a `std::expected` return, so it reports a
+    /// leak on a function that has none.
+    SstReader(Private /*unused*/, BlobStore& store, std::string name, uint64_t file_size,
+              SstReaderOptions options)
+        : store_(store),
+          name_(std::move(name)),
+          file_size_(file_size),
+          options_(std::move(options)) {}
+
+private:
     size_t max_uncompressed() const;
 
     /// Loads the bloom filter if this is the first `get`. Every reader of `filter_` goes through

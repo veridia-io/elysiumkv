@@ -364,6 +364,20 @@ private:
     /// every file on that store; any `Io` is neither, and must not discard.
     std::vector<ListResult> list_all_stores() const;
     bool reads_are_blocked() const;
+
+    /// The provider a file's bytes were written under, or null when it names one that is not
+    /// registered — which is a configuration failure, not corruption.
+    EncryptionProvider* provider_for(const std::string& id) const;
+
+    /// The cipher `file` was written under. **Null for an unencrypted file**, which the callers
+    /// read as "use the store directly" — the short-circuit that keeps a store with encryption off
+    /// paying nothing for the machinery being present.
+    Result<std::shared_ptr<ObjectCipher>> cipher_for(const FileMetadata& file) const;
+
+    /// Wraps `store` so the engine reads plaintext out of `file`. Null when the file is not
+    /// encrypted.
+    Result<std::shared_ptr<BlobStore>> decrypting_view(BlobStore& store,
+                                                       const FileMetadata& file) const;
     Status verify_stores_and_discard();
     /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
     /// been **continuously unreferenced for `orphan_retention`**.
@@ -407,7 +421,19 @@ private:
     std::shared_ptr<SkiplistMemtable> new_memtable();
     /// Writes a new SST, renumbering if the name is taken (ARCHITECTURE.md "Immutable named objects"). Returns the file number
     /// actually used, which the caller records in `FileMetadata`.
-    Result<uint64_t> write_new_sst(BlobStore& store, Slice bytes);
+    /// What a successful write of a new object leaves for the manifest to record.
+    struct WrittenObject {
+        uint64_t file_number = 0;
+        /// The provider the bytes were sealed under, and what it needs to open them again. Empty
+        /// for the passthrough, which is also what a file written before encryption records.
+        std::string encryption_provider;
+        std::string encryption_metadata;
+    };
+    /// `seal` false writes `bytes` verbatim, for the one caller that already holds a sealed
+    /// object: **migration copies between tiers byte for byte** and must not encrypt twice. It
+    /// carries the source file's provider and metadata forward instead, which stay valid because
+    /// the chunks authenticate against the identity recorded there rather than the new number.
+    Result<WrittenObject> write_new_sst(BlobStore& store, Slice bytes, bool seal = true);
 
     // --- read path
     Result<std::shared_ptr<SstReader>> reader_for(const FileMetadata& file);
@@ -488,6 +514,11 @@ private:
     /// only reachable with more levels than any real configuration has.
     bool published_level_counts_ = false;
 
+    /// Resolved once at open: the configured providers plus the passthrough under `""`, and the id
+    /// new objects are written under. Immutable afterwards, so no lock guards it — which is also
+    /// what lets `VersionSet` hold a reference to it for the life of the database.
+    ProviderRegistry encryption_;
+
     mutable std::mutex mem_mutex_;
     /// The floor a write is refused against, **guarded by `mem_mutex_`** and published by
     /// `truncate_below` *before* its manifest edit rather than after.
@@ -551,6 +582,7 @@ private:
     std::atomic<bool> transient_stalled_{false};
     std::atomic<bool> suppress_maintenance_wakes_{false};
     std::atomic<uint64_t> density_compactions_{0};
+    std::atomic<uint64_t> trimmed_compactions_{0};
     /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
     std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};

@@ -1,6 +1,7 @@
 #include "compact/picker.hpp"
 
 #include <algorithm>
+#include <set>
 #include <utility>
 
 namespace elysiumkv {
@@ -48,7 +49,8 @@ std::vector<FileMetadata> transitive_overlap(const Version& version, int level,
     }
 }
 
-/// Trims an overlapping level's input set to `budget`, **oldest first**.
+/// Trims an overlapping level's input set to `budget`, **oldest first**. True when it cut
+/// anything, which is what `Stats::compactions_trimmed` counts.
 ///
 /// `max_compaction_bytes` was consulted only when deciding whether to *expand* a compaction back
 /// into its source level, so the primary set was unbounded — and at L0 the transitive closure is
@@ -64,22 +66,38 @@ std::vector<FileMetadata> transitive_overlap(const Version& version, int level,
 ///
 /// So the set stays downward-closed in age, and at least the oldest file always goes — a budget
 /// smaller than one file must still make progress rather than stall the level for ever.
-void trim_to_budget(std::vector<FileMetadata>& inputs, size_t budget) {
-    if (budget == 0 || total_bytes(inputs) <= budget) return;
+bool trim_to_budget(std::vector<FileMetadata>& inputs, size_t budget) {
+    if (budget == 0 || total_bytes(inputs) <= budget) return false;
 
-    std::sort(inputs.begin(), inputs.end(),
-              [](const FileMetadata& a, const FileMetadata& b) {
-                  return a.file_number < b.file_number;
-              });
+    // **Which files to keep is decided by age; the order they are left in is not touched.** The
+    // vector is handed to the merge as its child list, and `write_compaction_outputs` resolves a
+    // tie by lowest child index — which is the recency rule only while the children arrive in the
+    // level's own order, newest first at L0. Sorting this vector by file number to choose from it
+    // therefore reversed exactly the thing it was protecting: the merge took the *oldest* value for
+    // every duplicated key, and a key not held by a newer file left behind at L0 read back as the
+    // value it had been overwritten from.
+    std::vector<uint64_t> by_age;
+    by_age.reserve(inputs.size());
+    for (const FileMetadata& file : inputs) by_age.push_back(file.file_number);
+    std::sort(by_age.begin(), by_age.end());
 
+    std::set<uint64_t> keep;
     uint64_t bytes = 0;
-    size_t kept = 0;
-    for (const FileMetadata& file : inputs) {
-        if (kept != 0 && bytes + file.file_bytes > budget) break;
-        bytes += file.file_bytes;
-        ++kept;
+    for (const uint64_t number : by_age) {
+        const auto found = std::find_if(inputs.begin(), inputs.end(),
+                                        [number](const FileMetadata& file) {
+                                            return file.file_number == number;
+                                        });
+        // At least the oldest always goes: a budget smaller than one file must still make progress
+        // rather than stall the level for ever.
+        if (!keep.empty() && bytes + found->file_bytes > budget) break;
+        bytes += found->file_bytes;
+        keep.insert(number);
     }
-    inputs.resize(kept);
+    std::erase_if(inputs, [&keep](const FileMetadata& file) {
+        return keep.count(file.file_number) == 0;
+    });
+    return true;
 }
 
 /// ARCHITECTURE.md "Compaction" — the seed for a non-overlapping level comes from the persisted compaction
@@ -255,7 +273,7 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
 
     if (is_overlapping_level(chosen, source)) {
         compaction.inputs = transitive_overlap(version, chosen, lower, upper);
-        trim_to_budget(compaction.inputs, max_compaction_bytes);
+        compaction.inputs_trimmed = trim_to_budget(compaction.inputs, max_compaction_bytes);
         // Trimming narrows the span, so the bounds are rebuilt from what survived rather than
         // carried over from the closure.
         lower = compaction.inputs.front().effective_smallest();

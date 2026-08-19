@@ -4,7 +4,10 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <memory>
+#include <set>
+#include <string>
 #include <vector>
 
 namespace elysiumkv::test {
@@ -258,6 +261,56 @@ TEST_F(ConfigValidationTest, GuardedOpenAcceptsAnAllDurableConfiguration) {
     EXPECT_TRUE(DB::open(base()).has_value());
     EXPECT_TRUE(DB::open(make_tiered_options(store_, Duration(60'000))).has_value())
         << "several tiers are fine; it is transience the guard is about";
+}
+
+/// **`Status::Config` names one bucket with a dozen causes in it**, and an operator holding only
+/// the status has to bisect the options struct. Each rejection therefore leaves a message behind,
+/// and this pins that they are distinguishable rather than a single generic sentence.
+///
+/// Checked by substring rather than by exact text: the wording is allowed to improve, the fact that
+/// it identifies the offending option is not.
+TEST_F(ConfigValidationTest, EachRejectionSaysWhichOneItWas) {
+    struct Case {
+        const char* names;
+        std::function<void(Options&)> spoil;
+    };
+    const std::vector<Case> cases = {
+        {"manifest_catalog", [](Options& o) { o.manifest_catalog.reset(); }},
+        {"compaction_window_bytes", [](Options& o) { o.compaction_window_bytes = 0; }},
+        {"flush_interval_jitter", [](Options& o) { o.flush_interval_jitter = 2.0; }},
+        {"levels", [](Options& o) { o.levels.clear(); }},
+        {"tiers", [](Options& o) { o.tiers.clear(); }},
+        {"orphan_retention",
+         [](Options& o) {
+             o.obsolete_retention = Duration(60'000);
+             o.orphan_retention = Duration(1'000);
+         }},
+    };
+
+    std::set<std::string> seen;
+    for (const Case& c : cases) {
+        Options options = base();
+        c.spoil(options);
+        ASSERT_EQ(open_error(options), Status::Config) << c.names;
+        const std::string why(last_error());
+        EXPECT_NE(why.find(c.names), std::string::npos)
+            << "the message must name the option that was wrong: " << c.names << " -> " << why;
+        EXPECT_TRUE(seen.insert(why).second)
+            << "two different mistakes produced the same message: " << why;
+    }
+}
+
+/// A configuration that opens must not leave a stale explanation behind for the next failure to be
+/// blamed on — the slot is read after a call, and a message that outlived its call is worse than
+/// none.
+TEST_F(ConfigValidationTest, ASuccessfulOpenClearsTheExplanation) {
+    Options bad = base();
+    bad.manifest_catalog.reset();
+    ASSERT_EQ(open_error(bad), Status::Config);
+    ASSERT_FALSE(last_error().empty());
+
+    ASSERT_EQ(open_error(base()), Status::Ok);
+    EXPECT_TRUE(last_error().empty()) << last_error();
 }
 
 TEST_F(ConfigValidationTest, StatsReportBothAxes) {

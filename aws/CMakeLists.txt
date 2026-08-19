@@ -1,10 +1,11 @@
 # ARCHITECTURE.md "Dependencies and artifacts" — the remote implementations, confined to their own target.
-find_package(AWSSDK CONFIG REQUIRED COMPONENTS s3 dynamodb)
+find_package(AWSSDK CONFIG REQUIRED COMPONENTS s3 dynamodb kms)
 
 add_library(elysiumkv_aws STATIC
     s3_blob_store.cpp
     s3_manifest_catalog.cpp
     dynamo_manifest_catalog.cpp
+    aws_kms_encryption_key_manager.cpp
 )
 target_include_directories(elysiumkv_aws
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -52,6 +53,12 @@ if(ELYSIUMKV_BUILD_TESTS)
     target_include_directories(elysiumkv_s3_catalog_smoke SYSTEM PRIVATE ${AWSSDK_INCLUDE_DIRS})
     add_test(NAME S3.CatalogSmoke COMMAND elysiumkv_s3_catalog_smoke)
     set_tests_properties(S3.CatalogSmoke PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(elysiumkv_kms_smoke kms_smoke_main.cpp)
+    target_link_libraries(elysiumkv_kms_smoke PRIVATE elysiumkv_aws elysiumkv_flags)
+    target_include_directories(elysiumkv_kms_smoke SYSTEM PRIVATE ${AWSSDK_INCLUDE_DIRS})
+    add_test(NAME Kms.Smoke COMMAND elysiumkv_kms_smoke)
+    set_tests_properties(Kms.Smoke PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(elysiumkv_dynamo_catalog_smoke dynamo_catalog_smoke_main.cpp)
     target_link_libraries(elysiumkv_dynamo_catalog_smoke PRIVATE elysiumkv_aws elysiumkv_flags)

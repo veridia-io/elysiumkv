@@ -182,6 +182,7 @@ public final class ElysiumKVStats {
     private final long memtableEntries;
     private final long memtableTombstones;
     private final long backgroundFailures;
+    private final long compactionsTrimmed;
     private final long durableWatermark;
     private final boolean watermarkPresent;
     private final List<Level> levels;
@@ -223,6 +224,7 @@ public final class ElysiumKVStats {
         memtableEntries = headerBytes > 216 ? readLong(buffer, 216) : 0L;
         memtableTombstones = headerBytes > 224 ? readLong(buffer, 224) : 0L;
         backgroundFailures = headerBytes > 232 ? readLong(buffer, 232) : 0L;
+        compactionsTrimmed = headerBytes > 240 ? readLong(buffer, 240) : 0L;
         durableWatermark = headerBytes > 200 ? readLong(buffer, 200) : 0L;
         watermarkPresent = headerBytes > 208 && buffer[208] != 0;
 
@@ -345,6 +347,17 @@ public final class ElysiumKVStats {
      * exactly like a healthy one.
      */
     public long backgroundFailures() { return backgroundFailures; }
+
+    /**
+     * Compactions whose input set {@code maxCompactionBytes} cut down, of {@link #compactions()}.
+     *
+     * <p><b>The budget biting is a trade, and this is the only way to see it.</b> A trimmed
+     * compaction leaves files behind at an overlapping level, so that level compacts again sooner:
+     * the budget buys a bounded exposure window with write amplification. Near zero means the
+     * budget is never reached; near {@code compactions()} means nearly every one is being cut, and
+     * raising it would do less total work.
+     */
+    public long compactionsTrimmed() { return compactionsTrimmed; }
 
     /**
      * An <strong>upper bound</strong> on the number of distinct live keys — {@code records -

@@ -76,6 +76,9 @@ void put_file(std::string& out, const FileMetadata& file) {
     put_varint64(out, file.min_write_time_ms);
     put_varint64(out, file.max_write_time_ms);
     put_watermark(out, file.watermark);
+    // Reserved for encryption; empty until the feature that fills them lands. See the field docs.
+    put_string(out, file.encryption_provider);
+    put_string(out, file.encryption_metadata);
 }
 
 bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
@@ -98,7 +101,9 @@ bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
     file.compression = static_cast<Compression>(codec);
     if (!get_varint64(p, limit, file.min_write_time_ms)) return false;
     if (!get_varint64(p, limit, file.max_write_time_ms)) return false;
-    return get_watermark(p, limit, file.watermark);
+    if (!get_watermark(p, limit, file.watermark)) return false;
+    if (!get_string(p, limit, file.encryption_provider)) return false;
+    return get_string(p, limit, file.encryption_metadata);
 }
 
 void put_pointers(std::string& out, const std::vector<std::pair<int, std::string>>& pointers) {

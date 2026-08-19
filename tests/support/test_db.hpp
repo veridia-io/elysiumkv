@@ -118,7 +118,14 @@ inline std::shared_ptr<BlobStore> wrap_in_cache_chain(std::shared_ptr<BlobStore>
     auto disk = std::make_shared<DiskCacheBlobStore>(std::move(below), cache_root / (label + "-disk"),
                                                      1u << 20, /*cache_on_write=*/true,
                                                      fetch_granularity);
-    return std::make_shared<MemoryCacheBlobStore>(disk, nullptr, 64u << 10,
+    // **4 KiB, and the size is load-bearing.** `cache_on_write` populates on every write, so a
+    // layer large enough to hold the working set is a layer that never misses — and the refill
+    // path, which is where `fetch_granularity` lives and where a cache can return the wrong
+    // bytes, is reached only on a miss. At 64 KiB the differential suite recorded **zero misses in
+    // every configuration**, and the chunked configs produced counters byte-identical to the
+    // unchunked ones. 4 KiB gives both paths real traffic — roughly two hits per miss — where 1 KiB
+    // starves the hit path instead.
+    return std::make_shared<MemoryCacheBlobStore>(disk, nullptr, 4u << 10,
                                                   /*cache_on_write=*/true, fetch_granularity);
 }
 

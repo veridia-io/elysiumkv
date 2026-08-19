@@ -329,6 +329,117 @@ typedef struct {
 
 ELYSIUMKV_API void* elysiumkv_blob_store_from_vtable(const elysiumkv_blob_store_vtable*);
 
+/* --- encryption at rest -----------------------------------------------------------------
+ *
+ * Two seams, and most embedders need only the second: the engine owns the cryptography, the
+ * embedder owns the key custody. There is always a provider — one that does nothing is registered
+ * under the reserved empty id and is primary unless another is named — so an unencrypted store is
+ * not a special case, it is the passthrough being primary.
+ *
+ * Every callback returns ELYSIUMKV_OK or an error, and every out-parameter is written only on OK.
+ * A buffer too small is ELYSIUMKV_CONFIG with the required length in the *_len out-parameter, so a
+ * caller can size and retry.
+ *
+ * **Key material handed to the engine is copied into engine-owned storage and the caller's buffer
+ * is zeroed before the call returns.** Ownership of that hygiene is stated here because otherwise
+ * it belongs to nobody. */
+
+/* Wrapping and unwrapping. Keys are 32 bytes; anything else is a configuration error. */
+typedef struct {
+    void* context;
+    /* A fresh data key: the plaintext in key_out, the form safe to persist in envelope_out. */
+    elysiumkv_status (*new_data_key)(void* context, uint8_t* key_out, size_t key_cap,
+                                     uint8_t* envelope_out, size_t envelope_cap,
+                                     size_t* envelope_len);
+    /* The plaintext key for an envelope this manager produced. */
+    elysiumkv_status (*open_data_key)(void* context, const uint8_t* envelope, size_t envelope_len,
+                                      uint8_t* key_out, size_t key_cap);
+    /* Called once when the options are destroyed. May be NULL. */
+    void (*destroy)(void* context);
+} elysiumkv_encryption_key_manager;
+
+/* A whole construction, for an embedder that must use a specific one.
+ *
+ * **One vtable rather than a provider and a separate cipher**, so there is one lifetime crossing
+ * the boundary rather than two: create and open return an opaque cipher handle that the remaining
+ * calls operate on, and destroy_cipher ends it.
+ *
+ * chunk_bytes and overhead_bytes must be constant for a cipher's life — they are read once and
+ * cached, and a value that varies corrupts reads in a way the engine cannot detect. object_id must
+ * return what create was given, recorded in the metadata: migration renumbers a byte-for-byte copy,
+ * so authenticating against a file's current number would strand every migrated file.
+ *
+ * seal and open_chunk are called **once per chunk, on background threads**. A binding that upcalls
+ * into a managed runtime has to attach those threads. */
+typedef struct {
+    void* context;
+    elysiumkv_status (*create)(void* context, uint64_t object_id, void** cipher_out,
+                               uint8_t* metadata_out, size_t metadata_cap, size_t* metadata_len);
+    elysiumkv_status (*open)(void* context, uint64_t object_id, const uint8_t* metadata,
+                             size_t metadata_len, void** cipher_out);
+    void (*destroy_cipher)(void* context, void* cipher);
+
+    size_t (*chunk_bytes)(void* context, void* cipher);
+    size_t (*overhead_bytes)(void* context, void* cipher);
+    uint64_t (*object_id)(void* context, void* cipher);
+
+    elysiumkv_status (*seal)(void* context, void* cipher, uint64_t chunk,
+                             const uint8_t* plaintext, size_t plaintext_len,
+                             const uint8_t* aad, size_t aad_len,
+                             uint8_t* out, size_t out_cap, size_t* out_len);
+    elysiumkv_status (*open_chunk)(void* context, void* cipher, uint64_t chunk,
+                                   const uint8_t* ciphertext, size_t ciphertext_len,
+                                   const uint8_t* aad, size_t aad_len,
+                                   uint8_t* out, size_t out_cap, size_t* out_len);
+    /* Called once when the options are destroyed. May be NULL. */
+    void (*destroy)(void* context);
+} elysiumkv_encryption_provider;
+
+/* Registers the built-in AES-256-GCM construction under `id`, keyed by the embedder's manager: a
+ * fresh data key per object, wrapped by that manager. This is the call almost everyone wants.
+ * `chunk_bytes` zero leaves the default. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
+    elysiumkv_options*, const char* id, const elysiumkv_encryption_key_manager*,
+    size_t chunk_bytes);
+
+/* The same construction, keyed by one master key held in this process rather than by a callback.
+ *
+ * **A data key is still minted per object and wrapped under the master key**, because the engine's
+ * nonces are derived from the chunk index: one key across every object would repeat nonces, which
+ * breaks GCM outright. So this is a key-custody choice, not a weaker construction.
+ *
+ * `master_key` must be exactly 32 bytes. It is copied into storage the engine zeroes
+ * deterministically; the caller's buffer is untouched and remains theirs to wipe.
+ *
+ * Suitable where the master key arrives from a secrets manager at startup. Where it must never
+ * enter the process at all, use the KMS form below or supply a manager through the vtable. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
+    elysiumkv_options*, const char* id, const uint8_t* master_key, size_t master_key_len,
+    size_t chunk_bytes);
+
+/* The same construction over AWS KMS: `GenerateDataKey` per object, `Decrypt` to reopen one, so the
+ * key that wraps them never enters this process.
+ *
+ * Absent unless the library was built with the AWS SDK — ELYSIUMKV_CONFIG naming the build option
+ * otherwise, like the remote seams below. NULL for `region`, `endpoint` or the credentials means
+ * the same as it does there; zero for `timeout_ms` means the built-in default.
+ *
+ * **`key_id` is what a rotation changes.** The wrapped form records which key produced it, so files
+ * written under an earlier one keep opening without it being named here. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
+    elysiumkv_options*, const char* id, const char* key_id, const char* region,
+    const char* endpoint, const char* access_key, const char* secret_key, int64_t timeout_ms,
+    size_t chunk_bytes);
+
+/* Registers an embedder's own construction under `id`. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_encryption_provider(
+    elysiumkv_options*, const char* id, const elysiumkv_encryption_provider*);
+
+/* Which registered id writes new objects. Must name one that was added; an empty or NULL id means
+ * the passthrough, which is the default. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_primary_encryption_provider(
+    elysiumkv_options*, const char* id);
+
 /* --- the shared memory budget (ARCHITECTURE.md "A process-wide memory budget") -----------------------------------------
  *
  * **Per process, not per instance**, which is the entire reason it is a separate handle
@@ -689,7 +800,10 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *     u64 durable_watermark                            offset 200
  *     u8  watermark_present                            offset 208, 0 when unset
  *     u8  reserved[7]                                  offset 209
- *                                                      header_bytes = 216
+ *     u64 memtable_entries, memtable_tombstones,
+ *         background_failures                          offset 216
+ *     u64 compactions_trimmed                          offset 240
+ *                                                      header_bytes = 248
  *
  * `watermark_present` exists because **zero is a valid watermark** — a store at the
  * start of its log — so the value alone cannot express absence. An exporter omits

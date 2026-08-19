@@ -4,11 +4,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace elysiumkv::test {
 namespace {
@@ -76,6 +78,59 @@ protected:
     Options options_;
     std::unique_ptr<DB> db_;
 };
+
+/// **A trimmed L0 closure must resolve its duplicates newest-first.** `trim_to_budget` chooses
+/// which files to keep by age, and choosing them by sorting the input vector left that vector in
+/// ascending file-number order — the reverse of the order the merge reads recency from. Every key
+/// duplicated inside the trimmed set then resolved to its *oldest* copy.
+///
+/// It is invisible unless a key's newest copy is inside the trimmed set and absent from the newer
+/// files left behind at L0, which is what the third generation here arranges: it holds only the last
+/// key, so it overlaps the others' span — and is therefore in the closure — while shadowing none of
+/// the keys below it.
+TEST_F(CompactionTest, TrimmingAnL0ClosureKeepsTheNewestOfWhatItMerged) {
+    Options options = make_options(store_, Compression::None, 1u << 20);
+    // High enough that building L0 by hand triggers no compaction of its own.
+    options.levels[0].max_files = 10;
+    open(options);
+
+    for (const char tag : {'a', 'b'}) {
+        const std::string value(64, tag);
+        for (int i = 0; i < 40; ++i) {
+            ASSERT_EQ(db_->put(Slice::from(key_at(i)), Slice::from(value)), Status::Ok);
+        }
+        ASSERT_EQ(db_->flush(), Status::Ok);
+    }
+    ASSERT_EQ(db_->put(Slice::from(key_at(39)), Slice::from(std::string(64, 'c'))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+
+    std::vector<uint64_t> sizes;
+    for (const FileMetadata& f : engine().current_version()->files_at(0)) {
+        sizes.push_back(f.file_bytes);
+    }
+    std::sort(sizes.begin(), sizes.end());
+    ASSERT_EQ(sizes.size(), 3u);
+    // Room for the two full generations and not for all three, so the trim is the path taken.
+    const size_t budget = static_cast<size_t>(sizes[1] + sizes[2]);
+
+    db_.reset();
+    options_.levels[0].max_files = 2;
+    options_.max_compaction_bytes = budget;
+    auto opened = DbImpl::open(options_, /*require_all_durable=*/true);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    db_ = std::move(opened->db);
+    ASSERT_EQ(engine().compact_until_quiet(), Status::Ok);
+
+    // Generation 'b' is the last writer of keys 0..38, and nothing newer holds them.
+    const std::string expected(64, 'b');
+    for (int i = 0; i < 39; ++i) {
+        auto found = db_->get_copy(Slice::from(key_at(i)));
+        ASSERT_TRUE(found.has_value()) << key_at(i) << ": " << status_name(found.error());
+        EXPECT_EQ(std::string(found->begin(), found->end()), expected)
+            << key_at(i) << " reverted to an older value";
+    }
+    EXPECT_EQ(engine().check_invariants(), Status::Ok);
+}
 
 TEST_F(CompactionTest, DrainsL0AndKeepsEveryValue) {
     Options options = make_options(store_, Compression::None, 16u << 10);
@@ -267,6 +322,45 @@ TEST_F(CompactionTest, TrimmingAnOversizedL0CompactionKeepsTheNewestValues) {
         EXPECT_EQ(std::string(found->begin(), found->end()), newest) << key_at(i);
     }
     EXPECT_EQ(engine().check_invariants(), Status::Ok);
+}
+
+/// **The counter exists so a configuration can prove it reaches the trim at all.** A budget that
+/// never bites and one that bites constantly are indistinguishable afterwards — the compaction
+/// looks the same either way — which is how a differential config sat in the suite for months
+/// claiming to cover this path without once entering it.
+TEST_F(CompactionTest, TrimmedCompactionsAreCounted) {
+    Options options = make_options(store_, Compression::None, 1u << 20);
+    options.levels[0].max_files = 2;
+    open(options);
+
+    const auto write_generation = [&](int round) {
+        const std::string value(512, static_cast<char>('a' + round));
+        for (int i = 0; i < 200; ++i) {
+            ASSERT_EQ(db_->put(Slice::from(key_at(i)), Slice::from(value)), Status::Ok);
+        }
+        ASSERT_EQ(db_->flush(), Status::Ok);
+    };
+    for (int round = 0; round < 4; ++round) write_generation(round);
+    ASSERT_EQ(engine().compact_until_quiet(), Status::Ok);
+
+    // No budget: nothing can have been trimmed, and a counter that answered otherwise would make
+    // the premise checks that rest on it meaningless.
+    EXPECT_GT(db_->stats().compactions, 0u);
+    EXPECT_EQ(db_->stats().compactions_trimmed, 0u);
+
+    db_.reset();
+    options_.max_compaction_bytes = 16u << 10;   // smaller than one of those L0 files
+    auto opened = DbImpl::open(options_, /*require_all_durable=*/true);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    db_ = std::move(opened->db);
+
+    for (int round = 4; round < 8; ++round) write_generation(round);
+    ASSERT_EQ(engine().compact_until_quiet(), Status::Ok);
+
+    const Stats stats = db_->stats();
+    EXPECT_GT(stats.compactions_trimmed, 0u) << "the budget is below one file, so it must bite";
+    EXPECT_LE(stats.compactions_trimmed, stats.compactions)
+        << "a trimmed compaction is one of the compactions, not an extra one";
 }
 
 TEST_F(CompactionTest, CompactionOutputIsPlacedByAgeNotByLevel) {
