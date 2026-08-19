@@ -190,6 +190,10 @@ class AbiCoverageTest {
                                       StaticEncryptionKeyManager.of(new byte[32]), 0);
             exercise("optionsAddAes256GcmEncryptionWithStaticKey");
 
+            encrypted.rewriteToPrimaryEncryptionProvider(true);
+            encrypted.rewriteToPrimaryEncryptionProvider(false);
+            exercise("optionsSetEncryptionRewriteToPrimary");
+
             // Registering a KMS manager performs no I/O, so a dead endpoint is enough to reach the
             // native call — which is the point here. Without the AWS build it must refuse and say
             // which build option is missing, exactly as the remote constructors do.

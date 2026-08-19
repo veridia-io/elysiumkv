@@ -170,6 +170,16 @@ public:
     /// counting installs is cheaper than asking each predicate whether anything moved.
     uint64_t installs() const { return installs_.load(std::memory_order_relaxed); }
 
+    /// Rolls to a new generation now, whatever the edit count is.
+    ///
+    /// **For finishing an encryption rotation.** Manifest payloads are sealed under whichever
+    /// provider was primary when they were written, so a store whose *files* have all been
+    /// rewritten still cannot open without the retired provider until a fresh snapshot exists
+    /// under the new one. Rolling is what writes that snapshot; there is nothing else that would.
+    ///
+    /// A no-op on an empty generation, so calling it when nothing has changed costs nothing.
+    Status roll_generation_now();
+
 private:
     Status write_snapshot_and_install(uint64_t generation,
                                       const std::shared_ptr<const Version>& version);

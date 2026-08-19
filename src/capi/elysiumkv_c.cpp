@@ -513,6 +513,18 @@ elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
     });
 }
 
+elysiumkv_status elysiumkv_options_set_encryption_rewrite_to_primary(elysiumkv_options* options,
+                                                                    int enabled) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_set_encryption_rewrite_to_primary: null options");
+        }
+        options->options.encryption.rewrite_to_primary = enabled != 0;
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
     elysiumkv_options* options, const char* id, const uint8_t* master_key, size_t master_key_len,
     size_t chunk_bytes) {
@@ -1725,7 +1737,7 @@ constexpr uint32_t kStatsFormatVersion = 1;
 // the header declares its own length, so a decoder that starts records at `header_bytes` skips
 // what it does not recognise — which is the property that made the previous seven appended
 // scalars a non-event too.
-constexpr uint32_t kStatsHeaderBytes = 248;
+constexpr uint32_t kStatsHeaderBytes = 264;
 constexpr uint32_t kStatsLevelRecordBytes = 48;
 // 32 for the original fields, then the store's seven I/O counters. Appended, and the header says
 // how wide a record is — so a decoder written against 32 reads the prefix of each and steps
@@ -1805,6 +1817,8 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.u64(stats.memtable_tombstones);
     out.u64(stats.background_failures);
     out.u64(stats.compactions_trimmed);
+    out.u64(stats.reencryptions);
+    out.u64(stats.files_pending_reencryption);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);

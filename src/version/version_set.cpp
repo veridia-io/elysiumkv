@@ -394,6 +394,24 @@ Status VersionSet::apply(VersionEdit edit) {
     return Status::Ok;
 }
 
+Status VersionSet::roll_generation_now() {
+    if (fenced()) return Status::Fenced;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!entry_.has_value()) return Status::Unusable;
+    // Nothing has been written into this generation, so its snapshot is already the newest thing
+    // there is and rolling would produce an identical one under a new number.
+    if (next_seq_ == 1) return Status::Ok;
+
+    const uint64_t next_generation = entry_->generation + 1;
+    if (Status status = write_snapshot_and_install(next_generation, current());
+        status != Status::Ok) {
+        return status;
+    }
+    next_seq_ = 1;
+    return Status::Ok;
+}
+
 Status VersionSet::maybe_roll_generation(const std::shared_ptr<const Version>& version) {
     if (next_seq_ <= static_cast<uint64_t>(edits_per_generation_)) return Status::Ok;
 

@@ -62,6 +62,7 @@ enum class MaintenanceTask : uint32_t {
     CapacityEviction = 1u << 1,     ///< a tier is over `max_bytes` — cost
     DurableAgeMigration = 1u << 2,  ///< colder placement between durable tiers — cost, starvable
     LevelZeroEscape = 1u << 3,      ///< an L0 file compacted off a tier its age has outgrown
+    EncryptionRewrite = 1u << 4,    ///< a file re-sealed under the primary provider — starvable
 };
 
 class WindowedBlobStore;
@@ -341,6 +342,18 @@ private:
     /// it moves bytes without interpreting them. Same `run_one()` contract.
     bool run_one_migration(Status& status);
     Status run_migration(const Migration& migration, DeferredLine& line);
+
+    /// One file re-sealed under the primary provider, when `rewrite_to_primary` is on. Returns
+    /// true if it did work, so the maintenance loop drains it the way it drains migration.
+    ///
+    /// **L0 is excluded, for the reason migration excludes it**: the rewrite gets a fresh file
+    /// number, and at L0 a file number *is* its recency, so renumbering would reorder it against
+    /// its neighbours. An L0 file leaves its old provider by being compacted, which happens soon
+    /// and writes the output under the primary anyway.
+    bool run_one_reencryption(Status& status);
+    Status run_reencryption(const FileMetadata& file, DeferredLine& line);
+    /// Files whose recorded provider is not the primary. Zero means a rotation has converged.
+    uint64_t count_pending_reencryption() const;
     /// An L0 file cannot be migrated without reordering L0's positional recency
     /// (ARCHITECTURE.md "Positional recency"), so it leaves its tier by being compacted into L1 instead. Returns
     /// false when no L0 file needs to move.
@@ -583,6 +596,10 @@ private:
     std::atomic<bool> suppress_maintenance_wakes_{false};
     std::atomic<uint64_t> density_compactions_{0};
     std::atomic<uint64_t> trimmed_compactions_{0};
+    std::atomic<uint64_t> reencryptions_{0};
+    /// Whether the manifest has been rolled since the last file was rewritten. Latches so the
+    /// roll happens once per rotation rather than on every idle maintenance pass.
+    std::atomic<bool> rotation_manifest_rolled_{false};
     /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
     std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};

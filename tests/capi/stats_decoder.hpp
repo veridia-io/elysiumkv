@@ -68,6 +68,8 @@ struct DecodedStats {
     uint64_t memtable_tombstones = 0;
     uint64_t background_failures = 0;
     uint64_t compactions_trimmed = 0;
+    uint64_t reencryptions = 0;
+    uint64_t files_pending_reencryption = 0;
     std::vector<DecodedLevel> levels;
     std::vector<DecodedTier> tiers;
 
@@ -154,6 +156,8 @@ inline DecodedStats decode_stats(const uint8_t* buf, size_t size) {
     out.memtable_tombstones = read_u64(scalars + 192);  // buffer offset 224
     out.background_failures = read_u64(scalars + 200);  // buffer offset 232
     out.compactions_trimmed = read_u64(scalars + 208);  // buffer offset 240
+    out.reencryptions = read_u64(scalars + 216);        // buffer offset 248
+    out.files_pending_reencryption = read_u64(scalars + 224);  // buffer offset 256
 
     size_t offset = header_bytes;
     for (size_t i = 0; i < level_count && offset + level_record_bytes <= size; ++i) {

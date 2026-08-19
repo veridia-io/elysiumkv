@@ -122,6 +122,9 @@ enum class LogEvent : int {
     Fenced = 9,
     GenerationRolled = 10,
     OrphansReclaimed = 11,
+    /// One file rewritten under the primary encryption provider. See
+    /// `EncryptionOptions::rewrite_to_primary`.
+    EncryptionRewritten = 12,
 };
 
 /// A vtable rather than `std::function` so it crosses the C ABI — see `Options::clock` for the
@@ -317,6 +320,30 @@ struct Options {
         std::map<std::string, std::shared_ptr<EncryptionProvider>> providers;
         /// Which registered provider writes new objects. Empty means the passthrough.
         std::string primary_provider;
+
+        /// Rewrite files recorded under any *other* provider, in the background, until none are
+        /// left. Off by default.
+        ///
+        /// **A rotation is not finished when the primary changes.** Changing `primary_provider`
+        /// governs what is written next; every file already on disk keeps the provider it was
+        /// written under, and reads keep routing to it. Compaction rewrites such a file when it
+        /// happens to compact it, which for a cold file may be never — and that is exactly the
+        /// file a key rotation was performed to stop depending on. This is the switch that makes
+        /// the rotation converge.
+        ///
+        /// **A background pass, not a compaction trigger.** Re-encrypting is a read, a re-seal and
+        /// a write of one object: no merge, no decode of the block format, no change to the shape
+        /// of the LSM. Driving it from the compaction picker would pull a whole level through a
+        /// merge to change the envelope on one file, and would perturb level structure for a
+        /// reason that has nothing to do with structure. It runs at the lowest priority, behind
+        /// even age migration — starving it costs the rotation time, not correctness.
+        ///
+        /// `Stats::files_pending_reencryption` is how far there is to go; it reaches zero when the
+        /// rotation is complete, and that is the moment the old provider may be unregistered.
+        ///
+        /// Leave it on afterwards or turn it off; with nothing to rewrite it costs one scan of the
+        /// version per maintenance pass.
+        bool rewrite_to_primary = false;
     };
     EncryptionOptions encryption;
 

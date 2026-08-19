@@ -77,6 +77,11 @@ class StatsSnapshotTest {
             assertEquals(0, stats.compactionsTrimmed(),
                          "no compaction budget was set, so nothing can have been trimmed");
             assertTrue(stats.compactionsTrimmed() <= stats.compactions());
+            // No rotation was asked for, so nothing can be pending and nothing can have been
+            // rewritten — and a gauge that read non-zero here would make the "rotation is done"
+            // signal useless.
+            assertEquals(0, stats.reencryptions());
+            assertEquals(0, stats.filesPendingReencryption());
             db.close();
         }
     }
