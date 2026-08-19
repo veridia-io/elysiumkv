@@ -210,6 +210,12 @@ void DbImpl::background_compaction_loop() {
             while (run_one_migration(status)) {
             }
         }
+        // **Last, and deliberately so.** A rotation that finishes a minute later costs nothing;
+        // a flush that waits behind one costs write availability. Everything above is either
+        // durability or cost, and both outrank changing an envelope.
+        while (status == Status::Ok && run_one_reencryption(status)) {
+            did_work = true;
+        }
 
         // The orphan sweep, when its interval has elapsed. On the maintenance executor rather than
         // the coordinator because it is a paginated list per store — long-running work, which the
@@ -460,6 +466,114 @@ bool DbImpl::run_one_migration(Status& status) {
     return status == Status::Ok;
 }
 
+uint64_t DbImpl::count_pending_reencryption() const {
+    uint64_t pending = 0;
+    auto version = versions_->current();
+    for (const auto& level : version->levels()) {
+        for (const FileMetadata& file : level) {
+            if (file.encryption_provider != encryption_.primary) ++pending;
+        }
+    }
+    return pending;
+}
+
+bool DbImpl::run_one_reencryption(Status& status) {
+    if (!options_.encryption.rewrite_to_primary) return false;
+    if (unusable_.load()) {
+        status = Status::Unusable;
+        return false;
+    }
+    if (versions_->fenced()) {
+        status = Status::Fenced;
+        return false;
+    }
+    if (task_suppressed(MaintenanceTask::EncryptionRewrite)) return false;
+
+    // A rewrite and a compaction both mutate the version; they must not race. Same executor and
+    // same mutex as migration, for the same reason.
+    DeferredLine deferred{this};
+    std::lock_guard<std::mutex> work(compaction_work_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
+
+    std::optional<FileMetadata> stale;
+    {
+        auto version = versions_->current();
+        for (const auto& level : version->levels()) {
+            for (const FileMetadata& file : level) {
+                // L0 is never rewritten: a fresh file number is its recency. See the header.
+                if (file.level == 0) continue;
+                if (file.encryption_provider == encryption_.primary) continue;
+                stale = file;
+                break;
+            }
+            if (stale.has_value()) break;
+        }
+    }
+    if (!stale.has_value()) {
+        // **The files are done; the manifest may not be.** A payload is sealed under whichever
+        // provider was primary when it was written, so a store whose every file has been rewritten
+        // still cannot open without the retired provider until a fresh snapshot exists under the
+        // new one. Rolling is what writes that snapshot, and nothing else would — an idle store
+        // produces no edits, so `maybe_roll_generation` never fires. Rolled once, when the rewrite
+        // pass has nothing left to do; the roll itself is a no-op on an untouched generation.
+        if (!rotation_manifest_rolled_.exchange(true, std::memory_order_relaxed)) {
+            status = versions_->roll_generation_now();
+            return status == Status::Ok;
+        }
+        return false;
+    }
+    // Any further rewriting means the manifest needs rolling again afterwards.
+    rotation_manifest_rolled_.store(false, std::memory_order_relaxed);
+
+    status = run_reencryption(*stale, deferred);
+    compaction_finished_.notify_all();
+    return status == Status::Ok;
+}
+
+Status DbImpl::run_reencryption(const FileMetadata& file, DeferredLine& line) {
+    ELYSIUMKV_CLAIM_DELETING_TASK();
+    BlobStore* store = store_for(file.store_id);
+    if (store == nullptr) return Status::Corrupt;
+
+    // **Read logical, write sealed** — the one place this differs from a migration, which copies
+    // the stored bytes untouched. The view resolves the file's *own* provider, so the bytes that
+    // come back are plaintext to this layer whatever they were written under; `write_new_sst`
+    // then seals them under the primary. Nothing decodes the block format, so this costs one read
+    // and one write of the file and no merge.
+    auto view = decrypting_view(*store, file);
+    if (!view) return view.error();
+    auto bytes = (*view)->bulk_view().get_sync(sst_object_name(file.file_number), 0,
+                                               BlobStore::kReadToEnd);
+    if (!bytes) return bytes.error();
+    if (bytes->size() != file.file_bytes) return Status::Corrupt;
+
+    const BudgetCharge charged(options_.memory_budget, bytes->size());
+
+    auto written = write_new_sst(*store, Slice::from(*bytes));
+    if (!written) return written.error();
+
+    // Durable edit first, delete second, as everywhere else: a crash in between leaves the copy as
+    // an unambiguous orphan rather than a version pointing at an object that is gone.
+    FileMetadata resealed = file;
+    resealed.file_number = written->file_number;
+    resealed.encryption_provider = written->encryption_provider;
+    resealed.encryption_metadata = written->encryption_metadata;
+    // Everything else rides across: the file holds exactly the entries it held, so its key bounds,
+    // its write times, its watermark interval and its level are all still the truth. Only the
+    // envelope changed.
+
+    VersionEdit edit;
+    edit.deleted.push_back({file.level, file.file_number});
+    edit.added.push_back(std::move(resealed));
+    if (Status status = versions_->apply(std::move(edit)); status != Status::Ok) return status;
+
+    reencryptions_.fetch_add(1, std::memory_order_relaxed);
+    line.set(LogLevel::Info, LogEvent::EncryptionRewritten, "file ", file.file_number, " (L",
+             file.level, ", ", file.file_bytes, " bytes) rewritten as ", written->file_number,
+             " under provider '", encryption_.primary, "'");
+    return Status::Ok;
+}
+
 Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     ELYSIUMKV_CLAIM_DELETING_TASK();
     BlobStore* source = store_for(migration.file.store_id);
@@ -599,6 +713,10 @@ Status DbImpl::compact_until_quiet() {
         while (run_one_migration(status)) worked = true;
         if (status != Status::Ok) return status;
         if (run_one_compaction(status)) worked = true;
+        if (status != Status::Ok) return status;
+        // Inline mode has to run it too, or a rotation would be a property only the threaded
+        // build converged — the same argument `reclaim_dead_files` makes above.
+        if (run_one_reencryption(status)) worked = true;
         if (status != Status::Ok) return status;
         if (!worked) break;
     }

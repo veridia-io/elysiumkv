@@ -535,7 +535,11 @@ migration stays the byte-for-byte copy it is everywhere else.
 **Providers are a map from id to provider, plus which one is primary.** Every object records the id
 that wrote it, so a read routes on the file rather than on the current configuration — which is what
 makes rotation a matter of registering the new construction as primary and leaving the old one
-registered until no file names it. The id is data: renaming one orphans every file recorded against
+registered until no file names it. Getting to *no file names it* is a background pass, not a
+compaction trigger: re-sealing is a read and a write of one object, and driving it from the picker
+would pull a level through a merge to change one envelope. It rolls the manifest generation when the
+files are done, because a payload is sealed under whichever provider was primary when it was written
+and an idle store produces no edits that would replace it. The id is data: renaming one orphans every file recorded against
 it. The passthrough holds the reserved empty id and is primary unless another is named, so an
 unencrypted store is not a special case and there is no null provider anywhere after open.
 

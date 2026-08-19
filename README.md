@@ -266,8 +266,24 @@ options.encryptWith("v2", AwsKmsEncryptionKeyManager.builder(newKeyArn).build(),
 options.alsoDecryptWith("v1", AwsKmsEncryptionKeyManager.builder(oldKeyArn).build(), 0);
 ```
 
-Drop `v1` only once no file records it. **Renaming an id orphans every file written
-under the old name** — the id is data, not configuration.
+Then turn on the pass that finishes it:
+
+```java
+options.rewriteToPrimaryEncryptionProvider(true);
+```
+
+**Changing the primary is not the rotation.** It governs what is written next; every file already
+on disk keeps the provider it was written under, and a cold file may never be compacted — which is
+exactly the file a rotation was performed to stop depending on. The flag turns on a background pass
+that re-seals them one at a time, behind everything else the engine has to do.
+
+`filesPendingReencryption()` reaches zero when it has converged, **and that is the moment `v1` may
+be dropped** — the manifest is re-sealed as part of it, so the store then opens with `v1` not
+registered at all. Non-zero with the flag off means a rotation was started and abandoned, which is
+a store still depending on a key someone believes they retired.
+
+**Renaming an id orphans every file written under the old name** — the id is data, not
+configuration.
 
 Rotating the KMS *key* underneath one id needs none of this: a wrapped data key names
 the key that produced it, so `Decrypt` resolves it and files written under the

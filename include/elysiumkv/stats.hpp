@@ -135,6 +135,18 @@ struct Stats {
     /// It also exists so a *test* configuration can prove it reaches this path at all. One here
     /// claimed to and did not, and the reordering bug in the trim went out because of it.
     uint64_t compactions_trimmed = 0;
+    /// Files re-sealed under the primary provider by the background pass. A counter, so it says
+    /// how much work a rotation has cost.
+    uint64_t reencryptions = 0;
+    /// Files whose recorded encryption provider is **not** the primary — a gauge, so it says how
+    /// much is left.
+    ///
+    /// **Zero is the signal that a rotation is complete**, and therefore the moment the previous
+    /// provider may be unregistered. Non-zero with `rewrite_to_primary` off means the rotation was
+    /// started and never finished, which is a store still depending on a key someone believes they
+    /// retired. Counted over every level including L0, so it genuinely reaches zero: L0 files are
+    /// written under the primary already.
+    uint64_t files_pending_reencryption = 0;
     uint64_t compaction_bytes_read = 0;
     uint64_t compaction_bytes_written = 0;
     /// ARCHITECTURE.md "Migration between tiers" — migration moves bytes without interpreting them, so its cost is

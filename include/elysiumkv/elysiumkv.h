@@ -440,6 +440,16 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_encryption_provider(
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_primary_encryption_provider(
     elysiumkv_options*, const char* id);
 
+/* Rewrite files recorded under any other provider, in the background, until none are left. Off by
+ * default.
+ *
+ * **Changing the primary does not finish a rotation.** Existing files keep the provider they were
+ * written under, and a cold one may never be compacted; this is what makes the rotation converge.
+ * `files_pending_reencryption` in the stats buffer reaches zero when it has, which is the moment
+ * the retired provider may be unregistered — the manifest is re-sealed as part of it. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_encryption_rewrite_to_primary(
+    elysiumkv_options*, int enabled);
+
 /* --- the shared memory budget (ARCHITECTURE.md "A process-wide memory budget") -----------------------------------------
  *
  * **Per process, not per instance**, which is the entire reason it is a separate handle
@@ -803,7 +813,8 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *     u64 memtable_entries, memtable_tombstones,
  *         background_failures                          offset 216
  *     u64 compactions_trimmed                          offset 240
- *                                                      header_bytes = 248
+ *     u64 reencryptions, files_pending_reencryption    offset 248
+ *                                                      header_bytes = 264
  *
  * `watermark_present` exists because **zero is a valid watermark** — a store at the
  * start of its log — so the value alone cannot express absence. An exporter omits

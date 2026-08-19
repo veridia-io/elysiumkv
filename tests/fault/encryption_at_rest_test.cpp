@@ -266,6 +266,96 @@ TEST_F(EncryptionAtRest, AManifestWhoseProviderIsNotRegisteredRefusesToOpen) {
         << "the failure has to name the provider to register: " << last_error();
 }
 
+/// **A rotation converges only because something drives it.** Changing `primary_provider` governs
+/// what is written next; the files already on disk keep the provider they were written under, and
+/// for a cold file compaction may never touch them. That is precisely the file a key rotation was
+/// performed to stop depending on.
+TEST_F(EncryptionAtRest, RewritingToThePrimaryFinishesARotation) {
+    // Written under "kms-gcm", then compacted down so the data is below L0 — which is where a
+    // rotation actually has to reach, and where this pass operates.
+    {
+        auto db = std::move(*DB::open(encrypted_options()));
+        for (int i = 0; i < 400; ++i) {
+            ASSERT_EQ(db->put(Slice::from(key_at(i)), Slice::from(value_at(i))), Status::Ok);
+        }
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+    }
+
+    Options rotated = make_options(store_, Compression::None, 64u << 10);
+    rotated.background = BackgroundMode::Inline;
+    rotated.encryption.providers["kms-gcm"] = make_test_provider(1);
+    rotated.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+    rotated.encryption.primary_provider = "kms-gcm-2";
+
+    // **Off first, and this half is the point.** Without the switch a rotation stalls silently:
+    // the store reads fine, so nothing complains, and the old key stays load-bearing for ever.
+    {
+        auto db = std::move(*DB::open(rotated));
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        const Stats stats = db->stats();
+        EXPECT_GT(stats.files_pending_reencryption, 0u)
+            << "nothing drives the rotation, so it must not have moved";
+        EXPECT_EQ(stats.reencryptions, 0u);
+    }
+
+    rotated.encryption.rewrite_to_primary = true;
+    auto opened = DB::open(rotated);
+    ASSERT_TRUE(opened.has_value()) << status_name(opened.error());
+    auto db = std::move(*opened);
+    ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+
+    const Stats stats = db->stats();
+    EXPECT_EQ(stats.files_pending_reencryption, 0u) << "the rotation has to converge";
+    EXPECT_GT(stats.reencryptions, 0u) << "and it has to have done work to get there";
+
+    // Every value still reads, which is the only thing that makes the rewrite worth having.
+    for (int i = 0; i < 400; ++i) {
+        auto found = db->get_copy(Slice::from(key_at(i)));
+        ASSERT_TRUE(found.has_value()) << i << " -> " << status_name(found.error());
+        EXPECT_EQ(std::string(found->begin(), found->end()), value_at(i)) << i;
+    }
+    EXPECT_EQ(static_cast<DbImpl&>(*db).check_invariants(), Status::Ok);
+}
+
+/// The old provider is only safe to unregister once the gauge reads zero — so a store that has
+/// converged must open without it, and that is what makes the gauge actionable rather than
+/// decorative.
+TEST_F(EncryptionAtRest, AConvergedRotationOpensWithoutTheOldProvider) {
+    {
+        auto db = std::move(*DB::open(encrypted_options()));
+        for (int i = 0; i < 400; ++i) {
+            ASSERT_EQ(db->put(Slice::from(key_at(i)), Slice::from(value_at(i))), Status::Ok);
+        }
+        ASSERT_EQ(db->flush(), Status::Ok);
+        ASSERT_EQ(db->compact_level(0), Status::Ok);
+    }
+    {
+        Options rotating = make_options(store_, Compression::None, 64u << 10);
+        rotating.background = BackgroundMode::Inline;
+        rotating.encryption.providers["kms-gcm"] = make_test_provider(1);
+        rotating.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+        rotating.encryption.primary_provider = "kms-gcm-2";
+        rotating.encryption.rewrite_to_primary = true;
+        auto db = std::move(*DB::open(rotating));
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        ASSERT_EQ(db->stats().files_pending_reencryption, 0u);
+    }
+
+    Options alone = make_options(store_, Compression::None, 64u << 10);
+    alone.background = BackgroundMode::Inline;
+    alone.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+    alone.encryption.primary_provider = "kms-gcm-2";
+    auto reopened = DB::open(alone);
+    ASSERT_TRUE(reopened.has_value())
+        << "the retired provider is gone and nothing should still need it: "
+        << status_name(reopened.error()) << " — " << last_error();
+    for (int i = 0; i < 400; ++i) {
+        auto found = (*reopened)->get_copy(Slice::from(key_at(i)));
+        ASSERT_TRUE(found.has_value()) << i;
+    }
+}
+
 /// **I12.** A configuration the engine cannot honour is refused at open, not at first write — and
 /// each refusal says which one it was, because `Config` alone does not narrow it down at all.
 TEST_F(EncryptionAtRest, AnUnusableConfigurationIsRefusedAtOpen) {

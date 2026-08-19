@@ -314,6 +314,24 @@ public final class ElysiumKVOptions implements AutoCloseable {
         keys.register(handle(), id, chunkBytes);
     }
 
+    /**
+     * Rewrite files recorded under any other provider, in the background, until none are left.
+     * Off by default.
+     *
+     * <p><b>Changing the primary does not finish a rotation.</b> Every file already written keeps
+     * the provider it was written under, and reads keep routing to it; compaction rewrites such a
+     * file only when it happens to compact it, which for a cold file may be never — and that is
+     * exactly the file a key rotation was performed to stop depending on.
+     *
+     * <p>{@link ElysiumKVStats#filesPendingReencryption()} reaches zero when the rotation has
+     * converged, which is the moment the retired provider may be unregistered. The manifest is
+     * re-sealed as part of it, so the store then opens without that provider registered at all.
+     */
+    public ElysiumKVOptions rewriteToPrimaryEncryptionProvider(boolean enabled) {
+        Native.optionsSetEncryptionRewriteToPrimary(handle(), enabled);
+        return this;
+    }
+
     public ElysiumKVOptions manifestEditsPerGeneration(int edits) {
         manifestEditsPerGeneration = edits;
         return this;
