@@ -108,6 +108,26 @@ TEST(PickerTest, ABudgetSmallerThanOneFileStillCompactsTheOldest) {
     EXPECT_EQ(compaction->inputs.front().file_number, 1u) << "the oldest, so recency survives";
 }
 
+/// **A trim must not reorder what it keeps.** The input vector is the merge's child list, and a tie
+/// on equal keys is resolved by lowest child index — which is the recency rule only while the
+/// children arrive in the level's own order, newest first at L0. Choosing what to keep by sorting
+/// the vector by file number inverted that, and the merge then took the oldest value for every
+/// duplicated key. `CompactionTest.TrimmingAnL0ClosureKeepsTheNewestOfWhatItMerged` is the same
+/// defect as an observable stale read.
+TEST(PickerTest, TrimmingAnOverlappingLevelLeavesTheLevelsOwnOrder) {
+    std::vector<FileMetadata> files;
+    for (uint64_t n = 1; n <= 5; ++n) files.push_back(file(0, n, "a", "z"));
+    auto version = version_of(files);
+
+    auto compaction = pick_compaction(*version, config(/*max_files=*/2), /*budget=*/2500);
+    ASSERT_TRUE(compaction.has_value());
+    ASSERT_EQ(compaction->inputs.size(), 2u);
+
+    // Descending, as `files_at(0)` hands them out: child 0 is the newest of the two kept.
+    EXPECT_EQ(compaction->inputs.front().file_number, 2u);
+    EXPECT_EQ(compaction->inputs.back().file_number, 1u);
+}
+
 TEST(PickerTest, NothingToDoWhenEveryLevelIsUnderItsLimits) {
     auto version = version_of({file(0, 1, "a", "b"), file(1, 2, "a", "b")});
     EXPECT_FALSE(pick_compaction(*version, config(), 1u << 30).has_value());

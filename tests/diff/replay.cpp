@@ -194,6 +194,18 @@ public:
                                "the memory budget was never exceeded, so this configuration "
                                "tested nothing: lower budget_bytes or raise the write volume"};
         }
+
+        // **The check this list was missing.** `TinyCompactionBudget` carried a budget sized
+        // against its memtable rather than against the files it produces, so the closure never
+        // exceeded it and the trim never ran once — for months, while the config sat here looking
+        // like coverage of exactly the path that turned out to have a reordering bug in it.
+        if (config_.max_compaction_bytes != 0 &&
+            trims_seen_ + db_->stats().compactions_trimmed == 0) {
+            return DiffFailure{ops.size(),
+                               "max_compaction_bytes never trimmed a compaction, so this "
+                               "configuration tested nothing: lower it, or raise the write volume "
+                               "until an L0 closure exceeds it"};
+        }
         return std::nullopt;
     }
 
@@ -205,6 +217,7 @@ private:
         if (db_ != nullptr) {
             sheds_seen_ += db_->stats().budget_sheds;
             density_compactions_seen_ += engine().density_compactions_for_test();
+            trims_seen_ += db_->stats().compactions_trimmed;
         }
         db_.reset();
     }
@@ -607,6 +620,7 @@ private:
     std::shared_ptr<MemoryBudget> budget_;
     uint64_t sheds_seen_ = 0;
     uint64_t density_compactions_seen_ = 0;
+    uint64_t trims_seen_ = 0;
     std::unique_ptr<DB> db_;
     Oracle oracle_;
     Oracle flushed_;

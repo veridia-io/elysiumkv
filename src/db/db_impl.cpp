@@ -1981,6 +1981,7 @@ Stats DbImpl::stats() const {
     stats.requires_recovery = requires_recovery_.load();
     stats.flushes = flushes_.load();
     stats.compactions = compactions_.load();
+    stats.compactions_trimmed = trimmed_compactions_.load(std::memory_order_relaxed);
     stats.compaction_bytes_read = compaction_bytes_read_.load();
     stats.compaction_bytes_written = compaction_bytes_written_.load();
     stats.migrations = migrations_.load();

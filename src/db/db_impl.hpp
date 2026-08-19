@@ -582,6 +582,7 @@ private:
     std::atomic<bool> transient_stalled_{false};
     std::atomic<bool> suppress_maintenance_wakes_{false};
     std::atomic<uint64_t> density_compactions_{0};
+    std::atomic<uint64_t> trimmed_compactions_{0};
     /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
     std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};

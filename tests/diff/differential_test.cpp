@@ -118,15 +118,22 @@ INSTANTIATE_TEST_SUITE_P(
         // runs throughout. The oracle is unchanged by it: which files a compaction takes is a
         // scheduling decision, and every answer must be identical to the same stream without it.
         //
-        // **The trim's *direction* is not pinned here** — inverting it leaves this config passing.
-        // That is pinned by `PickerTest.TrimmingAnOverlappingLevelKeepsTheOldestFiles` and, as an
-        // observable stale read, by
-        // `CompactionTest.TrimmingAnOversizedL0CompactionKeepsTheNewestValues`. What this adds is
-        // that a trimmed input set still produces answers the oracle accepts at all.
+        // **The budget is sized against the files this config actually produces, and that is the
+        // whole point.** It was 48 KiB, chosen against the 32 KiB memtable — but Zstd over 40
+        // distinct keys makes an L0 file about 1.4 KB, so the closure of five came to ~7 KB and
+        // the trim never once ran. The config named for the trim path never reached it, and a
+        // reordering bug in that path went out and had to be found by hand. 4 KiB against a ~1.4 KB
+        // file trims constantly and keeps two to four files most of the time, which is what makes
+        // the defect reachable: a single-file input set has no duplicate keys to resolve, so
+        // nothing about the merge's recency ordering is observable in it.
+        //
+        // Sized by measurement rather than by intent, and worth re-measuring if the compression,
+        // the memtable size or `distinct_keys` here change — any of the three moves the file size
+        // this is a multiple of.
         ReplayConfig{.name = "TinyCompactionBudget",
                      .compression = Compression::Zstd,
                      .memtable_bytes = 32u << 10,
-                     .max_compaction_bytes = 48u << 10,
+                     .max_compaction_bytes = 4096u,
                      .distinct_keys = 40},
         // The same transient band with the age trigger spread. Jitter decides *when* a file
         // crosses to the colder tier, so every answer here must be identical to `TransientBand`

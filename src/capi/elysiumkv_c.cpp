@@ -1725,7 +1725,7 @@ constexpr uint32_t kStatsFormatVersion = 1;
 // the header declares its own length, so a decoder that starts records at `header_bytes` skips
 // what it does not recognise — which is the property that made the previous seven appended
 // scalars a non-event too.
-constexpr uint32_t kStatsHeaderBytes = 240;
+constexpr uint32_t kStatsHeaderBytes = 248;
 constexpr uint32_t kStatsLevelRecordBytes = 48;
 // 32 for the original fields, then the store's seven I/O counters. Appended, and the header says
 // how wide a record is — so a decoder written against 32 reads the prefix of each and steps
@@ -1804,6 +1804,7 @@ void encode_stats(const Stats& stats, StatsWriter& out) {
     out.u64(stats.memtable_entries);
     out.u64(stats.memtable_tombstones);
     out.u64(stats.background_failures);
+    out.u64(stats.compactions_trimmed);
 
     for (const LevelStats& level : stats.levels) {
         out.i32(level.level);

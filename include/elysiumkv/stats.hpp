@@ -124,6 +124,17 @@ struct Stats {
     uint64_t flushes = 0;
 
     uint64_t compactions = 0;
+    /// Compactions whose input set `max_compaction_bytes` cut down, of `compactions`.
+    ///
+    /// **The budget biting is a choice with a cost, and this is the only way to see it.** A trimmed
+    /// compaction leaves files behind at an overlapping level, so the level is compacted again
+    /// sooner: the budget trades write amplification for a bounded exposure window. A ratio near
+    /// zero means the budget is not reached and could be lowered; a ratio near one means nearly
+    /// every compaction is being cut, and raising it would do less total work.
+    ///
+    /// It also exists so a *test* configuration can prove it reaches this path at all. One here
+    /// claimed to and did not, and the reordering bug in the trim went out because of it.
+    uint64_t compactions_trimmed = 0;
     uint64_t compaction_bytes_read = 0;
     uint64_t compaction_bytes_written = 0;
     /// ARCHITECTURE.md "Migration between tiers" — migration moves bytes without interpreting them, so its cost is

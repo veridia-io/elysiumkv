@@ -800,7 +800,10 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *     u64 durable_watermark                            offset 200
  *     u8  watermark_present                            offset 208, 0 when unset
  *     u8  reserved[7]                                  offset 209
- *                                                      header_bytes = 216
+ *     u64 memtable_entries, memtable_tombstones,
+ *         background_failures                          offset 216
+ *     u64 compactions_trimmed                          offset 240
+ *                                                      header_bytes = 248
  *
  * `watermark_present` exists because **zero is a valid watermark** — a store at the
  * start of its log — so the value alone cannot express absence. An exporter omits

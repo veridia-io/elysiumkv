@@ -66,6 +66,8 @@ struct DecodedStats {
     bool watermark_present = false;
     uint64_t memtable_entries = 0;
     uint64_t memtable_tombstones = 0;
+    uint64_t background_failures = 0;
+    uint64_t compactions_trimmed = 0;
     std::vector<DecodedLevel> levels;
     std::vector<DecodedTier> tiers;
 
@@ -150,6 +152,8 @@ inline DecodedStats decode_stats(const uint8_t* buf, size_t size) {
     out.watermark_present = scalars[176] != 0;          // buffer offset 208
     out.memtable_entries = read_u64(scalars + 184);     // buffer offset 216
     out.memtable_tombstones = read_u64(scalars + 192);  // buffer offset 224
+    out.background_failures = read_u64(scalars + 200);  // buffer offset 232
+    out.compactions_trimmed = read_u64(scalars + 208);  // buffer offset 240
 
     size_t offset = header_bytes;
     for (size_t i = 0; i < level_count && offset + level_record_bytes <= size; ++i) {

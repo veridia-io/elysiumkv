@@ -732,7 +732,7 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     const uint32_t level_count = u32(16);
     const uint32_t tier_count = u32(20);
 
-    EXPECT_EQ(header_bytes, 240u);
+    EXPECT_EQ(header_bytes, 248u);
     EXPECT_EQ(level_record_bytes, 48u);
     // 32 original fields plus the store's seven I/O counters. The header carries the width, so a
     // decoder written against 32 steps correctly over the wider record — which is the whole reason

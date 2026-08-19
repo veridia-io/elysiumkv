@@ -72,6 +72,11 @@ class StatsSnapshotTest {
             // and writes nothing, so the two counters move together or not at all.
             assertEquals(stats.compactionBytesRead() > 0, stats.compactionBytesWritten() > 0,
                          "compaction byte accounting is one-sided");
+            // No maxCompactionBytes is configured here, so nothing can have been trimmed — and a
+            // trimmed compaction is one of the compactions rather than an extra one.
+            assertEquals(0, stats.compactionsTrimmed(),
+                         "no compaction budget was set, so nothing can have been trimmed");
+            assertTrue(stats.compactionsTrimmed() <= stats.compactions());
             db.close();
         }
     }

@@ -568,6 +568,9 @@ bool DbImpl::run_one_compaction(Status& status) {
     if (compaction->triggered_by_density) {
         density_compactions_.fetch_add(1, std::memory_order_relaxed);
     }
+    if (compaction->inputs_trimmed) {
+        trimmed_compactions_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     status = run_compaction(*compaction, deferred);
     compaction_finished_.notify_all();
