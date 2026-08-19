@@ -154,8 +154,6 @@ int main() {
     check(snap.has_value() && snap->size() == big.size(), "chunked snapshot round-trips");
     check(snap.has_value() && std::string(snap->begin(), snap->end()) == big,
           "reassembled bytes identical");
-    check(c.put_snapshot(2, Slice::from(std::string("other"))).get() == Status::Config,
-          "put_snapshot never overwrites");
 
     // ARCHITECTURE.md "Negative controls" — the negative control for `total_chunks`. Losing a chunk is what
     // a half-written generation looks like, and the whole point of recording the
@@ -182,6 +180,63 @@ int main() {
 
         for (const auto& key : keys) (void)delete_item(endpoint, o.table, run, key);
         check(c.put_snapshot(2, Slice::from(big)).get() == Status::Ok, "rewrite the snapshot");
+    }
+
+    // **The attempt in a snapshot address makes a retry possible; it does not make a snapshot
+    // rewritable.** Write-once still holds against a *finished* one, which is what the contract
+    // suite pins across all three catalogs. Only residue is retryable — the case below.
+    {
+        check(c.put_snapshot(2, Slice::from(std::string("other"))).get() == Status::Config,
+              "a complete snapshot still refuses a second put — write-once is unchanged");
+    }
+
+    // **The bug this layout exists to remove.** A chunked `put_snapshot` writes items one at a
+    // time, so a failure partway leaves some behind — and with a fixed address the retry collided
+    // with its own residue, `attribute_not_exists` refused it, and the engine read that refusal as
+    // another writer having won the roll. One transient error fenced the store permanently, and
+    // the residue survived the reopen, so it stayed fenced.
+    {
+        const auto keys = snapshot_chunk_keys(endpoint, o.table, run, 2);
+        check(keys.size() > 1, "a multi-chunk snapshot to leave a partial copy of");
+        for (size_t i = 1; i < keys.size(); ++i) (void)delete_item(endpoint, o.table, run, keys[i]);
+
+        check(c.put_snapshot(2, Slice::from(big)).get() == Status::Ok,
+              "a retry over a partial snapshot succeeds rather than fencing the store");
+        auto after = c.get_snapshot(2).get();
+        check(after.has_value() && std::string(after->begin(), after->end()) == big,
+              "and reads back the attempt that completed, not the residue");
+
+        // Read by an instance that wrote none of it. Without the pointer naming the attempt this
+        // is the case that would have to guess between the residue and the good copy.
+        DynamoOptions reader_options = o;
+        reader_options.create_table_if_missing = false;
+        auto reader = DynamoManifestCatalog::open(reader_options);
+        check(reader.has_value(), "a second instance opens");
+        if (reader.has_value()) {
+            (void)(*reader)->read();
+            auto seen = (*reader)->get_snapshot(2).get();
+            check(seen.has_value() && std::string(seen->begin(), seen->end()) == big,
+                  "a fresh instance reads the installed attempt");
+        }
+    }
+
+    // The edit address stays write-once, because a collision there is what detects a second
+    // writer. What changed is that residue *this* instance left is cleared and retried, rather
+    // than being mistaken for a rival.
+    {
+        check(c.put_edit(9, 1, Slice::from(big)).get() == Status::Ok, "an edit to leave partial");
+        const auto keys =
+                keys_with_prefix(endpoint, o.table, run, "gen#000000000009#edit#000000000001#");
+        check(keys.size() > 1, "the edit is chunked");
+        for (size_t i = 1; i < keys.size(); ++i) (void)delete_item(endpoint, o.table, run, keys[i]);
+
+        check(c.put_edit(9, 1, Slice::from(big)).get() == Status::Ok,
+              "a retry over our own partial edit clears it and rewrites");
+        auto back = c.get_edit(9, 1).get();
+        check(back.has_value() && std::string(back->begin(), back->end()) == big,
+              "and the edit reads back whole");
+    }
+    {
     }
 
     // A small snapshot goes down the same path — one chunk, not a special case.
