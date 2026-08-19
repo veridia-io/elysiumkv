@@ -4,9 +4,12 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 
 namespace elysiumkv {
 namespace {
+
+using std::string_view_literals::operator""sv;
 
 FileMetadata file(int level, uint64_t number, std::string smallest, std::string largest,
                   uint64_t bytes = 1000, uint64_t write_time = 100) {
@@ -322,7 +325,15 @@ TEST(VersionEdit, RoundTrips) {
 TEST(VersionEdit, TheReservedEncryptionFieldsRoundTripWhenPopulated) {
     FileMetadata carrying = file(1, 11, "a", "z");
     carrying.encryption_provider = "kms-gcm-2026";
-    carrying.encryption_metadata = std::string("\x00wrapped\xff\x00key", 15);
+    // **The length comes from the literal, not from counting it by hand.** The hand-written 15 that
+    // was here is 13 bytes of literal, so the string constructor read past the end of it — caught by
+    // gcc's -Warray-bounds, and invisible to a round-trip test that would happily carry the extra
+    // bytes both ways. `sv` keeps the embedded nulls and cannot disagree with what is written.
+    carrying.encryption_metadata = std::string("\x00wrapped\xff\x00key"sv);
+    ASSERT_EQ(carrying.encryption_metadata.size(), 13u)
+        << "stated, so a literal edited later cannot quietly change what this round-trips";
+    ASSERT_EQ(carrying.encryption_metadata[0], '\0') << "leading null";
+    ASSERT_EQ(carrying.encryption_metadata[9], '\0') << "interior null";
 
     VersionEdit edit;
     edit.next_file_number = 12;
@@ -360,12 +371,12 @@ TEST(VersionEdit, EmptyEditRoundTrips) {
 
 TEST(VersionEdit, KeysWithArbitraryBytesSurvive) {
     VersionEdit edit;
-    edit.added.push_back(file(0, 1, std::string("\x00\xFF\x01", 3), std::string("\xFF\xFF", 2)));
+    edit.added.push_back(file(0, 1, std::string("\x00\xFF\x01"sv), std::string("\xFF\xFF"sv)));
 
     auto decoded = decode_version_edit(Slice::from(encode_version_edit(edit)));
     ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(decoded->added[0].smallest_key, std::string("\x00\xFF\x01", 3));
-    EXPECT_EQ(decoded->added[0].largest_key, std::string("\xFF\xFF", 2));
+    EXPECT_EQ(decoded->added[0].smallest_key, std::string("\x00\xFF\x01"sv));
+    EXPECT_EQ(decoded->added[0].largest_key, std::string("\xFF\xFF"sv));
 }
 
 // A torn manifest write must be *detected*, not misread — that is what lets
