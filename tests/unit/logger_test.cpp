@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -209,6 +210,9 @@ TEST(LoggerTest, ASinkMayReadTheStoreItIsLoggingAbout) {
     TestStore store;
     Options options = make_options(store);
 
+    // `db` is published after `open` returns, because the engine may log during open when there is
+    // nothing yet to call back into. Ordered by `mem_mutex_`, which every put and every flush takes
+    // before the sink can run.
     struct Reentrant {
         DB* db = nullptr;
         std::atomic<int> calls{0};
@@ -231,6 +235,15 @@ TEST(LoggerTest, ASinkMayReadTheStoreItIsLoggingAbout) {
 
     put_until_flush(**db, 400);
     ASSERT_EQ((*db)->flush(), Status::Ok);
+
+    // **`flush()` returning is not the line having been delivered**, and the gap is the very thing
+    // this test exists to protect: the emit sites leave the critical section *before* calling the
+    // sink, so a background flush that has already cleared `imm_` lets `flush()` return with its
+    // log line still unsent. Asserting immediately reads that as "nothing was ever emitted", which
+    // is how this failed on a loaded arm runner and passed everywhere else.
+    for (int i = 0; i < 2000 && reentrant.calls.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     EXPECT_GT(reentrant.calls.load(), 0);
 }
 
