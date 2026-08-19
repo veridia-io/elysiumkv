@@ -214,8 +214,8 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::str
     auto footer = Footer::decode(tail_slice);
     if (!footer) return std::unexpected(footer.error());
 
-    std::unique_ptr<SstReader> reader(
-        new SstReader(store, std::move(name), file_size, options));
+    auto reader = std::make_unique<SstReader>(SstReader::Private{}, store, std::move(name),
+                                             file_size, std::move(options));
     reader->footer_ = *footer;
 
     // The index is inside the tail whenever the guess was long enough, which is the whole point.
