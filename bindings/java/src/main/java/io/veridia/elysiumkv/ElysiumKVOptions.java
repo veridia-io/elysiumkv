@@ -3,15 +3,13 @@ package io.veridia.elysiumkv;
 /**
  * Configuration, built fluently and applied at {@link ElysiumKV#open}.
  *
- * <p>Tiers and levels reach the engine as they are declared, because each is a
- * complete aggregate on its own. Everything else is held here and sent in a
- * <em>single</em> call, mirroring the rule: a half-configured aggregate should
- * not be representable, and nine separate setters made it so.
+ * <p>Tiers and levels reach the engine as they are declared, each being a complete aggregate on
+ * its own. Everything else is held here and sent in a single call, so a half-configured aggregate
+ * is not representable.
  *
- * <p>Two axes, and they are independent (ARCHITECTURE.md "A tier is not a level"). A <b>level</b> is LSM structure:
- * overlap, capacity, compression. A <b>tier</b> is storage: which store holds a
- * file, chosen per file by age and size. One level routinely spans several
- * tiers.
+ * <p>The two axes are independent (ARCHITECTURE.md "A tier is not a level"). A level is LSM
+ * structure: overlap, capacity, compression. A tier is storage: which store holds a file, chosen
+ * per file by age and size. One level routinely spans several tiers.
  */
 public final class ElysiumKVOptions implements AutoCloseable {
     private long handle;
@@ -70,10 +68,9 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * precondition.
      *
      * <p>{@code maxBytes} is the <em>tier's</em> capacity, evicted oldest-first. There is no
-     * per-file size bound: this method used to take one, and it was removed because size gave a
-     * second, independent route to a colder tier while placement has to be monotone in age alone.
-     * To keep large files off a fast tier, lower that level's {@code targetFileBytes} so large
-     * files are not produced.
+     * per-file size bound, because placement must be monotone in age alone: size would give an
+     * independent route to a colder tier. To keep large files off a fast tier, lower that level's
+     * {@code targetFileBytes}.
      */
     public ElysiumKVOptions addTier(BlobStore store, Durability durability, long maxAgeMs,
                                   long maxBytes, long stallAgeMs) {
@@ -111,14 +108,13 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * collection — against current state and the clock, and dispatches what is due. Zero (the
      * default) leaves the engine default of one second.
      *
-     * <p>It exists because <strong>a policy driven by time needs a trigger that is not a
-     * write</strong>. Without it a store that goes quiet with a file on a transient tier leaves it
-     * there indefinitely, however the tiers are configured.
+     * <p>A policy driven by time needs a trigger that is not a write: without this, a store that
+     * goes quiet with a file on a transient tier leaves it there indefinitely.
      *
-     * <p>Not a latency knob. The interval is the smallest term in the exposure window
-     * {@code maxAge + interval + queueing behind an in-flight compaction + the migration itself},
-     * so shortening it buys very little; an idle tick performs no version scan, which is what
-     * makes the default affordable across many partition stores in one process.
+     * <p>Not a latency knob — the interval is the smallest term in the exposure window
+     * {@code maxAge + interval + queueing behind an in-flight compaction + the migration itself}.
+     * An idle tick performs no version scan, which is what makes the default affordable across
+     * many partition stores in one process.
      */
     public ElysiumKVOptions maintenanceIntervalMs(long millis) {
         maintenanceIntervalMs = millis;
@@ -128,7 +124,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
     /**
      * How long an object this instance superseded is kept after nothing local references it.
      *
-     * <p><b>Protects readers, and only readers.</b> A {@link ReadOnlyStore} in another process holds
+     * <p>Protects readers, and only readers. A {@link ReadOnlyStore} in another process holds
      * a version this one has already replaced, and the collector cannot see it — liveness is tracked
      * per process. This delay is the only thing between a compaction here and a vanished file there.
      * Set it comfortably above how often your readers call {@link ReadOnlyStore#refresh()}.
@@ -145,7 +141,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * How long an object must be <em>continuously observed</em> unreferenced before the sweep
      * deletes it.
      *
-     * <p><b>Protects a concurrently-writing process</b>, and is needed whether or not readers exist:
+     * <p>Protects a concurrently-writing process, and is needed whether or not readers exist:
      * an object unreferenced at the instant we happen to look is indistinguishable from another
      * writer's file whose edit committed a moment ago. Zero leaves the engine default of 24 hours.
      * Must be at least {@link #obsoleteRetentionMs}, because a crash empties the pending queue and a
@@ -211,14 +207,14 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * compaction costs — measured at 20&nbsp;ms of injected latency, raising it from 2&nbsp;MiB to
      * 8&nbsp;MiB cut a compaction's requests by 63% and its duration by a third.
      *
-     * <p><b>Traded directly against memory.</b> A merge interleaves its inputs, so every input's
+     * <p>Traded directly against memory. A merge interleaves its inputs, so every input's
      * window is live at once, and each input holds two — the one being merged and the one being
      * fetched ahead of it. The footprint is {@code 2 x this x inputs x concurrent compactions}, and
      * it is charged to the memory budget when one is set.
      */
     public ElysiumKVOptions compactionWindowBytes(long bytes) {
-        // **Checked here, unlike its neighbours on this call, because a negative is not merely
-        // ignored downstream.** It crosses as an unsigned size and arrives as SIZE_MAX, which the C
+        // Checked here, unlike its neighbours on this call, because a negative is not merely
+        // ignored downstream. It crosses as an unsigned size and arrives as SIZE_MAX, which the C
         // ABI reads as a deliberate setting and which then overflows the budget charge — a store
         // that opened and quietly tried to buffer everything.
         if (bytes < 0) {
@@ -231,7 +227,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
     /**
      * Serve reads while a discarded transient store is still unreplayed. Off unless set.
      *
-     * <p>What survives a discard is <b>wrong rather than merely incomplete</b> — a key whose newer
+     * <p>What survives a discard is wrong rather than merely incomplete — a key whose newer
      * value lived on the lost store now reads as its older one — so reads fail with
      * {@link RecoveryRequiredException} until {@link ElysiumKV#markRecoveryComplete()}. Writes are
      * never refused either way, because the replay is made of them.
@@ -248,7 +244,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * Registers the built-in AES-256-GCM envelope construction under {@code id}, keyed by your
      * manager, and makes it the one new objects are written with.
      *
-     * <p><b>The id is persisted</b>, written into every object this provider encrypts. Renaming it
+     * <p>The id is persisted, written into every object this provider encrypts. Renaming it
      * orphans every file recorded against the old name. It may not be empty: that one is reserved
      * for the passthrough the engine always registers, which is why an unconfigured store is not a
      * special case but simply that provider being primary.
@@ -318,7 +314,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * Rewrite files recorded under any other provider, in the background, until none are left.
      * Off by default.
      *
-     * <p><b>Changing the primary does not finish a rotation.</b> Every file already written keeps
+     * <p>Changing the primary does not finish a rotation. Every file already written keeps
      * the provider it was written under, and reads keep routing to it; compaction rewrites such a
      * file only when it happens to compact it, which for a cold file may be never — and that is
      * exactly the file a key rotation was performed to stop depending on.
@@ -337,11 +333,8 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * deeper level {@code multiplier} times the capacity of the one above it, and the last
      * carrying none because it absorbs everything.
      *
-     * <p>For when you want the usual shape without stating {@code count} capacities by hand.
-     * Everything else here is explicit on purpose — a base size and a multiplier are a formula for
-     * producing this map, and stating the map directly is clearer. Choose {@code count} against
-     * expected total size: more levels means lower write amplification, and configured levels
-     * sitting empty cost nothing.
+     * <p>Choose {@code count} against expected total size: more levels means lower write
+     * amplification, and configured levels sitting empty cost nothing.
      *
      * <p>Replaces rather than merges, so call it before any {@link #level} of your own.
      */
@@ -400,7 +393,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
     /**
      * Compacts a file once this fraction of its entries are tombstones. Zero, the default, is off.
      *
-     * <p><b>The trigger the size ratios cannot express.</b> A tombstone shadows older copies of its
+     * <p>The trigger the size ratios cannot express. A tombstone shadows older copies of its
      * key and can only be dropped once a compaction reaches the bottommost level for its range, so
      * a delete-heavy store whose levels stay inside their byte and file budgets never trips one —
      * and every scan over the deleted region goes on paying to skip them. That shows up as scans
@@ -429,14 +422,14 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * Spreads each file's tier {@code maxAgeMs} crossing across {@code [maxAge * (1 - j), maxAge]}.
      * Zero, the default, keeps it exact; outside {@code [0, 1]} is a config error at open.
      *
-     * <p><b>Earlier only.</b> A transient tier's age bound is an exposure window the engine
+     * <p>Earlier only. A transient tier's age bound is an exposure window the engine
      * promises, so a file may cross early but never late.
      *
-     * <p>Stores drift apart on their own and this is for the times they do not: a rebuild stamps
-     * everything it replays within the same few minutes, so the whole store crosses together and
-     * migrates as one burst. For a store rebuilt on partition assignment that repeats every
-     * rebalance. The offset is derived from the file rather than rolled, so a reopen recomputes it
-     * instead of re-clustering what it just spread.
+     * <p>For the case where stores do not drift apart on their own: a rebuild stamps everything it
+     * replays within the same few minutes, so the whole store crosses together and migrates as one
+     * burst — every rebalance, for a store rebuilt on partition assignment. The offset is derived
+     * from the file rather than rolled, so a reopen recomputes it instead of re-clustering what it
+     * just spread.
      */
     public ElysiumKVOptions ageJitter(double fraction) {
         ageJitter = fraction;

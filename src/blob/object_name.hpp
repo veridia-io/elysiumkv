@@ -5,7 +5,7 @@
 
 namespace elysiumkv {
 
-/// What names a `BlobStore` accepts (ARCHITECTURE.md "Immutable named objects"), in **one** place.
+/// What names a `BlobStore` accepts (ARCHITECTURE.md "Immutable named objects"), in one place.
 ///
 /// It was in two, and they disagreed: `S3BlobStore` accepted a leading dot while
 /// `DiskBlobStore` rejected it, so `put(".hidden")` was a configuration error

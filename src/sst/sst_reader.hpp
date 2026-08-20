@@ -25,7 +25,7 @@ struct SstReaderOptions {
 
     /// Kept alive for the reader's lifetime, and used in place of the `store` argument when set.
     ///
-    /// **For the encryption boundary, which is a view of one object rather than a store.** The
+    /// For the encryption boundary, which is a view of one object rather than a store. The
     /// reader holds a `BlobStore&`, so a per-object wrapper needs an owner that outlives it — and
     /// the reader is the only thing that knows how long that is. Null leaves the reader reading the
     /// store it was handed, which is every unencrypted path.
@@ -57,7 +57,7 @@ public:
 
     /// Whether one of this file's range tombstones covers `key`.
     ///
-    /// **Says nothing about the file's own entries**, which is the rule that makes range tombstones
+    /// Says nothing about the file's own entries, which is the rule that makes range tombstones
     /// implementable without sequence numbers: a range tombstone shadows everything strictly older
     /// in `(level, file_number)` order and nothing in the file that carries it. So a caller asks
     /// this only after finding no point entry here, and a hit means every *older* file is shadowed.
@@ -80,7 +80,7 @@ public:
                                                     Slice prefetched = {});
 
     /// Resident bytes: the index block and the bloom filter, which are what a reader
-    /// keeps alive. **The filter dominates** — 10 bits per key is ~1.25 MB for a
+    /// keeps alive. The filter dominates — 10 bits per key is ~1.25 MB for a
     /// million-entry file, which is why the reader cache is bounded by bytes rather
     /// than by a count of open files.
     ///
@@ -102,7 +102,7 @@ private:
     };
 
 public:
-    /// **Public only so `make_unique` can call it** — `Private` is the actual access control.
+    /// Public only so `make_unique` can call it — `Private` is the actual access control.
     /// Worth the indirection because the alternative is a raw `new` handed to a `unique_ptr`, and
     /// the analyzer cannot follow that ownership into a `std::expected` return, so it reports a
     /// leak on a function that has none.
@@ -130,7 +130,7 @@ private:
     /// every path that touches them acquires this first — which is what orders the single write
     /// against every later read.
     std::mutex lazy_mutex_;
-    /// **Atomic, and read before the lock.** `get` consults the filter for every file it opens, so
+    /// Atomic, and read before the lock. `get` consults the filter for every file it opens, so
     /// taking a mutex to discover that a one-time load already happened put a lock acquisition on
     /// the hottest path in the engine — worth about a fifth of a point lookup. Once either flag is
     /// set the value beside it is immutable, so the fast path needs an acquire load and nothing

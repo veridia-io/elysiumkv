@@ -100,7 +100,7 @@ TEST_P(ManifestCatalogContract, MissingObjectsAreNotFound) {
 
 // ARCHITECTURE.md "Ownership is one compare-and-set" — objects are immutable and write-once. A put at an existing address is a
 // programming error, not an overwrite.
-// **Status::Config specifically, from every implementation.** This checked only
+// Status::Config specifically, from every implementation. This checked only
 // "not Ok" before, and under that check the file catalog reported `Unusable` while
 // the S3 and DynamoDB ones reported `Config` — a divergence the suite could not
 // see. It matters because the engine reacts to this status: an occupied edit
@@ -141,7 +141,7 @@ TEST_P(ManifestCatalogContract, ListEditsIsSortedAndScopedToItsGeneration) {
     EXPECT_TRUE(empty->empty());
 }
 
-/// **Optional, and the contract is that it is one of exactly two things.** An implementation that
+/// Optional, and the contract is that it is one of exactly two things. An implementation that
 /// can enumerate cheaply should, because that is what makes generation reclamation complete rather
 /// than merely usual; one that cannot says `Unsupported` and the engine probes a bounded window
 /// below the pointer instead. What must not happen is a third answer — a partial list, or an empty
@@ -170,7 +170,7 @@ TEST_P(ManifestCatalogContract, ListGenerationsEitherEnumeratesOrSaysItCannot) {
         << "the answer must not change with the contents: a caller decides once whether to use it";
     if (!supported) return;
 
-    // **Every generation, once each** — an edit must not add a second entry for the generation its
+    // Every generation, once each — an edit must not add a second entry for the generation its
     // snapshot already named, or the caller would delete the same one twice.
     std::vector<uint64_t> seen = *listed;
     std::sort(seen.begin(), seen.end());
@@ -215,7 +215,7 @@ TEST_P(ManifestCatalogContract, LargeSnapshotsRoundTrip) {
 // output file, so a compaction with many outputs — or ordinary keys and a small
 // `target_file_bytes` — produces one far past any single-item limit a catalog may have.
 //
-// **Incompressible on purpose.** The padding above compresses to almost nothing, so a 2 MiB
+// Incompressible on purpose. The padding above compresses to almost nothing, so a 2 MiB
 // snapshot of it lands in one chunk and proves the chunking works only in the sense that it did
 // not break. This body does not shrink, so it genuinely spans chunks.
 TEST_P(ManifestCatalogContract, LargeEditsRoundTrip) {
@@ -231,7 +231,7 @@ TEST_P(ManifestCatalogContract, LargeEditsRoundTrip) {
     EXPECT_EQ(read_back->size(), edit.size());
     EXPECT_EQ(as_string(*read_back), edit);
 
-    // **One entry, not one per chunk.** Replay asks for each sequence once, so a chunked edit
+    // One entry, not one per chunk. Replay asks for each sequence once, so a chunked edit
     // reported several times would replay it several times.
     auto seqs = catalog_->list_edits(1).get();
     ASSERT_TRUE(seqs.has_value());

@@ -24,10 +24,10 @@ import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
  * class loaders". That is two separate demands, and the second one bites:
  *
  * <ul>
- *   <li><b>Concurrency.</b> Several threads racing to extract must converge on
+ *   <li>Concurrency. Several threads racing to extract must converge on
  *       one complete file — never a half-written one, which unlike a half-written
  *       ordinary file would be executed.
- *   <li><b>Class-loader isolation.</b> A JVM refuses to load the same library
+ *   <li>Class-loader isolation. A JVM refuses to load the same library
  *       <em>file</em> into two class loaders: {@code System.load} throws
  *       "Native Library ... already loaded in another classloader". Two copies of
  *       this class in one JVM — the ordinary situation for two web applications

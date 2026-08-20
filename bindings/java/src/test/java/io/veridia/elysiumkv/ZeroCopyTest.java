@@ -12,8 +12,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * The claim the whole native core rests on: <b>a lookup does not copy the
- * value.</b> ARCHITECTURE.md "Benchmarks" states the check exactly — "if the <i>value</i> path shows a
+ * The claim the whole native core rests on: a lookup does not copy the
+ * value. ARCHITECTURE.md "Benchmarks" states the check exactly — "if the <i>value</i> path shows a
  * copy, the pin protocol is not doing its job."
  *
  * <p>Timing cannot show this reliably; allocation can. A copying path must

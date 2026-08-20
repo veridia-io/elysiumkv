@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * What {@link ElysiumKV#openWithResult} found. ARCHITECTURE.md "A tier is not a level" — a transient store that came
- * back empty or unreadable is discarded whole, and that is <b>not</b> the same
+ * back empty or unreadable is discarded whole, and that is not the same
  * as missing recent writes — dropping a level's newer files uncovers older
  * values underneath, so reads afterwards can return stale data rather than no
  * data. {@link #requiresRecovery()} stays true until the embedder replays

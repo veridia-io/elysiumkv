@@ -34,8 +34,8 @@ import org.junit.jupiter.api.io.TempDir;
  * depends on an implementation detail rather than on a contract. Reasoning about it produces a
  * plausible answer; running both produces the real one.
  *
- * <p>The second case is the one that matters most here: <b>our segment interval is deliberately
- * different from RocksDB's</b>. If the order still agrees, the answer does not depend on how the
+ * <p>The second case is the one that matters most here: our segment interval is deliberately
+ * different from RocksDB's. If the order still agrees, the answer does not depend on how the
  * keyspace happens to be cut up — which is what a caller is entitled to assume.
  */
 class WindowOrderingAgainstRocksDbTest {
@@ -152,7 +152,7 @@ class WindowOrderingAgainstRocksDbTest {
     }
 
     /**
-     * <b>Order is a function of the segment interval — in RocksDB too.</b>
+     * Order is a function of the segment interval — in RocksDB too.
      *
      * <p>This started as an assertion that the order does not depend on how the keyspace is cut up.
      * It does. RocksDB's own output breaks key-major runs exactly at two hours, its segment interval

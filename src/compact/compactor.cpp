@@ -1,14 +1,8 @@
-/* Compaction and migration execution, split out of `db_impl.cpp` — which had
- * reached 1400 lines and forty methods spanning open, the write path, the read
- * path, stats, background work and store verification. ARCHITECTURE.md "Dependencies and artifacts" names this file; it
- * simply never existed, and both compaction bugs found in this codebase hid in
- * the crowd.
+/* Compaction and migration execution (ARCHITECTURE.md "Dependencies and artifacts").
  *
- * These are still `DbImpl` members. That is deliberate and worth being honest
- * about: the win here is navigability, not decoupling. Every one of them reaches
- * into `versions_`, `options_`, `config_`, `tiers_`, the reader cache and the
- * counters, so a genuine `Compactor` object would need most of `DbImpl` handed
- * to it by reference and would buy nothing today.
+ * These are `DbImpl` members rather than a separate `Compactor`: every one reaches into
+ * `versions_`, `options_`, `config_`, `tiers_`, the reader cache and the counters, so the split is
+ * for navigability rather than decoupling.
  */
 
 #include "db/db_impl.hpp"
@@ -37,24 +31,21 @@ namespace elysiumkv {
 namespace {
 
 /// ARCHITECTURE.md "Negative controls" — asserts the constraint that makes the current design safe:
-/// **at most one task performing deletions is in flight at a time.**
+/// at most one task performing deletions is in flight at a time.
 ///
-/// It is narrower than "one version-mutating task", and getting that wrong would produce an
-/// assertion that fires immediately: flush and a compaction *do* overlap — flush adds an L0 file
-/// while the compaction deletes at L1 — and that is legal precisely because flush deletes
-/// nothing, so its edit cannot contend with a delete-set chosen from an older version snapshot.
-/// Compaction, migration and capacity eviction all pick files from a snapshot and
-/// `VersionSet::apply` does not check they are still live, so two of *those* running at once is
-/// a double delete or a compaction reading a file a migration already unlinked.
+/// Narrower than "one version-mutating task": flush and a compaction legally overlap, because
+/// flush deletes nothing and its edit cannot contend with a delete-set chosen from an older
+/// snapshot. Compaction, migration and capacity eviction all pick files from a snapshot, and
+/// `VersionSet::apply` does not check they are still live, so two of those at once is a double
+/// delete or a compaction reading a file a migration unlinked.
 ///
-/// Cannot fire today — those three share one executor. Fires on the first test run after
-/// someone adds a second deleting worker, which converts "found out in production" into a failed
-/// assertion. Compiled only where the continuous checks are.
+/// Unreachable while those three share one executor; fires on the first test run after a second
+/// deleting worker is added. Compiled only where the continuous checks are.
 class DeletingTaskGuard {
 public:
     explicit DeletingTaskGuard(std::atomic<bool>& flag) : flag_(flag) {
         if (flag_.exchange(true)) {
-            // **Not `assert`.** `ELYSIUMKV_PARANOID` is on in the sanitizer presets too, and those
+            // Not `assert`. `ELYSIUMKV_PARANOID` is on in the sanitizer presets too, and those
             // build as RelWithDebInfo — which defines `NDEBUG`, so an `assert` here would be inert
             // in two of the three builds that are supposed to be carrying this check. A check that
             // silently does not run in most of the configurations it is enabled in is the failure
@@ -95,9 +86,9 @@ void DbImpl::dispatch_maintenance() {
 
 /// The write path's nudge, and what keeps the coordinator's gate honest.
 ///
-/// **The two halves are not equally important.** The dispatch is an optimisation — it is what
+/// The two halves are not equally important. The dispatch is an optimisation — it is what
 /// keeps a stalled writer from waiting a full tick — and a test may suppress it to prove the
-/// coordinator alone is sufficient. The **epoch bump is mandatory**: the gate skips evaluation
+/// coordinator alone is sufficient. The epoch bump is mandatory: the gate skips evaluation
 /// when the epoch is unchanged, so a transition that never bumps it stays hidden until the
 /// periodic bypass. Every new maintenance predicate must either be cheap enough to evaluate ahead
 /// of the gate, or declare every transition that invalidates it.
@@ -115,17 +106,12 @@ void DbImpl::note_maintenance_state_changed() { invalidate_maintenance(); }
 bool DbImpl::reclaim_dead_files(Status& status) {
     auto version = versions_->current();
     std::vector<FileMetadata> dead = version->files_entirely_truncated();
-    // Files a newer range tombstone covers whole go the same way and for the same reason: the bytes
-    // are already unreadable, so rewriting them in a compaction would be work done to produce
-    // nothing. One edit, and at most one block read to authorise it.
+    // Files a newer range tombstone covers whole go the same way: the bytes are already unreadable,
+    // so rewriting them would produce nothing. One edit, and at most one block read to authorise it.
     //
-    // **The manifest shortlists; the tombstones decide.** What it records per file is the *hull* of
-    // that file's ranges, which is the range itself when there is one and a bounding interval with
-    // unknown gaps when there are more — so a hull can show a file is not covered but never that it
-    // is. Rather than give up on the second case, which is what a file whose tombstones have been
-    // compacted together looks like, the candidates the hull admits are settled by reading the
-    // cover's range block. Reads are per cover rather than per candidate, and only for covers the
-    // hull already made plausible.
+    // The manifest shortlists; the tombstones decide. Each file records the hull of its ranges, so a
+    // hull can show a file is not covered but never that it is — candidates the hull admits are
+    // settled by reading the cover's range block. Reads are per cover, not per candidate.
     // Age-expired files go the same way: one edit, nothing read. See `Options::ttl`.
     if (options_.ttl.has_value()) {
         const uint64_t now = now_ms();
@@ -210,7 +196,7 @@ void DbImpl::background_compaction_loop() {
             while (run_one_migration(status)) {
             }
         }
-        // **Last, and deliberately so.** A rotation that finishes a minute later costs nothing;
+        // Last, and deliberately so. A rotation that finishes a minute later costs nothing;
         // a flush that waits behind one costs write availability. Everything above is either
         // durability or cost, and both outrank changing an envelope.
         while (status == Status::Ok && run_one_reencryption(status)) {
@@ -235,7 +221,7 @@ void DbImpl::background_compaction_loop() {
             }
         }
 
-        // **Only on work done.** The completion of a task can make the next one due, so the
+        // Only on work done. The completion of a task can make the next one due, so the
         // coordinator has to be told — but telling it unconditionally would be a busy loop:
         // every pass would open the gate, which dispatches another pass, which finds nothing and
         // opens it again. A pass that changed nothing has nothing to invalidate.
@@ -248,7 +234,7 @@ void DbImpl::background_compaction_loop() {
         if (status != Status::Ok && !is_retryable(status)) {
             std::lock_guard<std::mutex> lock(mem_mutex_);
             ELYSIUMKV_LOCK_AUDIT();
-            // **The cause, not the consequence.** This thread reports `Unusable` for
+            // The cause, not the consequence. This thread reports `Unusable` for
             // any already-terminal instance, so writing unconditionally would replace
             // the first real failure — a fence, a corruption — with a derived one, and
             // whoever calls `flush()` next would hear the wrong thing. That is exactly
@@ -275,7 +261,7 @@ Status DbImpl::compact_level(int level) {
     // level, that is the only thing that would.
     std::vector<FileMetadata> pass = versions_->current()->files_at(level);
 
-    // **Oldest first at L0**, and this is a correctness requirement rather than a
+    // Oldest first at L0, and this is a correctness requirement rather than a
     // preference. ARCHITECTURE.md "Positional recency" makes recency at L0 positional — higher file number is
     // newer — and `files_at(0)` hands them back newest-first. Rewriting one file
     // per compaction means each output lands in the level below before the next
@@ -369,19 +355,13 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         // recency by file number, so this file cannot simply be copied — it has to be
         // rewritten into L1, where order is by key.
         //
-        // **Chosen by file number, and only when nothing older overlaps it.** This used
-        // to choose the smallest `min_write_time_ms`, which is a different order and a
-        // wrong one. `min_write_time_ms` is a memtable's creation time, so with a small
-        // memtable several flushes share a clock tick — and among ties the loop kept the
-        // *first* it saw, which is the **newest** file, because `files_at(0)` runs
-        // newest-first. Pushing a newer L0 file into L1 leaves older L0 files above it,
-        // and L0 always shadows L1: a committed write reverts to its previous value, and
-        // survives a reopen because the manifest records it. The differential oracle
-        // found it as "a scan came back one row short" 900 operations later.
+        // Chosen by file number, never by `min_write_time_ms`: that is a memtable's creation time,
+        // so several flushes can share a tick, and pushing a newer L0 file down while older ones
+        // remain above it reverts a committed write — L0 always shadows L1.
         //
-        // Waiting is the right response when something older overlaps: ARCHITECTURE.md "Migration between tiers" makes
-        // age-driven migration between durable tiers the lowest priority and starvable
-        // without harm, and the older file leaves under ordinary L0 pressure anyway.
+        // Skipped entirely while something older overlaps. Age-driven migration between durable
+        // tiers is the lowest priority and starvable (ARCHITECTURE.md "Migration between tiers"),
+        // and the older file leaves under ordinary L0 pressure anyway.
         const FileMetadata* seed = nullptr;
         for (const FileMetadata& file : version->files_at(0)) {
             const int tier = tiers_.tier_of_store(file.store_id);
@@ -510,7 +490,7 @@ bool DbImpl::run_one_reencryption(Status& status) {
         }
     }
     if (!stale.has_value()) {
-        // **The files are done; the manifest may not be.** A payload is sealed under whichever
+        // The files are done; the manifest may not be. A payload is sealed under whichever
         // provider was primary when it was written, so a store whose every file has been rewritten
         // still cannot open without the retired provider until a fresh snapshot exists under the
         // new one. Rolling is what writes that snapshot, and nothing else would — an idle store
@@ -535,7 +515,7 @@ Status DbImpl::run_reencryption(const FileMetadata& file, DeferredLine& line) {
     BlobStore* store = store_for(file.store_id);
     if (store == nullptr) return Status::Corrupt;
 
-    // **Read logical, write sealed** — the one place this differs from a migration, which copies
+    // Read logical, write sealed — the one place this differs from a migration, which copies
     // the stored bytes untouched. The view resolves the file's *own* provider, so the bytes that
     // come back are plaintext to this layer whatever they were written under; `write_new_sst`
     // then seals them under the primary. Nothing decodes the block format, so this costs one read
@@ -581,7 +561,7 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     const Tier& target = tiers_.tiers[static_cast<size_t>(migration.to_tier)];
     if (target.store->id() == migration.file.store_id) return Status::Ok;
 
-    // ARCHITECTURE.md "The manifest is snapshots plus edits" — **a file number is never reused, including across tier migration.**
+    // ARCHITECTURE.md "The manifest is snapshots plus edits" — a file number is never reused, including across tier migration.
     // The copy gets a fresh number and the edit carries `added` and `deleted`,
     // structurally identical to a compaction — not an in-place mutation of
     // `store_id`. Keeping the number would make object identity the pair
@@ -596,7 +576,7 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     auto bytes = source->bulk_view().get_sync(source_name, 0, BlobStore::kReadToEnd);
     if (!bytes) return bytes.error();
 
-    // **The physical size, because this is below the encryption boundary.** Migration copies the
+    // The physical size, because this is below the encryption boundary. Migration copies the
     // stored object rather than the file's contents, and an encrypted object is longer than the
     // logical size the manifest records — by one tag per chunk. Comparing against `file_bytes`
     // here reported every encrypted file as corrupt.
@@ -610,7 +590,7 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     // engine makes, and the budget could not see it.
     const BudgetCharge charged(options_.memory_budget, bytes->size());
 
-    // **Not re-sealed.** These bytes came off the source store as they were written; encrypting
+    // Not re-sealed. These bytes came off the source store as they were written; encrypting
     // them again would double-encrypt, and the copy's metadata is carried over below.
     auto written = write_new_sst(*target.store, Slice::from(*bytes), /*seal=*/false);
     if (!written) return written.error();
@@ -788,7 +768,7 @@ Result<std::shared_ptr<SstReader>> DbImpl::compaction_reader_for(
     BlobStore* store = store_for(file.store_id);
     if (store == nullptr) return std::unexpected(Status::Corrupt);
 
-    // **Resolved before the window, because the window's size hint is a physical one.** The window
+    // Resolved before the window, because the window's size hint is a physical one. The window
     // sits *below* the encryption boundary and fetches ciphertext, so a hint of the logical size
     // would stop its prefetch short of the bytes that actually exist.
     auto cipher = cipher_for(file);
@@ -837,7 +817,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
         all_ranges.insert(all_ranges.end(), ranges->begin(), ranges->end());
         child_ranges.push_back(std::move(*ranges));
     }
-    // **Handed to the merge, so the covered entries never reach the output.** Without this the
+    // Handed to the merge, so the covered entries never reach the output. Without this the
     // compaction would copy them forward into the same file as the tombstone that covers them — and
     // a tombstone shadows nothing in its own file, so every key the range deleted would come back.
     auto merged = make_merging_iterator(std::move(children), std::move(child_ranges));
@@ -850,12 +830,12 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // configured level.
     const bool drop_tombstones = compaction.output_is_bottommost;
 
-    // **The range tombstones have to be carried down too, and for the same reason point tombstones
-    // are.** Files older than this compaction were not read and are still there; a tombstone that
+    // The range tombstones have to be carried down too, and for the same reason point tombstones
+    // are. Files older than this compaction were not read and are still there; a tombstone that
     // stopped here would stop shadowing them and the keys would come back at the next read. At the
     // bottommost level there is nothing older left, which is exactly when it can be let go.
     //
-    // Each output carries the part of them that falls in **its own** slice of the keyspace, clipped
+    // Each output carries the part of them that falls in its own slice of the keyspace, clipped
     // at the cut points. Files at one level are ordered by key rather than by recency, so an output
     // whose tombstone reached into a sibling's range would shadow that sibling — and the sibling
     // holds entries this compaction just decided to keep. Clipping tiles the range: no overlap
@@ -872,7 +852,7 @@ Status DbImpl::write_compaction_outputs(const Compaction& compaction,
     // shadows; a truncation point shadows every level at once, so there is nothing left to shadow
     // and nothing to carry down.
     //
-    // **This reclaims space; it does not change an answer** — the read clamp already hides these
+    // This reclaims space; it does not change an answer — the read clamp already hides these
     // keys. It is what narrows a file straddling the point, the whole ones below it never reaching
     // a compaction at all.
     const std::string truncation_point = versions_->current()->truncation_point();

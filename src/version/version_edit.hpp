@@ -36,7 +36,7 @@ struct FileMetadata {
     uint64_t num_tombstones = 0;
     /// How many range tombstones the file carries, and the span they cover.
     ///
-    /// **The covered span is not bounded by `smallest_key` and `largest_key`.** A file can delete a
+    /// The covered span is not bounded by `smallest_key` and `largest_key`. A file can delete a
     /// range it holds no keys in at all — a flush whose memtable saw only a `delete_range` produces
     /// exactly that — so a read path that consulted the data span alone would walk straight past
     /// the tombstone that answers its query. Recorded here so the decision to open the file's
@@ -46,10 +46,10 @@ struct FileMetadata {
     std::string largest_range_key;
 
     /// ARCHITECTURE.md "A range delete is a record, not a rewrite" — the span this file
-    /// **affects**, data and deletions together.
+    /// affects, data and deletions together.
     ///
-    /// **Not the data span, and the difference is a correctness matter rather than an efficiency
-    /// one.** A file can delete a range it holds no keys in — a flush whose memtable saw only a
+    /// Not the data span, and the difference is a correctness matter rather than an efficiency
+    /// one. A file can delete a range it holds no keys in — a flush whose memtable saw only a
     /// `delete_range` produces exactly that, with an empty data span. Choosing compaction inputs by
     /// the data span alone moves such a file past the very files it exists to shadow and drops it
     /// into a level where they sit *beside* it, and between two files at one level there is no
@@ -87,7 +87,7 @@ struct FileMetadata {
     /// recomputed after a restart — hence persisted.
     uint64_t min_write_time_ms = 0;
 
-    /// Wall clock of the **newest** write in the file: a flushed L0 file takes its memtable's seal
+    /// Wall clock of the newest write in the file: a flushed L0 file takes its memtable's seal
     /// time, a compaction output the max over its inputs, a migration carries it unchanged.
     ///
     /// Separate from `min_write_time_ms` because the two answer opposite questions. Placement asks
@@ -109,7 +109,7 @@ struct FileMetadata {
     /// Which registered `EncryptionProvider` wrote this file's bytes, and whatever that provider
     /// needs to reopen them — a wrapped data key, a nonce basis, its own suite identifier.
     ///
-    /// **Reserved ahead of the feature that fills them.** Both are written empty today. Adding
+    /// Reserved ahead of the feature that fills them. Both are written empty today. Adding
     /// fields to the manifest is free only while its format version is unreleased, and format 6 is
     /// exactly that until 0.7.0 ships; afterwards it would cost a bump and a rebuild of every store
     /// from its changelog. Reserving now is a few lines and no behaviour change.
@@ -140,7 +140,7 @@ struct VersionEdit {
     /// Everything below this key has been truncated away. Empty means "no change" — which is also
     /// the correct reading of "truncate below the empty key", since no key sorts under it.
     ///
-    /// **Monotone by construction**: `Version::apply` takes the max, so replaying the manifest is
+    /// Monotone by construction: `Version::apply` takes the max, so replaying the manifest is
     /// idempotent and an out-of-order edit cannot resurrect data. That is the property that lets
     /// truncation be a single field instead of a log of ranges.
     std::string truncation_point;

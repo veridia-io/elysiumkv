@@ -1,21 +1,16 @@
 package io.veridia.elysiumkv;
 
 /**
- * The object-storage seam (ARCHITECTURE.md "Immutable named objects"): objects written once under a name and never
- * modified. This is the abstraction, so it carries the abstraction's name;
- * {@link DiskBlobStore} and {@link S3BlobStore} carry theirs.
+ * The object-storage seam (ARCHITECTURE.md "Immutable named objects"): objects written once under a
+ * name and never modified. Implementations are named for their medium — {@link DiskBlobStore},
+ * {@link S3BlobStore} — so the seam's own name stays free.
  *
- * <p>The distinction matters because ARCHITECTURE.md "Immutable named objects" exists so that other implementations
- * can be substituted, and a concrete class holding the seam's name leaves the
- * next one nowhere to stand — which is exactly what happened here once already.
+ * <p>Not extensible from Java: the constructor is package-private because a store implemented in
+ * Java would attach native threads to the JVM and translate exceptions back across the boundary,
+ * re-entering a single-writer engine. The C ABI's vtable seam is there for a language that needs
+ * it.
  *
- * <p><b>Not extensible from Java.</b> The constructor is package-private, and
- * deliberately: ARCHITECTURE.md "The ABI boundary" keeps upcalls out of this binding, because a store
- * implemented in Java would mean attaching native threads to the JVM and
- * translating exceptions back across the boundary, re-entering a single-writer
- * engine. The C ABI's vtable seam is still there for a language that needs it.
- *
- * <p>Owned by the caller and <b>must outlive the database</b> that uses it.
+ * <p>Owned by the caller and must outlive the database that uses it.
  */
 public abstract class BlobStore implements AutoCloseable {
     private long handle;

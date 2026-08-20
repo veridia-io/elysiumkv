@@ -1,18 +1,13 @@
-/* ARCHITECTURE.md "The ABI boundary" — the JNI glue. It includes `elysiumkv.h` and nothing else from the engine:
- * one boundary, one place where a status code becomes a Java exception. A glue
- * layer reaching into the C++ headers would put `std::expected` and
- * `shared_ptr` on a path that must not throw.
+/* The JNI glue. Includes `elysiumkv.h` and nothing else from the engine, so `std::expected` and
+ * `shared_ptr` stay off a path that must not throw (ARCHITECTURE.md "The ABI boundary").
  *
- * Two disciplines run through every function here:
+ * Two invariants hold for every function here:
  *
- *   * Nothing escapes. A C++ exception unwinding through a JNI frame is
- *     undefined behaviour, so every entry point is wrapped — the same catch-all
- *     the C ABI applies one layer down, because `std::bad_alloc` from the
- *     scratch buffers in this file would otherwise escape below it.
- *   * Absence is not failure. `ELYSIUMKV_NOT_FOUND` returns null or -1; every
- *     other non-OK status throws. ARCHITECTURE.md "The ABI boundary" puts this first for a reason: a binding
- *     that folds an unreachable store into "no such key" turns an outage into
- *     apparent data loss.
+ *   * Nothing escapes. A C++ exception unwinding through a JNI frame is undefined behaviour, so
+ *     every entry point is wrapped — the scratch buffers in this file sit above the C ABI's own
+ *     catch-all, so `std::bad_alloc` from them would otherwise escape.
+ *   * `ELYSIUMKV_NOT_FOUND` returns null or -1; every other non-OK status throws. Folding an
+ *     unreachable store into "no such key" would turn an outage into apparent data loss.
  */
 
 #include "elysiumkv/elysiumkv.h"
@@ -874,7 +869,7 @@ void logger_write(void* context, int level, int event, const char* message, size
     }
     env->CallVoidMethod(static_cast<jobject>(context), g_logger_log, static_cast<jint>(level),
                         static_cast<jint>(event), text);
-    // **A throwing appender must not propagate.** The engine calls this from the middle of a flush
+    // A throwing appender must not propagate. The engine calls this from the middle of a flush
     // or compaction, which would otherwise fail because logging it did.
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(text);
@@ -882,7 +877,7 @@ void logger_write(void* context, int level, int event, const char* message, size
 
 /* --- encryption ---------------------------------------------------------------------------
  *
- * A key manager written in Java, reached from the engine. **Per object, not per chunk**, and the
+ * A key manager written in Java, reached from the engine. Per object, not per chunk, and the
  * result is cached — which is what makes an upcall affordable here and is why the cipher seam is
  * not exposed the same way.
  *

@@ -32,12 +32,12 @@ uint64_t chunk_plain_bytes(uint64_t chunk, uint64_t logical, size_t chunk_bytes)
     return remaining < chunk_bytes ? remaining : chunk_bytes;
 }
 
-/// **The address is bound into every chunk, not only chunk zero.** A manifest payload has a
+/// The address is bound into every chunk, not only chunk zero. A manifest payload has a
 /// meaning that depends entirely on where it sits — an edit replayed at another sequence number
 /// would apply the wrong change to the wrong generation — and unlike an SST there is no file
 /// number inside the bytes to catch it.
 ///
-/// **Chunk zero additionally binds the whole header**, which is where the lengths, the codec, the
+/// Chunk zero additionally binds the whole header, which is where the lengths, the codec, the
 /// provider id and the provider's own metadata live. Binding only the lengths would leave the rest
 /// of the header malleable — inert as far as decryption goes, but a header nobody authenticates is
 /// a header that becomes load-bearing later without anyone noticing.
@@ -170,7 +170,7 @@ Result<std::string> ManifestPayload::open(const ProviderRegistry& registry, uint
     const std::string id(reinterpret_cast<const char*>(p + kHeaderBytes), provider_len);
     EncryptionProvider* provider = registry.find(id);
     if (provider == nullptr) {
-        // **The bytes are intact; what is missing is the configuration that reads them.** Reporting
+        // The bytes are intact; what is missing is the configuration that reads them. Reporting
         // corruption would send an operator to a restore, and worse, replay would treat it as a
         // torn write and quietly open on a truncated history.
         error = "manifest payload records encryption provider '" + id +

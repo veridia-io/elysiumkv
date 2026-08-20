@@ -83,7 +83,7 @@ class WindowKeysTest {
     }
 
     /**
-     * <b>The ordering the whole design rests on.</b> Sorted bytewise, entries must group by segment
+     * The ordering the whole design rests on. Sorted bytewise, entries must group by segment
      * first, then by user key, then by time — that is what makes expiry one contiguous run at the
      * bottom and a fetch one contiguous run inside each segment.
      */

@@ -22,22 +22,22 @@ enum class Status : uint8_t {
     /// newer format version. Distinct from `Corrupt`, which says the bytes are damaged; the
     /// operator's remedy here is a different binary, not a restore.
     Unsupported,
-    /// **Only a read-only instance sees this**: its version is older than the writer's retention
+    /// Only a read-only instance sees this: its version is older than the writer's retention
     /// window, so an object that version references has been legitimately collected.
     ///
     /// Neither terminal nor retryable, for the same reason `Stalled` is neither: it is a definite
     /// answer with a specific remedy, and repeating the same call will keep producing it. The
-    /// remedy is `refresh()` or a reopen. **It must never be reported as `Corrupt`** — the data is
+    /// remedy is `refresh()` or a reopen. It must never be reported as `Corrupt` — the data is
     /// not damaged and there is nothing to restore. Distinguished from real loss by re-reading the
     /// manifest pointer: if it has advanced past the version holding the missing file, the writer
     /// collected it legitimately.
     Stale,
-    /// A transient store lost its contents, so what survives is **wrong rather than merely
-    /// incomplete**: a key whose newer value lived there now reads as its older one. Reads are
+    /// A transient store lost its contents, so what survives is wrong rather than merely
+    /// incomplete: a key whose newer value lived there now reads as its older one. Reads are
     /// refused until the embedder replays the gap and calls `mark_recovery_complete()`.
     ///
     /// Neither terminal nor retryable, like `Stale`: a definite answer with a specific remedy that
-    /// is not reopening. Writes are **not** refused — the replay that clears this is made of them,
+    /// is not reopening. Writes are not refused — the replay that clears this is made of them,
     /// and an embedder whose replay reads as well as writes sets
     /// `Options::allow_reads_before_recovery`.
     RecoveryRequired,
@@ -60,9 +60,9 @@ constexpr bool is_retryable(Status s) noexcept { return s == Status::Io; }
 template <typename T>
 using Result = std::expected<T, Status>;
 
-/// Why the most recent failing call **on this thread** failed, or empty if it had nothing to add.
+/// Why the most recent failing call on this thread failed, or empty if it had nothing to add.
 ///
-/// **For the calls whose status cannot say which check fired.** `open` is the case that forces
+/// For the calls whose status cannot say which check fired. `open` is the case that forces
 /// this: a dozen configuration errors all report `Status::Config`, and an operator holding only
 /// that has to guess. A `Result` carries a `Status` and nothing else, and widening it to carry a
 /// message would put an allocation on every error path — including the ones, like `NotFound`, that
@@ -71,7 +71,7 @@ using Result = std::expected<T, Status>;
 /// Thread-local, so one thread's failure is never read as another's, and overwritten by the next
 /// failing call that has something to say. Read it immediately after the call that failed.
 ///
-/// **Not every failure sets it.** Empty means "no more than the status says", never "no failure".
+/// Not every failure sets it. Empty means "no more than the status says", never "no failure".
 std::string_view last_error() noexcept;
 
 namespace internal {

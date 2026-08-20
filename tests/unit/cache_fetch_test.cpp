@@ -55,7 +55,7 @@ TEST(FetchPlanTest, AMissIsRoundedOutToItsChunk) {
     EXPECT_EQ(plan.len, 4096u) << "and out to the end of that chunk";
 }
 
-/// **A plan is always a superset.** Shrinking a request would turn a complete answer into a partial
+/// A plan is always a superset. Shrinking a request would turn a complete answer into a partial
 /// one, which this cache treats as wrong rather than short.
 TEST(FetchPlanTest, ARequestLargerThanTheChunkIsNotShrunk) {
     const FetchPlan plan = plan_fetch(100, 10'000, 4096);
@@ -103,7 +103,7 @@ struct Fixture {
     }
 };
 
-/// <b>The point of the whole thing.</b> A sequential read costs one request per chunk rather than
+/// The point of the whole thing. A sequential read costs one request per chunk rather than
 /// one per block, and it needs no notion of a scan to do it.
 TEST(CacheFetch, ChunkingCollapsesASequentialReadIntoFarFewerRequests) {
     Fixture plain(/*granularity=*/0);

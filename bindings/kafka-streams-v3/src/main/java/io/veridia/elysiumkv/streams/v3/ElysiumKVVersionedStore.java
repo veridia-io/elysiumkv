@@ -40,14 +40,13 @@ import org.apache.kafka.streams.state.VersionedRecordIterator;
  * {@code VersionedKeyValueStore} in Streams' own adapter, which lives in its internals — this
  * adapter depends only on published API.
  *
- * <p><b>Two keyspaces, because two lifetimes.</b> A key's current value must be readable however
- * long ago it was written; its superseded versions only need to survive the history retention. See
+ * <p>Two keyspaces, because two lifetimes: a key's current value must be readable however long ago
+ * it was written, while its superseded versions need only outlive the history retention. See
  * {@link VersionedKeys} for the layout and why history sorts below latest.
  *
- * <p><b>The plain {@code KeyValueStore} methods are the versioned ones at the current time.</b>
- * Streams reaches this store through both surfaces — the versioned one from a versioned KTable, the
- * plain one from the change logger and the restore path — so they have to agree rather than being
- * two stores in a trench coat.
+ * <p>The plain {@code KeyValueStore} methods are the versioned ones at the current time. Streams
+ * reaches this store through both surfaces — the versioned one from a versioned KTable, the plain
+ * one from the change logger and the restore path — so the two must agree.
  */
 public class ElysiumKVVersionedStore implements VersionedBytesStore {
     private final String name;

@@ -12,7 +12,7 @@
 
 namespace elysiumkv::test {
 
-/// ARCHITECTURE.md "Immutable named objects" — **tests only.** A decorator over any store: latency, error injection by
+/// ARCHITECTURE.md "Immutable named objects" — tests only. A decorator over any store: latency, error injection by
 /// name pattern and call index, torn writes, vanished objects. It is not a tier
 /// and must never be constructible from Options in a production path.
 ///
@@ -58,15 +58,13 @@ public:
 
     uint64_t call_count(Op op) const;
 
-    /// The most `list` calls that were ever in flight across **every** store sharing this counter,
+    /// The most `list` calls that were ever in flight across every store sharing this counter,
     /// at the same instant.
     ///
-    /// **A direct observation of concurrency, where the wall clock is only a proxy for it.** The
-    /// test this exists for used to time `open` and assert it came in under two latencies; that
-    /// holds on an idle machine and fails on a loaded one under a sanitizer, and widening the
-    /// bound is no help — serial *is* two latencies, so any bound loose enough to survive the
-    /// noise admits the thing being ruled out. A count of simultaneous callers is discrete, and
-    /// load makes an overlap more likely rather than less.
+    /// A direct observation of concurrency, where the wall clock is only a proxy for it: timing
+    /// `open` against two latencies cannot work, because serial *is* two latencies, so any bound
+    /// loose enough to survive load also admits the behaviour being ruled out. A count of
+    /// simultaneous callers is discrete, and load makes an overlap more likely rather than less.
     static uint64_t peak_concurrent_lists();
     static void reset_peak_concurrent_lists();
 
@@ -75,7 +73,7 @@ public:
     std::future<Status> put(std::string_view name, Slice bytes) override;
     std::future<Status> remove(std::string_view name) override;
     /// Counts the bulk call, then runs the base implementation — which loops over
-    /// **this** store's `remove`, so `Op::Remove` rules still fire and no existing
+    /// this store's `remove`, so `Op::Remove` rules still fire and no existing
     /// case is weakened by the engine having switched to the bulk path.
     std::future<Status> remove_many(const std::vector<std::string>& names) override;
     std::future<ListResult> list(std::string_view prefix) override;

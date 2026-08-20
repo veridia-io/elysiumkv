@@ -128,11 +128,9 @@ int main() {
           "the current token wins the CAS");
     check((*second)->token != token1, "the token changes on install");
 
-    // **The chunking path, exercised on purpose — and the payload has to be
-    // incompressible for that to happen.** The first attempt here used a cheap
-    // arithmetic pattern which zstd folded 900 KiB down to 105 KB: the test said
-    // "chunked" and quietly wrote a single item. splitmix64 output does not
-    // compress, so 1 MiB stays 1 MiB and genuinely crosses the 400 KB cap.
+    // The chunking path, and the payload has to be incompressible to reach it: anything zstd can
+    // fold below the 400 KB cap lands in a single item while the test still reads as "chunked".
+    // splitmix64 output does not compress, so 1 MiB stays 1 MiB.
     std::string big(1024 * 1024, '\0');
     {
         uint64_t state = 1;
@@ -145,9 +143,8 @@ int main() {
         }
     }
     check(c.put_snapshot(2, Slice::from(big)).get() == Status::Ok, "put_snapshot (1 MiB, chunked)");
-    // Asserted structurally, not inferred from a round trip succeeding — a round
-    // trip passes just as happily with one chunk, which is how the compressible
-    // payload slipped through.
+    // Asserted structurally rather than inferred from the round trip, which passes just as happily
+    // with one chunk.
     check(count_snapshot_chunks(endpoint, o.table, run, 2) > 1,
           "the snapshot really did land in more than one item");
     auto snap = c.get_snapshot(2).get();
@@ -182,15 +179,15 @@ int main() {
         check(c.put_snapshot(2, Slice::from(big)).get() == Status::Ok, "rewrite the snapshot");
     }
 
-    // **The attempt in a snapshot address makes a retry possible; it does not make a snapshot
-    // rewritable.** Write-once still holds against a *finished* one, which is what the contract
+    // The attempt in a snapshot address makes a retry possible; it does not make a snapshot
+    // rewritable. Write-once still holds against a *finished* one, which is what the contract
     // suite pins across all three catalogs. Only residue is retryable — the case below.
     {
         check(c.put_snapshot(2, Slice::from(std::string("other"))).get() == Status::Config,
               "a complete snapshot still refuses a second put — write-once is unchanged");
     }
 
-    // **The bug this layout exists to remove.** A chunked `put_snapshot` writes items one at a
+    // The bug this layout exists to remove. A chunked `put_snapshot` writes items one at a
     // time, so a failure partway leaves some behind — and with a fixed address the retry collided
     // with its own residue, `attribute_not_exists` refused it, and the engine read that refusal as
     // another writer having won the roll. One transient error fenced the store permanently, and
@@ -258,10 +255,9 @@ int main() {
     auto edits = c.list_edits(2).get();
     check(edits.has_value() && edits->size() == 2 && (*edits)[0] == 1 && (*edits)[1] == 2,
           "list_edits is sorted and complete");
-    // **The edit chunking path, structurally.** An edit used to be one raw item, so it had to fit
-    // the 400 KB cap whole — and a compaction edit carries a full record per output file. Same
-    // incompressible payload as the snapshot above, for the same reason: a compressible one would
-    // land in a single item and the round trip would pass anyway.
+    // The edit chunking path, structurally. A compaction edit carries a full record per output
+    // file, so it can exceed the 400 KB cap. Same incompressible payload as the snapshot above, and
+    // for the same reason.
     check(c.put_edit(2, 3, Slice::from(big)).get() == Status::Ok, "put_edit (1 MiB, chunked)");
     check(count_edit_chunks(endpoint, o.table, run, 2, 3) > 1,
           "the edit really did land in more than one item");

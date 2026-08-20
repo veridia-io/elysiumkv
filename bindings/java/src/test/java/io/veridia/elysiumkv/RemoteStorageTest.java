@@ -23,25 +23,18 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 
 /**
- * The remote implementations, driven <b>through the engine</b> against LocalStack.
+ * The remote implementations, driven through the engine against LocalStack.
  *
- * <p><b>This is not where the per-operation contract lives.</b> The plan had the C++
- * contract suites ported to Java; they are instead <em>instantiated</em> for S3 and
- * DynamoDB in {@code tests/contract/remote_store_test.cpp}, unchanged, which is both
- * less code and strictly better — it runs the same cases the local stores run, and it
- * runs them under ASan, UBSan and TSan. Porting them here would have meant adding a
- * dozen ABI functions that exist only for tests: the C ABI exposes the storage seams
- * for construction only, because a binding hands the engine a store and never calls
- * {@code get}/{@code put}/{@code list} itself.
+ * <p>The per-operation contract does not live here. It is instantiated for S3 and DynamoDB in
+ * {@code tests/contract/remote_store_test.cpp}, which runs the same cases the local stores run and
+ * runs them under ASan, UBSan and TSan. Porting it here would need a dozen ABI functions existing
+ * only for tests, since the C ABI exposes the storage seams for construction only.
  *
- * <p>What this file adds is the thing no contract case can: a <em>real database</em>
- * on remote storage. Every combination of store and catalog is opened, written,
- * flushed, compacted, closed and reopened, and every key read back. That exercises
- * ranged reads, write-once puts, listing, deletion and the pointer swap in the order
- * and interleaving the engine actually produces — which is where a store that passes
- * its contract in isolation still breaks. It also covers the two things only a live
- * database reaches: a file migrating across a network boundary, and a second writer
- * being fenced.
+ * <p>What this file adds is a real database on remote storage: every combination of store and
+ * catalog opened, written, flushed, compacted, closed and reopened, with every key read back. That
+ * drives ranged reads, write-once puts, listing, deletion and the pointer swap in the order the
+ * engine produces them, plus the two things only a live database reaches — a file migrating across
+ * a network boundary, and a second writer being fenced.
  *
  * <p>Skips without Docker or without an AWS-enabled native build — see {@link
  * RemoteEnvironment}, which turns those skips into failures under
@@ -213,7 +206,7 @@ class RemoteStorageTest {
     /**
      * Data keys minted by a real KMS, over a local store so the bytes can be looked at.
      *
-     * <p><b>Compression is off at every level here, unlike the shared options.</b> ZSTD hides a
+     * <p>Compression is off at every level here, unlike the shared options. ZSTD hides a
      * canary just as thoroughly as a cipher does, so with it on the disk check below passes against
      * a store that encrypted nothing — which is exactly the failure this test exists to catch.
      */
@@ -233,7 +226,7 @@ class RemoteStorageTest {
             db.compactLevel(0);
             db.close();
 
-            // **The disk check, not just a round trip.** A build that called KMS and then wrote
+            // The disk check, not just a round trip. A build that called KMS and then wrote
             // plaintext would pass the read back, because the read back is what a passthrough does.
             try (Stream<Path> files = Files.walk(dir)) {
                 List<Path> regular =
@@ -361,14 +354,14 @@ class RemoteStorageTest {
     }
 
     /**
-     * <b>The fence, contended for real.</b> A remote catalog is the first place two
+     * The fence, contended for real. A remote catalog is the first place two
      * processes can genuinely race the manifest pointer — a single-writer filesystem
      * validates the token but can never lose to anyone, which is the whole reason
      * ARCHITECTURE.md "Ownership is one compare-and-set" introduced it.
      *
      * <p>Two databases open the same store and catalog. The second one's first
      * install moves the pointer, so the first one's next install finds its
-     * expectation stale. That is <b>not</b> retryable: its own view of the LSM is
+     * expectation stale. That is not retryable: its own view of the LSM is
      * from before the other writer's compaction, so retrying would install a
      * manifest that has forgotten files. {@link FencedException} says reopen.
      */
@@ -382,7 +375,7 @@ class RemoteStorageTest {
             BlobStore storeA = fixture.store(StoreKind.S3, "writer-a");
             BlobStore storeB = fixture.store(StoreKind.S3, "writer-b");
 
-            // **Both writers configure both stores, each with its own hot tier.**
+            // Both writers configure both stores, each with its own hot tier.
             // Two things force this. A writer that does not configure a store its
             // manifest references cannot open at all — a missing store is a
             // configuration error, not something to work around. And two writers

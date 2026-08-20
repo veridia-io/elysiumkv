@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-/// Pins every layout FORMAT.md declares, **against the encoders' actual output** rather than
+/// Pins every layout FORMAT.md declares, against the encoders' actual output rather than
 /// against the constants they were written from. A test that asserts `kFooterLengthV1 == 44` and
 /// nothing else proves only that a constant was not edited; these assert the bytes.
 ///
@@ -308,7 +308,7 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     EXPECT_EQ(at, content.size()) << "no unaccounted bytes in the record";
 }
 
-/// An edit's instruction about the floor has **three** meanings, and they are not interchangeable:
+/// An edit's instruction about the floor has three meanings, and they are not interchangeable:
 /// almost every edit says nothing, a discard installs a floor, and the embedder declaring its
 /// replay finished removes one. Collapsing "say nothing" into "clear" would have every ordinary
 /// flush quietly discharge a loss.
@@ -339,7 +339,7 @@ TEST(WireFormat, TheFloorInstructionsThreeMeaningsRoundTrip) {
     }
 }
 
-/// The snapshot carries the resulting state, where **zero is a valid position** — so neither
+/// The snapshot carries the resulting state, where zero is a valid position — so neither
 /// "certifies nothing" nor "no loss recorded" can be inferred from the value.
 TEST(WireFormat, TheWatermarkFloorsStatesRoundTripInASnapshot) {
     const std::optional<WatermarkFloor> states[] = {
@@ -358,7 +358,7 @@ TEST(WireFormat, TheWatermarkFloorsStatesRoundTripInASnapshot) {
     }
 }
 
-/// **It never rises.** A replay's own files are the youngest in the store and sit on the tier that
+/// It never rises. A replay's own files are the youngest in the store and sit on the tier that
 /// just failed, so crediting them would certify a position the next loss could destroy again. It
 /// only ever comes down, and is removed in one step when the replay is declared complete.
 TEST(WireFormat, TheWatermarkFloorOnlyEverFalls) {

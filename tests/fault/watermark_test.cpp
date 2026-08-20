@@ -7,7 +7,7 @@
  *   positions after M onto the recovered database yields the same logical key-value state as
  *   replaying the entire log.
  *
- * **Every safety assertion here is also satisfied by a rule that always returns nullopt**, and
+ * Every safety assertion here is also satisfied by a rule that always returns nullopt, and
  * that failure is silent — a full replay on every discard looks exactly like the feature working.
  * Too low is wasteful, too high is data loss, so both directions are asserted: the tightness case
  * near the end is what a nullopt-always rule fails, and it is not optional.
@@ -160,27 +160,19 @@ protected:
 // --- the rule itself, in isolation ---------------------------------------------
 
 /* `RecoveryWatermark::resume_after` is a pure function, so the three states and both unsafe
- * alternatives can be pinned directly rather than only through full-store scenarios. That matters
- * more than usual here: this rule has been wrong three times, and two of those versions survived
- * review. A case that states the rule in six lines is easier to check than one that has to be
- * reconstructed from a tiered configuration.
+ * alternatives are pinned directly rather than only through full-store scenarios.
  *
- * **And these are not redundant with the scenario cases below — they are the only cases that
- * discriminate.** Replacing `resume_after` with
- * `coalesce(discarded_lower_bound, surviving_upper_bound)` — the plausible wrong rule, which falls
- * back to the survivors when the discard set yields no bound — fails exactly one test in this file,
- * `ADiscardedFileWithNoLowerBoundCertifiesNothing` here. Every scenario case still passes, including
- * the scenario of the same name.
+ * These unit cases are not redundant with the scenarios below; they are the only ones that
+ * discriminate. Replacing `resume_after` with `coalesce(discarded_lower_bound,
+ * surviving_upper_bound)` — the plausible wrong rule, falling back to the survivors when the
+ * discard set yields no bound — fails exactly one test in this file and no scenario case at all.
  *
- * The reason is structural, and it is why the bug is latent rather than immediately visible: a file
- * with no lower bound was sealed before the first `set_watermark`, so it is older than every file
- * that has one. At most *one* file can be `{no low, has high}` — the one live when the first
- * watermark was established — and files older than it have no high either, so they contribute
+ * That is structural, and it is why such a bug stays latent: a file with no lower bound was sealed
+ * before the first `set_watermark`, so it is older than every file that has one. At most one file
+ * can be `{no low, has high}`, and files older than it have no high either, so they contribute
  * nothing to `surviving_upper_bound`. Being the oldest, that file is also the first to age off a
- * transient tier, so by the time anything else is losable it has usually already migrated to
- * durable storage and is a survivor rather than a casualty. Reaching the discriminating shape
- * through the engine needs the migration that would have rescued it to be suppressed. Which is a
- * good property of the engine and a bad property of a test suite that only drives it end to end.
+ * transient tier, so reaching the discriminating shape through the engine requires suppressing the
+ * migration that would have made it a survivor.
  */
 TEST(RecoveryWatermarkRule, NothingDiscardedReportsTheNewestSurvivingUpperBound) {
     RecoveryWatermark rule;
@@ -211,7 +203,7 @@ TEST(RecoveryWatermarkRule, ADiscardWithEveryLowerBoundPresentReportsTheirMinimu
         << "falling back to the survivors would be safe here but needlessly low";
 }
 
-/* **The case `coalesce(discarded_lower_bound, surviving_upper_bound)` gets wrong.**
+/* The case `coalesce(discarded_lower_bound, surviving_upper_bound)` gets wrong.
  *
  * A transient file created before the first `set_watermark` has no lower bound, so nothing can be
  * proven about what it held. Coalescing would see an absent discard bound, fall through to the
@@ -289,7 +281,7 @@ TEST_F(WatermarkTest, ASetWatermarkSurvivesAFlushAndAReopen) {
 // The control for the case above: without the flush the watermark is not durable. There is no
 // write-ahead log, so this is a resume point and not a durability improvement.
 //
-// **`abandon_unflushed` is what makes this a control again.** Destruction now attempts a flush, so
+// `abandon_unflushed` is what makes this a control again. Destruction now attempts a flush, so
 // simply letting the handle go saves the watermark and the case would assert nothing; the store has
 // to be told to drop what a crash would have dropped.
 TEST_F(WatermarkTest, AWatermarkSetButNeverFlushedIsNotReported) {
@@ -356,7 +348,7 @@ TEST_F(WatermarkTest, TheNonDecreasingCheckSpansAReopen) {
 
 // --- where the bounds come from -----------------------------------------------
 
-// `w_low` is captured when the memtable is **created**, not when it is sealed. A memtable open
+// `w_low` is captured when the memtable is created, not when it is sealed. A memtable open
 // across several `set_watermark` calls keeps its original low — which is the whole reason the
 // interval can certify anything, because the low is what asserts the file holds nothing at or
 // below it.
@@ -395,14 +387,14 @@ TEST_F(WatermarkTest, AMemtableHoldingWritesFromBeforeTheFirstCallHasNoLowerBoun
     EXPECT_EQ(files.front().watermark.high, std::optional<uint64_t>(100));
 }
 
-// The two halves come from **different inputs**, asserted separately: taking both from the same
+// The two halves come from different inputs, asserted separately: taking both from the same
 // input is the natural implementation slip, and the `min` is the half the recovery proof rests on.
 TEST_F(WatermarkTest, ACompactionOutputTakesTheMinLowAndTheMaxHigh) {
     Options options = durable_options();
     auto db = open(options);
     ASSERT_NE(db, nullptr);
 
-    // **The same key range in both**, so the second compaction genuinely merges the two rather
+    // The same key range in both, so the second compaction genuinely merges the two rather
     // than rewriting them side by side. `compact_level` moves one L0 file at a time, so
     // non-overlapping inputs would each keep their own interval and the composition would never
     // be exercised.
@@ -479,7 +471,7 @@ TEST_F(WatermarkTest, AMigrationBetweenTiersCarriesTheIntervalUnchanged) {
 
 // --- the rollback -------------------------------------------------------------
 
-// **The counterexample that killed the withdrawn file-number rule**, kept as a regression case.
+// The counterexample that killed the withdrawn file-number rule, kept as a regression case.
 //
 // The withdrawn rule was "report the largest watermark among surviving files whose file_number is
 // below the smallest discarded file number", and the construction that breaks it is this one: a
@@ -520,7 +512,7 @@ TEST_F(WatermarkTest, ADiscardRollsBackBelowTheLostFilesLowerBound) {
            "reporting a surviving file's watermark (50) would be safe but needlessly low";
 }
 
-/* **Does the rollback survive the restart that follows it?** `resume_after` branches on
+/* Does the rollback survive the restart that follows it? `resume_after` branches on
  * `anything_discarded`, which is derived from the files present at *this* recovery. A later
  * recovery that discards nothing takes `max(high)` over survivors — and the justification for that
  * is "no state was lost", which the earlier discard falsified.
@@ -581,7 +573,7 @@ TEST_F(WatermarkTest, ARollbackIsNotForgottenByTheNextReopen) {
         << ". Writes at 81..100 lived only in the discarded file";
 }
 
-/* **A partial replay earns nothing.** The floor stands until the embedder says its replay is
+/* A partial replay earns nothing. The floor stands until the embedder says its replay is
  * finished, so a crash part-way through comes back to exactly where the loss left it and repeats
  * the work. That costs a replay of ground already covered; crediting the progress instead would
  * mean trusting files that are themselves sitting on the tier that just failed.
@@ -682,7 +674,7 @@ TEST_F(WatermarkTest, DeclaringTheReplayCompleteRemovesTheFloorForGood) {
         << "with the gap declared filled the files speak for themselves again";
 }
 
-/* **The replay is written to the tier that just failed.** After a discard the embedder
+/* The replay is written to the tier that just failed. After a discard the embedder
  * re-materialises the gap, and everything it writes is newly written — so it is the *youngest*
  * data in the store and lands squarely on the transient tier. Lose that tier again before the
  * replay has aged off it, and the replay goes with it.
@@ -757,7 +749,7 @@ TEST_F(WatermarkTest, LosingTheReplayItselfRollsTheFloorBackDown) {
         << "a floor that only ever rose would report 90 here, certifying data lost twice";
 }
 
-/* **Why there is no scenario case for "the loss certifies nothing".** A file with no lower bound
+/* Why there is no scenario case for "the loss certifies nothing". A file with no lower bound
  * can only be the first one ever written — a memtable that predates every `set_watermark` — so it
  * is also the oldest, and the oldest is what migrates off a transient tier first. For it to be
  * *discarded* it must still be on that tier, and then no older file exists to have survived onto
@@ -857,7 +849,7 @@ TEST_F(WatermarkTest, ADiscardedCompactionOutputRollsBackToItsOldestInputsLowerB
         << "min over the lineage — 60 would skip the writes the older input held";
 }
 
-// **Tightness.** Every safety assertion above is also satisfied by a rule that always returns
+// Tightness. Every safety assertion above is also satisfied by a rule that always returns
 // nullopt, and that failure is silent. This is the case that rejects it: nothing was lost, so the
 // newest upper bound is available and reporting less would mean a needless full replay.
 TEST_F(WatermarkTest, WithNothingDiscardedTheNewestUpperBoundIsReported) {
@@ -880,7 +872,7 @@ TEST_F(WatermarkTest, WithNothingDiscardedTheNewestUpperBoundIsReported) {
         << "not the lower bound: nothing was lost, so nothing needs replaying twice";
 }
 
-// The boundary is **exclusive**, and that is where the proof is tight: the write at the reported
+// The boundary is exclusive, and that is where the proof is tight: the write at the reported
 // position is present, and nothing is claimed about the one after it.
 TEST_F(WatermarkTest, TheReportedPositionIsInclusiveOfItsOwnWritesAndExclusiveForReplay) {
     Options options = transient_options();
@@ -918,7 +910,7 @@ TEST_F(WatermarkTest, TheReportedPositionIsInclusiveOfItsOwnWritesAndExclusiveFo
     EXPECT_EQ(reopened->get_copy(Slice::from(key_at(1000))).error(), Status::NotFound);
 }
 
-// **The core guarantee, at the one window where it could be violated.** A flush writes the SST
+// The core guarantee, at the one window where it could be violated. A flush writes the SST
 // first and the manifest edit second, so a crash in between leaves the data on the store with
 // nothing referencing it. The watermark rides *in that edit*, so it must not advance — if it did,
 // the embedder would be told to skip replaying writes the engine never committed.
@@ -954,7 +946,7 @@ TEST_F(WatermarkTest, AKillBetweenTheSstPutAndTheManifestEditDoesNotAdvanceTheWa
     EXPECT_TRUE(reopened->get_copy(Slice::from(key_at(0))).has_value());
 }
 
-// **An over-age L0 file on the transient tier**, which is the case that breaks the naive argument
+// An over-age L0 file on the transient tier, which is the case that breaks the naive argument
 // "a file this old must already be durable". L0 files are never migrated — a fresh file number
 // would reorder positional recency — so one can sit on a losable store well past `max_age` waiting
 // to be compacted off it. The rollback has to be driven by the file's own lower bound, not by any
@@ -970,7 +962,7 @@ TEST_F(WatermarkTest, ADiscardedOverAgeLevelZeroFileRollsBackToItsLowerBound) {
         ASSERT_EQ(db->set_watermark(400), Status::Ok);
         ASSERT_EQ(db->flush(), Status::Ok);
 
-        // Age it well past `max_age` **without** letting the L0 escape run: inline mode performs
+        // Age it well past `max_age` without letting the L0 escape run: inline mode performs
         // background work only when asked, so this is the state a real store is in between the
         // crossing and the compaction that acts on it.
         now_ += 900'000;
@@ -996,7 +988,7 @@ TEST_F(WatermarkTest, ADiscardedOverAgeLevelZeroFileRollsBackToItsLowerBound) {
 
 // --- the live gauge -----------------------------------------------------------
 
-// **Nothing forbids one store backing two tiers of different durabilities**, and `stats()` has to
+// Nothing forbids one store backing two tiers of different durabilities, and `stats()` has to
 // resolve that toward the non-destructive reading: a store a Durable tier names is not discardable,
 // whatever else names it. Otherwise the gauge would report a frontier that survives losing a store
 // the configuration says is never lost — the direction that costs data.
@@ -1020,7 +1012,7 @@ TEST_F(WatermarkTest, AStoreNamedByADurableTierIsNotDiscardableEvenWhenATransien
     auto db = open(options);
     ASSERT_NE(db, nullptr);
 
-    // **The two bounds must differ**, or the branches agree and the case proves nothing: a
+    // The two bounds must differ, or the branches agree and the case proves nothing: a
     // discardable store reports `min(low)` and a durable one `max(high)`. The file below spans
     // 40..70, so the two answers are 40 and 70.
     ASSERT_EQ(db->set_watermark(40), Status::Ok);
@@ -1084,7 +1076,7 @@ TEST_F(WatermarkTest, TheLiveGaugeIsTheTransientLossSurvivableFrontier) {
 // --- format ------------------------------------------------------------------
 
 // A manifest written by format version 1 is refused, and the error names the version rather than
-// claiming the bytes are damaged. **Decided: clean break, no dual-read** — so the failure an
+// claiming the bytes are damaged. Decided: clean break, no dual-read — so the failure an
 // operator sees has to be the honest one.
 TEST_F(WatermarkTest, AManifestFromAnOlderFormatIsUnsupportedRatherThanCorrupt) {
     // A version-1 file entry: everything up to `min_write_time_ms`, and no watermark.

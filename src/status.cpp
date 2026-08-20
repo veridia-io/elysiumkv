@@ -23,7 +23,7 @@ std::string_view status_name(Status s) noexcept {
 
 namespace {
 
-/// **One slot per thread, in one translation unit.** Two definitions would be two slots, and a
+/// One slot per thread, in one translation unit. Two definitions would be two slots, and a
 /// failure recorded through one would be invisible through the other — the same trap the C ABI's
 /// error slot documents. A `std::string` rather than a pointer because the message is built from
 /// pieces and has to outlive them.

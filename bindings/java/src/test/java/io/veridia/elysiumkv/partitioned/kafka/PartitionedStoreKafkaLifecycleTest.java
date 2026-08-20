@@ -171,7 +171,7 @@ class PartitionedStoreKafkaLifecycleTest {
     // --- 1. a crash between the commit and the apply ---------------------------------------
 
     /**
-     * <b>The dangerous window.</b> The log committed and the process died before the store applied
+     * The dangerous window. The log committed and the process died before the store applied
      * it, so the store is behind the log and nothing in the store records that. On restart the
      * replay must close the gap — get this wrong and the store serves state that is missing a
      * committed update, silently and permanently.

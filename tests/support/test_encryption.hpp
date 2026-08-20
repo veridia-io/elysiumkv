@@ -13,7 +13,7 @@ namespace elysiumkv::test {
 
 /// A key manager with no custody: the envelope *is* the key.
 ///
-/// **Adequate because what these suites test is the engine, not a KMS.** A real one would add a
+/// Adequate because what these suites test is the engine, not a KMS. A real one would add a
 /// network and a mock of it, and would tell us nothing more about whether the boundary holds.
 /// `seed` distinguishes two managers, so a test can register providers that genuinely cannot read
 /// each other's files.

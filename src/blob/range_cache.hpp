@@ -15,32 +15,32 @@ namespace elysiumkv {
 /// which object they belong to, and which object to throw out next. Where the bytes
 /// live is the `Payload`'s business — memory for one cache, files for the other.
 ///
-/// **Shared rather than written twice.** The two rules below are subtle in exactly
+/// Shared rather than written twice. The two rules below are subtle in exactly
 /// the way that produces a cache which appears to work: this codebase has already
 /// shipped two copies of a rule that disagreed (object-name validation) and two
 /// spellings of one status (write-once). A cache that silently serves the wrong
 /// bytes is worse than either.
 ///
-/// **Keyed by the range that was asked for, evicted by whole object.** ARCHITECTURE.md "Caches chain" says
+/// Keyed by the range that was asked for, evicted by whole object. ARCHITECTURE.md "Caches chain" says
 /// eviction is "LRU over whole files… per-block residency tracking is not worth the
 /// bookkeeping", and also that "a partially-cached file is legitimate". Both hold
 /// here: entries are the ranges a reader actually requested — an SST reader asks for
 /// the same footer, filter, index and data ranges every time — and a name's entries
 /// are evicted together.
 ///
-/// **A larger cached range satisfies a smaller request.** This is what makes
+/// A larger cached range satisfies a smaller request. This is what makes
 /// `cache_on_write` worth anything: `put` caches the whole object, and every later
 /// read is a block inside it. Without containment the write-through population
 /// would never be read.
 /// What to actually read when a request misses.
 ///
-/// **The cache is the right place to read more than was asked for**, because it is the only layer
+/// The cache is the right place to read more than was asked for, because it is the only layer
 /// that keeps what it reads. A scan over a remote tier otherwise costs one round trip per block —
 /// the block cache makes the *second* pass free, and does nothing for the first. Rounding a miss out
 /// to a chunk turns that into one round trip per chunk, and unlike a readahead inside the iterator
 /// it needs no notion of a scan: a point lookup that later reads a neighbouring key benefits too.
 ///
-/// **Bounded amplification is the whole design.** Fetching the entire object would make a 4 KiB
+/// Bounded amplification is the whole design. Fetching the entire object would make a 4 KiB
 /// lookup against a 64 MiB file pull the file, so the chunk is a fixed size and the read is aligned
 /// to it — one chunk per miss, whatever was asked for. A request larger than the chunk is not
 /// shrunk: it is rounded up to cover what was wanted.
@@ -111,7 +111,7 @@ private:
     /// larger than the whole cache, which is simply not cacheable here.
     bool make_room(size_t wanted, std::string_view keep);
     void touch(const std::string& name, Object& object);
-    /// **By value, not by reference.** `make_room` passes an element of `recency_`,
+    /// By value, not by reference. `make_room` passes an element of `recency_`,
     /// and this erases that element before handing the name to the payload — a
     /// reference would dangle for the rest of the call. ASan caught it; nothing else
     /// did, on any platform.

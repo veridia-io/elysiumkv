@@ -25,39 +25,19 @@ import java.util.function.IntFunction;
 /**
  * A partitioned local store backed by a log the caller already replays.
  *
- * <h2>The invariant everything rests on</h2>
+ * <blockquote>The log is authoritative. The store is derived. The store may only ever lag — and a
+ * lagging partition may not be served.</blockquote>
  *
- * <blockquote><b>The log is authoritative. The store is derived. The store may only ever lag — and a
- * lagging partition may not be served.</b></blockquote>
- *
- * <p>The first clause is enforced structurally: {@link #stage} does not write. It stages, and
- * {@link #applyCommitted} applies the staged set as one batch <em>after</em> the caller's
- * transaction has committed. A write cannot reach the store except through that call, because no
- * other path exists. So a process that dies in between leaves the store <em>behind</em> the log,
- * which is the recoverable direction — the watermark did not advance, and the next restore replays
- * what was missed.
- *
- * <p>Which of the three outcomes the caller is in is the caller's to say, in one call each —
- * {@link #applyCommitted}, {@link #discard}, {@link #discardUnknown}. They are separate rather than
- * one callback because a container that owns the transaction (Spring's
- * {@code KafkaTransactionManager}, say) commits on the application's behalf and offers only an
- * after-commit hook; there is no position in which to wrap its commit. {@link #commit} rebuilds the
- * single-call form on top, for callers that do own their producer.
+ * <p>The first clause is structural: {@link #stage} does not write. It stages, and
+ * {@link #applyCommitted} applies the staged set as one batch after the caller's transaction has
+ * committed, and no other path into the store exists. A process dying in between leaves the store
+ * behind the log, which is the recoverable direction — the watermark did not advance, so the next
+ * restore replays what was missed.
  *
  * <p>The second clause is why {@link #getCommittedBatch} and {@link #stage} reject a
- * {@linkplain #behind() behind} partition. Lag is recoverable exactly because the log holds the
- * truth; serving a lagging partition is how the lag gets laundered into the authority:
- *
- * <pre>
- * state = S0
- * transaction A:  the log commits U1;  the local apply of U1 fails    -&gt; the store is behind
- * transaction B:  getCommittedBatch returns S0, not S0 + U1
- *                 the fold produces a value derived from stale state
- *                 that value is produced into the log and committed
- * </pre>
- *
- * <p>No later restore repairs that, because the wrong value <em>is</em> in the log. The two clauses
- * are not independent: the second is what keeps the first true.
+ * {@linkplain #behind() behind} partition. Serving one would let a value derived from stale state be
+ * produced back into the log and committed, at which point no restore can repair it: the wrong value
+ * is in the log. The second clause is what keeps the first true.
  *
  * <pre>
  *    READY ---- an apply fails, or a commit outcome is unknown ----&gt; BEHIND
@@ -65,24 +45,24 @@ import java.util.function.IntFunction;
  *      +--------------- repair() from the unchanged watermark --------+
  * </pre>
  *
- * <h2>Two checkpoints that never meet</h2>
+ * <p>Which of the three outcomes applies is the caller's to say, in one call each —
+ * {@link #applyCommitted}, {@link #discard}, {@link #discardUnknown} — rather than one callback,
+ * because a container that owns the transaction offers only an after-commit hook and there is no
+ * position in which to wrap its commit. {@link #commit} rebuilds the single-call form for callers
+ * that do own their producer.
  *
- * <p>The <em>input</em> checkpoint is the caller's and travels in its transaction. The <em>state</em>
- * checkpoint is this component's: {@link #stage} keeps the {@link PendingPosition} each changelog
- * send returns, and after a successful commit the maximum per partition becomes that partition's
- * watermark. They diverge immediately — one state record per changed key, not per input record — so
- * none of the three outcome calls takes a position, and the caller never handles the second.
+ * <p>Two checkpoints, and they never meet. The input checkpoint is the caller's and travels in its
+ * transaction; the state checkpoint is this component's, taken from the {@link PendingPosition} each
+ * changelog send returns, with the per-partition maximum becoming that partition's watermark after a
+ * successful commit. There is one state record per changed key rather than per input record, so none
+ * of the outcome calls takes a position and the caller never handles the second.
  *
- * <h2>Threading</h2>
- *
- * <p>{@link #begin}, reads, {@link #stage} and whichever outcome call follows belong to one thread —
- * the one that owns the caller's transaction. A container satisfies this by construction, since it
- * fires its hooks on the thread that ran the batch, but nothing here checks it.
- * {@link #behind()} and {@link #assignment()} are safe to call from another.
+ * <p>Threading: {@link #begin}, reads, {@link #stage} and the outcome call that follows belong to
+ * the one thread that owns the caller's transaction. Nothing here checks it. {@link #behind()} and
+ * {@link #assignment()} are safe to call from another.
  *
  * @param <K> the key type. Not {@code byte[]}: Java arrays use identity equality, so two separately
- *            deserialised arrays holding the same bytes are different map keys — a
- *            {@code Map<byte[], ?>} looks natural and is silently wrong.
+ *            deserialised arrays holding the same bytes are different map keys.
  */
 public final class PartitionedStore<K> implements AutoCloseable {
 
@@ -174,7 +154,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
     /**
      * What each held partition is doing, for an embedder's instruments.
      *
-     * <p><b>{@code materializedThrough} is the one to graph.</b> The design's invariant is that a
+     * <p>{@code materializedThrough} is the one to graph. The design's invariant is that a
      * store may only ever lag the log; against the log's end offset this says by how much, which is
      * the difference between believing that and showing it.
      *
@@ -262,7 +242,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /**
-     * Closes each partition <b>without</b> flushing, because another instance may already hold it.
+     * Closes each partition without flushing, because another instance may already hold it.
      *
      * <p>Not the same as {@link #revoke}: flushing into a store someone else has opened is something
      * the engine's compare-and-set would catch, but catching it is worse than not doing it. Whatever
@@ -304,8 +284,8 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /**
-     * Enqueues the changelog sends and appends to this partition's pending batch. <b>Writes
-     * nothing.</b>
+     * Enqueues the changelog sends and appends to this partition's pending batch. Writes
+     * nothing.
      *
      * <p>Sending on stage looks like it breaks the invariant — the log written before the store, with
      * no commit between — and it does not, because a produce inside an open transaction is itself
@@ -342,24 +322,17 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /**
-     * Marks the start of a transaction — <b>the one call that makes a two-hook container safe.</b>
+     * Marks the start of a transaction — the one call that makes a two-hook container safe.
      *
-     * <p>Anything still staged here belonged to a transaction that never resolved: neither
-     * {@link #applyCommitted} nor {@link #discard} was called for it. The only outcome that produces
-     * that is a commit whose result the caller could not establish — a container fires its
-     * after-commit hook only after a successful commit, and will not roll back a transaction it could
-     * not commit, so both of the usual hooks stay silent. This treats it as exactly what it is and
-     * calls {@link #discardUnknown}.
+     * <p>Anything still staged here belonged to a transaction that never resolved, which happens
+     * only when the caller could not establish the commit outcome: a container fires its
+     * after-commit hook only on success and will not roll back what it could not commit, so both of
+     * the usual hooks stay silent. This calls {@link #discardUnknown} for it, marking those
+     * partitions behind before this transaction reads anything.
      *
-     * <p>That is why it exists. Without it, closing the hazard needs a third hook wired into the
-     * transaction manager's failure path — obscure enough that the natural two-hook wiring looks
-     * complete and is not. With it, the abandoned batch is dropped and its partitions are marked
-     * behind <em>before</em> this transaction reads anything, which is what stops a fold from
-     * deriving a value from state the log may already have moved past.
-     *
-     * <p>Optional, and a no-op when nothing is staged, so a caller that never calls it is no worse
-     * off than before. It must only be called at a real transaction boundary: calling it mid-batch
-     * discards work in progress, which is safe — the log still holds it — but costs a repair.
+     * <p>Optional, and a no-op when nothing is staged. Precondition: a real transaction boundary —
+     * calling it mid-batch discards work in progress, which is safe, since the log still holds it,
+     * but costs a repair.
      */
     public void begin() {
         if (!staged.isEmpty()) {
@@ -368,15 +341,12 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /**
-     * <b>The log committed: make it real.</b> Applies every staged batch and advances each
+     * The log committed: make it real. Applies every staged batch and advances each
      * partition's watermark to the highest position its changelog records reached.
      *
-     * <p>This and the two {@code discard} methods are the contract — one call per outcome the caller
-     * can be in — and they are separate calls precisely so that the caller does not have to own the
-     * commit. A transaction manager that commits on the application's behalf (Spring's
-     * {@code KafkaTransactionManager} being the common one) offers an <em>after-commit</em> hook and
-     * nothing else; there is no callback position in which to wrap its commit. Driving the store from
-     * that hook is the intended shape:
+     * <p>This and the two {@code discard} methods are one call per outcome the caller can be in,
+     * separate so the caller need not own the commit — a transaction manager committing on the
+     * application's behalf offers an after-commit hook and nothing else:
      *
      * <pre>{@code
      * transactionHook.register(store::applyCommitted, store::discard);
@@ -384,18 +354,16 @@ public final class PartitionedStore<K> implements AutoCloseable {
      *
      * <p>Per partition: read the pending positions, apply the batch, then stamp the maximum position
      * as the watermark. The engine carries the watermark in the same memtable as the writes it
-     * covers, so both become durable in one flush — a crash cannot leave a watermark ahead of the
-     * state it claims.
+     * covers, so a crash cannot leave a watermark ahead of the state it claims.
      *
-     * <p>Calling it when the log did <em>not</em> commit is the one unrecoverable misuse: it puts the
-     * store ahead of the log. Nothing here can detect that, which is why {@link #commit} exists for
-     * callers who do own their transaction.
+     * <p>Precondition: the log committed. Calling this otherwise puts the store ahead of the log,
+     * which nothing can detect or repair — {@link #commit} exists for callers who do own their
+     * transaction.
      *
-     * <p><b>It attempts every staged partition and aggregates the failures</b>, which is a
-     * correctness requirement rather than tidiness: the transaction covered all of them, so exiting
-     * on the first failure would leave the untried ones committed in the log, unwritten locally, and
-     * still marked ready — precisely the state the invariant exists to make unreachable.
-     * {@link ApplyFailed#partitions()} therefore means every partition whose committed changelog may
+     * <p>Every staged partition is attempted and the failures aggregated, which is a correctness
+     * requirement: the transaction covered all of them, so exiting on the first failure would leave
+     * the untried ones committed in the log, unwritten locally, and still marked ready.
+     * {@link ApplyFailed#partitions()} is therefore every partition whose committed changelog may
      * not be materialised.
      *
      * @throws ApplyFailed one or more partitions may not hold what was committed for them
@@ -435,9 +403,8 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * Commits through a callback the caller supplies, then applies — for callers that own their
      * transaction rather than delegating it to a container.
      *
-     * <p>Sugar over {@link #applyCommitted}, {@link #discard} and {@link #discardUnknown}, and worth
-     * having because here the ordering <em>is</em> structural: the two calls that could be misordered
-     * are one call. Everything the caller's transaction must do belongs <em>inside</em>
+     * <p>Sugar over {@link #applyCommitted}, {@link #discard} and {@link #discardUnknown} that makes
+     * the ordering structural. Everything the caller's transaction must do belongs <em>inside</em>
      * {@code action} — checkpointing input positions included — so that a failure anywhere in it is
      * classified rather than escaping as an unmapped exception that leaves the transaction open and
      * the batches staged.
@@ -473,10 +440,10 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * Drops whatever is staged. Idempotent, and a no-op after a commit that applied — which is what
      * lets a caller put it in a {@code finally} and stop reasoning about which paths need it.
      *
-     * <p><b>The log definitely did not commit.</b> Nothing was applied and no watermark moved, so
+     * <p>The log definitely did not commit. Nothing was applied and no watermark moved, so
      * every partition stays readable. Use {@link #discardUnknown} when that is not established.
      *
-     * <p>It does <b>not</b> abort. Symmetry argues that it should, and that is wrong: after a commit
+     * <p>It does not abort. Symmetry argues that it should, and that is wrong: after a commit
      * whose outcome is unknown, aborting is not merely unnecessary but illegal, and only the caller
      * can know which case it is in.
      */
@@ -488,7 +455,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /**
-     * <b>The log may or may not have committed.</b> Drops what is staged and marks those partitions
+     * The log may or may not have committed. Drops what is staged and marks those partitions
      * {@linkplain #behind() behind}, because the transaction may have carried records the store does
      * not hold and serving them would fold new input against state that is missing a committed
      * update.

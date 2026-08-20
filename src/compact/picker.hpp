@@ -22,7 +22,7 @@ struct Compaction {
     /// bound the cost of the *next* compaction.
     std::vector<FileMetadata> grandparents;
 
-    /// ARCHITECTURE.md "Compaction" — **bottommost for this compaction's key range**: no level deeper than
+    /// ARCHITECTURE.md "Compaction" — bottommost for this compaction's key range: no level deeper than
     /// `output_level` holds a file overlapping it. Dynamic, evaluated per
     /// compaction, and the sole condition for dropping tombstones.
     bool output_is_bottommost = false;
@@ -54,8 +54,8 @@ struct Compaction {
     uint64_t min_write_time_ms() const;
     /// The newest write across the inputs, which the output still holds. See `FileMetadata`.
     uint64_t max_write_time_ms() const;
-    /// The output's watermark interval: `min` of the inputs' lows, `max` of their highs. **The
-    /// two halves come from different inputs and that is the point** — the output holds all of
+    /// The output's watermark interval: `min` of the inputs' lows, `max` of their highs. The
+    /// two halves come from different inputs and that is the point — the output holds all of
     /// their data, so it inherits the weakest lower bound and the strongest upper one. Taking
     /// both from the same input, which is the natural implementation slip, would break the
     /// recovery proof: the `min` is the half it rests on.
@@ -65,7 +65,7 @@ struct Compaction {
     std::string largest_key() const;
 };
 
-/// ARCHITECTURE.md "Compaction" — **score is the only trigger.** Per level, the maximum of whichever
+/// ARCHITECTURE.md "Compaction" — score is the only trigger. Per level, the maximum of whichever
 /// ratios are configured — `file_count / max_files`, `total_bytes / max_bytes`, and the tombstone
 /// density of the level's densest file against `tombstone_density_trigger`; highest above 1.0 wins.
 /// Density is a score rather than a trigger of its own precisely so this sentence stays true. The last level never triggers — it absorbs everything

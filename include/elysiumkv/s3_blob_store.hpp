@@ -12,7 +12,7 @@ namespace elysiumkv {
 /// ARCHITECTURE.md "The ABI boundary" — a `BlobStore` over an S3 bucket.
 ///
 /// The blob store moves opaque bytes and nothing else. In particular it applies
-/// **no compression**: blocks arrive already compressed (ARCHITECTURE.md "Inside an SST"), and
+/// no compression: blocks arrive already compressed (ARCHITECTURE.md "Inside an SST"), and
 /// whole-object compression would make `get(name, offset, len)` meaningless —
 /// every block read would have to fetch and inflate the entire file.
 struct S3Options {
@@ -32,7 +32,7 @@ struct S3Options {
     std::string access_key;
     std::string secret_key;
 
-    /// ARCHITECTURE.md "The ABI boundary" — **two profiles, because one cannot serve both.** A timeout
+    /// ARCHITECTURE.md "The ABI boundary" — two profiles, because one cannot serve both. A timeout
     /// generous enough for a 16 MB compaction read makes a point lookup's tail
     /// latency terrible; one tight enough for a point lookup invents failures on
     /// bulk reads. `bulk_view()` is the seam that lets the engine pick.
@@ -43,11 +43,8 @@ struct S3Options {
     /// granularity is worth having on a large object — a failed part is one part
     /// re-sent rather than the whole object — and below it a single PUT is cheaper.
     ///
-    /// **Write-once still holds**: the completion carries `If-None-Match: *`, so a
-    /// multipart put at a taken name is refused exactly as a single PUT is, and reports
-    /// the same `Unusable`. That was verified against the endpoint before this path was
-    /// written, because a multipart upload that silently overwrote would break the
-    /// central guarantee in the one case nobody tests by hand.
+    /// Write-once still holds: the completion carries `If-None-Match: *`, so a multipart put at a
+    /// taken name is refused exactly as a single PUT is and reports the same `Unusable`.
     ///
     /// A failed upload is aborted rather than abandoned. S3 charges storage for the parts
     /// of an incomplete upload until it is aborted or a lifecycle rule expires it, so

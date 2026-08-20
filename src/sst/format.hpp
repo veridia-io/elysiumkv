@@ -21,7 +21,7 @@ enum class ValueType : uint8_t {
 
 /// ARCHITECTURE.md "A range delete is a record, not a rewrite" — a half-open range delete, `[lower, upper)`.
 ///
-/// **Bounds keep their meaning rather than their role**, as everywhere else here: `lower` is
+/// Bounds keep their meaning rather than their role, as everywhere else here: `lower` is
 /// included and `upper` is not, which is the same convention an iterator's bounds use and the same
 /// set in either direction of travel.
 struct RangeTombstone {
@@ -36,7 +36,7 @@ struct RangeTombstone {
 /// ARCHITECTURE.md "A range delete is a record, not a rewrite" — the union of a set of range
 /// tombstones: sorted by lower bound, disjoint, empties dropped.
 ///
-/// **Union is the whole of what fragmentation means here**, and that follows from having no
+/// Union is the whole of what fragmentation means here, and that follows from having no
 /// sequence numbers. Every range tombstone in one file shadows exactly the same thing — everything
 /// strictly older in `(level, file_number)` order — so two overlapping ranges in one file are
 /// indistinguishable from the single range covering both. An engine that stamps each tombstone with
@@ -62,7 +62,7 @@ inline std::vector<RangeTombstone> merge_ranges(std::vector<RangeTombstone> rang
 
 /// The part of each range lying inside `[lower, upper)`. A null bound is unbounded on that side.
 ///
-/// **Compaction outputs must not overlap in what they cover, tombstones included.** Two files at one
+/// Compaction outputs must not overlap in what they cover, tombstones included. Two files at one
 /// level are ordered by key, not by recency — deeper levels rely on never overlapping, and there is
 /// no tie-break to fall back on. Handing every output the whole tombstone set, or handing it all to
 /// one of them, makes an earlier-keyed sibling shadow a later-keyed one and deletes live data.

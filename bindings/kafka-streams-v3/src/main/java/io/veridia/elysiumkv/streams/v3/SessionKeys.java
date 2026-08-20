@@ -14,11 +14,10 @@ import org.apache.kafka.common.utils.Bytes;
  * changelog is written by Streams and replayed back into this store, and it is pinned byte-for-byte
  * against {@code SessionKeySchema} in the tests.
  *
- * <p><b>End before start, and the segment taken from the end.</b> That is Kafka's choice and it is
- * load-bearing rather than arbitrary: a session grows by having its end pushed out, and queries ask
- * "which sessions were still open after T", so ordering by end is what makes that a range rather
- * than a scan. Segmenting on the end has the same consequence retention wants — a session leaves the
- * store when the last thing that happened in it falls out of the window, not when it began.
+ * <p>End before start, and the segment taken from the end: a session grows by having its end
+ * pushed out, and queries ask which sessions were still open after T, so ordering by end makes that
+ * a range rather than a scan. Retention then drops a session when the last thing that happened in
+ * it falls out of the window, not when it began.
  */
 final class SessionKeys {
     static final int TIMESTAMP_BYTES = 8;

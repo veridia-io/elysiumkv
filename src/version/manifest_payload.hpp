@@ -11,16 +11,15 @@
 
 namespace elysiumkv {
 
-/// The framing every manifest payload gets on its way to the catalog: **compress, then encrypt,
-/// then hand to the catalog to chunk.**
+/// The framing every manifest payload gets on its way to the catalog: compress, then encrypt,
+/// then hand to the catalog to chunk.
 ///
 /// That order is not a preference. Ciphertext does not compress, so encrypting first would inflate
 /// every manifest write — and chunking is a transport concern belonging to whichever catalog has a
-/// size cap, which is why it is outermost and not here. The cost of compressing first is that
-/// length leaks a little about content; for a list of file metadata that is accepted, and it is
-/// written down here so it is not rediscovered as a surprise.
+/// size cap, which is why it is outermost and not here. Compressing first leaks a little about
+/// content through length, which is accepted for a list of file metadata.
 ///
-/// **This lives in the engine, not in a catalog.** `ManifestCatalog` promises that bytes are
+/// This lives in the engine, not in a catalog. `ManifestCatalog` promises that bytes are
 /// opaque; a catalog that encrypted would be a catalog that had to be trusted, and every embedder's
 /// own would have to implement this correctly too. Unlike an SST there is no ranged read to
 /// preserve, so the whole payload is sealed and opened as one.
@@ -51,7 +50,7 @@ struct ManifestPayload {
 
     /// The inverse, routed by the recorded provider id.
     ///
-    /// **The three failures are deliberately different statuses**, because replay treats them
+    /// The three failures are deliberately different statuses, because replay treats them
     /// differently: `Config` for a provider this process has not registered, which is an operator's
     /// to fix; `Corrupt` for framing that is not ours, a truncated payload, or authentication that
     /// does not hold.

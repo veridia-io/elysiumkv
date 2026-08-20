@@ -4,7 +4,7 @@
  * The counterpart to `truncate_below`, which can only drop the lowest-sorting band and is permanent.
  * A tenant sitting in the middle of a keyspace is what needs this.
  *
- * These cases cover the **write** path: what a `delete_range` does to the memtable, and what the
+ * These cases cover the write path: what a `delete_range` does to the memtable, and what the
  * file a flush produces records. What a *read* does with a flushed tombstone is a separate matter
  * and lives with the read path.
  */
@@ -100,7 +100,7 @@ TEST_F(DeleteRange, TheFlushedFileRecordsTheRangeItCovers) {
     EXPECT_FALSE(all[0].range_may_cover(Slice::from(key_at(15))));
 }
 
-/* **A memtable holding nothing but a range delete still produces a file.** The tombstone is the
+/* A memtable holding nothing but a range delete still produces a file. The tombstone is the
  * content: dropping it because there are no entries would silently discard the deletion, and the
  * keys it covers would come back from the older files it was meant to shadow.
  */
@@ -137,7 +137,7 @@ TEST_F(DeleteRange, AnEmptyOrInvertedRangeIsANoOp) {
     EXPECT_EQ(files()[0].num_range_tombstones, 0u) << "nothing was recorded, so the file stays v1";
 }
 
-/* A range reaching below the truncation floor is **clamped, not refused** — unlike a `put`, which is
+/* A range reaching below the truncation floor is clamped, not refused — unlike a `put`, which is
  * refused there. A write below the floor is refused because the engine cannot tell it from one made
  * before the truncation; a delete below the floor asks for something already true.
  */
@@ -207,7 +207,7 @@ TEST_F(DeleteRange, AScanSkipsWhatTheRangeDeleted) {
     EXPECT_EQ(backward, forward) << "a range delete is not a matter of which way you scan";
 }
 
-/* **A write after the range delete survives it, across a flush boundary too.** The newer file's
+/* A write after the range delete survives it, across a flush boundary too. The newer file's
  * entry wins by position, and the older file's tombstone shadows only what is older than *it*.
  */
 TEST_F(DeleteRange, AKeyRewrittenAfterTheDeleteComesBack) {
@@ -225,7 +225,7 @@ TEST_F(DeleteRange, AKeyRewrittenAfterTheDeleteComesBack) {
     EXPECT_EQ(db_->get(Slice::from(key_at(8))).error(), Status::NotFound) << "its neighbours stay gone";
 }
 
-/* A file can delete a range it holds no keys in, and then its **data span says nothing useful**.
+/* A file can delete a range it holds no keys in, and then its data span says nothing useful.
  * Pruning a lookup or a scan on that span alone would walk straight past the file that answers it,
  * and the keys would come back.
  */
@@ -281,7 +281,7 @@ TEST_F(DeleteRange, AnUnflushedRangeAlreadyShadowsTheFilesBelow) {
     EXPECT_EQ(seen.size(), 10u);
 }
 
-/* **A file's own entries survive its own range tombstone**, and that rule is what lets the format
+/* A file's own entries survive its own range tombstone, and that rule is what lets the format
  * carry no ordering at all. A memtable that saw a write, then a delete covering it, then the write
  * again flushes into a single file holding both the tombstone and the live entry — and the file
  * cannot say which came first. It does not need to: the memtable resolved that when the range was
@@ -308,7 +308,7 @@ TEST_F(DeleteRange, AFilesOwnEntriesSurviveItsOwnRangeTombstone) {
 
 // --- compaction ----------------------------------------------------------------
 
-/* **Compaction must not resurrect what a range deleted**, and there are two ways it could.
+/* Compaction must not resurrect what a range deleted, and there are two ways it could.
  *
  * It could copy the covered entries forward into the same file as the tombstone that covers them —
  * and a tombstone shadows nothing in its own file, so they would come back. And it could carry the
@@ -332,7 +332,7 @@ TEST_F(DeleteRange, CompactionDoesNotResurrectTheDeletedKeys) {
     EXPECT_EQ(seen.size(), 10u);
 }
 
-/* A compaction that does **not** reach the bottommost level must keep the tombstone, because the
+/* A compaction that does not reach the bottommost level must keep the tombstone, because the
  * files it was shadowing were not part of it and are still down there.
  */
 TEST_F(DeleteRange, ATombstoneIsCarriedDownWhileOlderFilesRemainBelow) {
@@ -355,7 +355,7 @@ TEST_F(DeleteRange, ATombstoneIsCarriedDownWhileOlderFilesRemainBelow) {
     }
 }
 
-/* **The tombstone has to survive a compaction that does not reach the files it shadows.**
+/* The tombstone has to survive a compaction that does not reach the files it shadows.
  *
  * The case above ends bottommost — the data is part of the same compaction, so once its entries are
  * dropped the tombstone has nothing left to shadow and is rightly let go. Here the data sits two
@@ -419,8 +419,8 @@ TEST_F(DeleteRange, RewritesAfterTheDeleteSurviveCompaction) {
     EXPECT_EQ(std::string(found->begin(), found->end()), "again");
 }
 
-/* Evicting a tenant that occupies whole files removes those files. **Which mechanism removes them
- * is deliberately not asserted here** — a compaction may reach them first, and on this fixture it
+/* Evicting a tenant that occupies whole files removes those files. Which mechanism removes them
+ * is deliberately not asserted here — a compaction may reach them first, and on this fixture it
  * usually does. That the whole-file drop can do it *without reading anything* is the property worth
  * having, and it is asserted where it can be seen: `Version::files_entirely_range_deleted`.
  */
@@ -468,7 +468,7 @@ TEST_F(DeleteRange, APartlyCoveredFileIsNotDropped) {
     }
 }
 
-/* **A file that deletes without holding anything must survive a truncation above it.**
+/* A file that deletes without holding anything must survive a truncation above it.
  *
  * Found by the differential suite, and invisible from the data span alone: a memtable holding only
  * a range delete flushes to a file with no entries, so its largest key is the empty string — which
@@ -497,7 +497,7 @@ TEST_F(DeleteRange, ARangeDeleteIsNotMistakenForATruncatedFile) {
 
 // --- inside a batch ------------------------------------------------------------
 
-/* **Order within the batch decides what survives**, and that is the whole reason to want this: a
+/* Order within the batch decides what survives, and that is the whole reason to want this: a
  * put after the range lands on top of it, a put before it is covered. Two separate calls cannot
  * express that without the range being visibly empty in between.
  */
@@ -536,7 +536,7 @@ TEST_F(DeleteRange, ABatchedRangeShadowsOlderFiles) {
     }
 }
 
-/* **One batch, two rules about the floor.** A `put` below the truncation point is refused and takes
+/* One batch, two rules about the floor. A `put` below the truncation point is refused and takes
  * the whole batch with it; a `delete_range` reaching below it is clamped and applies. The batch
  * validates per operation rather than per batch, which is the only way it can hold both.
  */
@@ -603,7 +603,7 @@ TEST_F(DeleteRange, ABatchedRangeAndItsWritesLandTogether) {
         << "evict and re-seed is one step";
 }
 
-/* **A file carrying range tombstones is rewritten rather than trivially moved.** A move does not
+/* A file carrying range tombstones is rewritten rather than trivially moved. A move does not
  * rewrite, so moving one to the level that reclaims tombstones would carry them past the only point
  * that drops them, and nothing afterwards forces the rewrite. The rule already existed for point
  * tombstones; a file can carry range tombstones and no point tombstones at all — a flush whose
@@ -633,7 +633,7 @@ TEST_F(DeleteRange, ARangeTombstoneFileIsRewrittenRatherThanMovedToTheBottom) {
     }
 }
 
-/* **A file covered by one of several disjoint ranges is dropped whole too**, which needs the
+/* A file covered by one of several disjoint ranges is dropped whole too, which needs the
  * tombstones themselves rather than what the manifest records about them.
  *
  * The manifest keeps the *hull* of a file's ranges — the range itself when there is one, a bounding
@@ -702,8 +702,8 @@ TEST_F(DeleteRange, AFileInTheGapBetweenTwoRangesIsNotDropped) {
 
 // --- the erasure receipt -------------------------------------------------------
 
-/* **Deletion in an LSM is a promise about the future; this is the manifest saying the future
- * arrived.** The tombstone is recorded now and the bytes go when compaction reaches them, so
+/* Deletion in an LSM is a promise about the future; this is the manifest saying the future
+ * arrived. The tombstone is recorded now and the bytes go when compaction reaches them, so
  * "has it actually gone?" normally has no answer. It has one here, from metadata alone.
  */
 TEST_F(DeleteRange, TheReceiptTurnsTrueOnlyOnceTheFilesAreGone) {
@@ -730,7 +730,7 @@ TEST_F(DeleteRange, TheReceiptTurnsTrueOnlyOnceTheFilesAreGone) {
     EXPECT_FALSE(db_->get(Slice::from(key_at(5))).has_value());
     EXPECT_FALSE(db_->get(Slice::from(key_at(50))).has_value());
 
-    // **Recorded is not erased.** The second file still spans into the band, so its bytes may
+    // Recorded is not erased. The second file still spans into the band, so its bytes may
     // still hold keys there and the receipt withholds itself. That the reads say "absent" is
     // exactly the confusion this predicate exists to refuse.
     auto partial = db_->range_is_erased(lower, upper);
@@ -793,7 +793,7 @@ TEST_F(DeleteRange, AnEmptyBandIsTriviallyErased) {
     EXPECT_TRUE(*inverted);
 }
 
-/* **Several real ranges in one batch, each with its own bounds.** The resolved bounds are held one
+/* Several real ranges in one batch, each with its own bounds. The resolved bounds are held one
  * entry per operation and read back by the same index, so two ranges cannot land on each other's
  * bounds however many no-ops sit between them.
  */

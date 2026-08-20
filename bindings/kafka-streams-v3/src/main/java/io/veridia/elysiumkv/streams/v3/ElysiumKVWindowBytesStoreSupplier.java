@@ -17,16 +17,14 @@ import org.apache.kafka.streams.state.WindowStore;
  *               "counts", config, Duration.ofDays(1), Duration.ofMinutes(5), false)));
  * }</pre>
  *
- * <p>The <b>segment interval</b> is the granularity retention works at: entries are grouped by
+ * <p>The segment interval is the granularity retention works at: entries are grouped by
  * {@code timestamp / segmentInterval} and expiry drops whole groups, so a smaller interval reclaims
- * sooner and makes a fetch span more groups. It defaults to Streams' own rule — half the retention
- * period, floored at a minute — because that is what its stores use and there is no reason to
- * surprise anyone with a different one.
+ * sooner and makes a fetch span more groups. It defaults to Streams' own rule, half the retention
+ * period floored at a minute.
  *
- * <p><b>{@code retainDuplicates} is not a tuning knob.</b> A stream-stream join stores several
- * records under one key and timestamp and needs every one of them; an aggregation stores one value
- * per window and would see duplicates as corruption. Streams sets it for you when you use the DSL —
- * pass what the operator needs, not what looks harmless.
+ * <p>{@code retainDuplicates} is not a tuning knob: a stream-stream join stores several records
+ * under one key and timestamp and needs every one of them, while an aggregation stores one value
+ * per window and would read duplicates as corruption. Pass what the operator needs.
  */
 public final class ElysiumKVWindowBytesStoreSupplier implements WindowBytesStoreSupplier {
     private final String name;

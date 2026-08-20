@@ -24,7 +24,7 @@ namespace {
 /// is about: green then means either *no defect* or *the check did not run*,
 /// and nothing distinguishes them.
 ///
-/// One injection per constituent, each asserting **its own** invariant is the
+/// One injection per constituent, each asserting its own invariant is the
 /// one reported. A single injection would only prove that one check still
 /// fires; the realistic decay is one of five quietly ceasing to while the
 /// others keep the bundle looking thorough.

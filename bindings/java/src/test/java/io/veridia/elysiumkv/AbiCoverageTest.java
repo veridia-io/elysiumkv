@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * ARCHITECTURE.md "Dependencies and artifacts" step 10's first green criterion: <b>a test exercises every ABI function.</b>
+ * ARCHITECTURE.md "Dependencies and artifacts" step 10's first green criterion: a test exercises every ABI function.
  *
  * <p>The reason this needs to be mechanical rather than a habit: a JNI method is
  * bound by a signature string in {@code elysiumkv_jni.cpp}, and a wrong one fails
@@ -62,7 +62,7 @@ class AbiCoverageTest {
     }
 
     /**
-     * The remote constructors, in <b>both</b> build configurations — the reason
+     * The remote constructors, in both build configurations — the reason
      * they are always bound rather than conditionally present.
      *
      * <p>Constructing an S3 or DynamoDB client reaches no network (a client is
@@ -178,7 +178,7 @@ class AbiCoverageTest {
             // is what every other test here already crosses. LoggerTest covers a real one.
             exercise("optionsSetLogger");
 
-            // **Called for real, not marked.** A wrong JNI signature on these compiles and links,
+            // Called for real, not marked. A wrong JNI signature on these compiles and links,
             // and fails only when an application first encrypts something; registering a provider
             // here is what turns that into a test failure.
             ElysiumKVOptions encrypted = support.options();

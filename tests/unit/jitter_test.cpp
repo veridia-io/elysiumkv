@@ -64,7 +64,7 @@ TEST(JitterTest, ANaNFractionIsNoWindow) {
     EXPECT_EQ(jitter_window_ms(kMaxAge, std::nan("")), 0u);
 }
 
-/// **The property the whole design rests on.** `placement()` and `next_time_transition()` each
+/// The property the whole design rests on. `placement()` and `next_time_transition()` each
 /// derive the offset independently; if it were rolled they would disagree, and a reopen would
 /// re-cluster the files it had just spread.
 TEST(JitterTest, TheSameFileAlwaysGetsTheSameOffset) {
@@ -90,7 +90,7 @@ TEST(JitterTest, ConsecutiveFileNumbersSpreadAcrossTheWindow) {
         << "200 consecutive numbers left a tenth of the window empty";
 }
 
-/// **Why the write time is a seed and not just the number.** A partitioned embedder gives every
+/// Why the write time is a seed and not just the number. A partitioned embedder gives every
 /// partition its own file-number counter, so partition 0's file 7 and partition 9's file 7 are
 /// both file 7 — and would migrate together, which is the case this was built for.
 TEST(JitterTest, StoresThatShareAFileNumberDoNotShareAnOffset) {
@@ -120,7 +120,7 @@ TEST(JitterTest, WithoutJitterAFileCrossesExactlyAtMaxAge) {
     }
 }
 
-/// **Earlier only.** A transient tier's `max_age` is an exposure bound the engine promises, so
+/// Earlier only. A transient tier's `max_age` is an exposure bound the engine promises, so
 /// spreading a migration *past* it would weaken a guarantee to smooth a graph.
 TEST(JitterTest, JitterOnlyEverMovesTheCrossingEarlier) {
     TestStore store(2);

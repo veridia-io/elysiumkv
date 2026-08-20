@@ -110,7 +110,7 @@ TEST_F(Truncate, ThePointOnlyMovesForward) {
     EXPECT_EQ(keys_of(*it).size(), 10u);
 }
 
-/// <b>The floor is permanent, and a write below it is refused rather than hidden.</b> The engine
+/// The floor is permanent, and a write below it is refused rather than hidden. The engine
 /// cannot tell a key written before the truncation from one written after — positional recency is
 /// the only ordering it has — so accepting the write would mean a `put` that returned `Ok` and then
 /// could not be read back.
@@ -126,16 +126,15 @@ TEST_F(Truncate, AWriteBelowTheFloorIsRefused) {
     EXPECT_EQ(db_->put(Slice::from(key_at(10)), Slice::from(std::string("fresh"))), Status::Ok);
 }
 
-/// **`truncate_below` races `put`, and two application threads through one handle are supported.**
-/// The floor used to be read on the way into `put`, before `check_entry_size` and before
-/// `throttle_writes` — which *blocks* — so the window between deciding a write was legal and
-/// applying it was not small at all. A write could pass the check, wait out a stall, and land
-/// under a floor published long before it, returning `Ok` for a key that could never be read back.
+/// `truncate_below` races `put`, and two application threads through one handle are supported.
+/// The floor must be read where the write is applied, not on the way into `put`: `throttle_writes`
+/// blocks, so a write checked earlier could wait out a stall and land under a floor published long
+/// before it, returning `Ok` for a key that can never be read back.
 ///
-/// The distinguishing case only exists inside the lock, so what this pins from outside is the
+/// The distinguishing case exists only inside the lock, so what this pins from outside is the
 /// property that survives it: every outcome is `Ok` or `Config`, nothing below the final floor is
-/// readable, and the invariants hold. Its real value is under TSan, which is where the publication
-/// and its rollback are actually examined.
+/// readable, and the invariants hold. Its real value is under TSan, where the publication and its
+/// rollback are examined.
 TEST_F(Truncate, ConcurrentWritesAndTruncationsStayConsistent) {
     for (int i = 0; i < 400; ++i) put(key_at(i), "seed");
 
@@ -143,7 +142,7 @@ TEST_F(Truncate, ConcurrentWritesAndTruncationsStayConsistent) {
     std::atomic<int> refused{0};
     std::atomic<int> accepted{0};
 
-    // **Runs until told to stop, rather than for a fixed number of rounds.** A fixed count is a
+    // Runs until told to stop, rather than for a fixed number of rounds. A fixed count is a
     // race against the truncations: a memtable put is far cheaper than a manifest write, so under
     // a sanitizer the writer finished every round before the floor had risen at all, and the test
     // then failed its own "the floor never overtook the writer" check. The engine was fine; the

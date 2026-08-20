@@ -81,7 +81,7 @@ TEST(Encryption, TheGcmProviderRoundTripsEveryChunk) {
     }
 }
 
-// **The property the suite exists for.** Every other test here would pass against a cipher that
+// The property the suite exists for. Every other test here would pass against a cipher that
 // encrypted and never authenticated.
 TEST(Encryption, EveryDamagedByteIsRefused) {
     auto keys = std::make_shared<DirectKeyManager>();

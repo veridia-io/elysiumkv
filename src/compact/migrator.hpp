@@ -31,7 +31,7 @@ struct Migration {
 ///   3. age-driven migration between durable tiers — lowest priority, and
 ///      starvable without harm, since it is an optimisation.
 ///
-/// **Level 0 is excluded.** ARCHITECTURE.md "Positional recency" resolves recency within L0 positionally, by file
+/// Level 0 is excluded. ARCHITECTURE.md "Positional recency" resolves recency within L0 positionally, by file
 /// number — and ARCHITECTURE.md "The manifest is snapshots plus edits" requires a migration to allocate a *fresh* number, which
 /// would be higher than every file that stayed. An L0 file that migrated would
 /// therefore read as the newest file at its level whatever it actually holds,

@@ -1,22 +1,15 @@
 /* elysiumkv.h — the C ABI (ARCHITECTURE.md "The ABI boundary").
  *
- * The contract with every binding, not just Java: designed as if four languages
- * will bind it, because the point of a native core is that they can.
+ * C99-compatible. Opaque handles only: no struct layout crosses this boundary, so adding a field
+ * to an engine type cannot break a compiled binding.
  *
- * C99-compatible. Opaque handles only — no struct layout crosses this boundary,
- * so adding a field to any engine type cannot break a compiled binding.
+ * Invariants at every entry point:
  *
- * Rules that hold at every entry point:
- *
- *   - Status codes, never exceptions. Every function is wrapped in a catch-all;
- *     a C++ exception escaping this boundary would be undefined behaviour.
- *   - ELYSIUMKV_IO is the retryable class, and nothing else is. The ABI must never
- *     invite a binding to reinterpret an I/O failure as absence — the
- *     positive-evidence rule lives on the C++ side and cannot be delegated.
- *   - Borrowed pointers with explicit pins. elysiumkv_get hands back a pointer
- *     into a cached block plus a pin the caller releases. A leaked pin holds a
- *     block-cache entry forever, so pin accounting is a first-class invariant
- *     with a debug-build leak check at close.
+ *   - Status codes, never exceptions. An exception crossing this boundary is undefined behaviour,
+ *     so every function is wrapped in a catch-all.
+ *   - ELYSIUMKV_IO is the only retryable class. Absence and failure-to-look stay distinct.
+ *   - elysiumkv_get borrows a pointer into a cached block and returns a pin the caller must
+ *     release; a leaked pin holds that block-cache entry for the life of the database.
  *   - Iterators are single-threaded and non-copyable.
  */
 
@@ -80,13 +73,11 @@ ELYSIUMKV_API const char* elysiumkv_last_error(void);
 /* Compiled-in library version, so a binding can check what it loaded. */
 ELYSIUMKV_API const char* elysiumkv_version(void);
 
-/* What this build can actually do. The remote implementations are an optional
- * component — aws-sdk-cpp is by far the heaviest dependency here and an embedder
- * with no cold tier should not pay for it — but **the ABI shape must not vary
- * with a build flag**: a binding that resolves symbols at load time would then
- * fail to load rather than fail to find a feature, and its coverage tests could
- * no longer be a plain set comparison. So the remote constructors are always
- * present, and this is how a binding asks whether they will work. */
+/* Which optional components this build contains.
+ *
+ * The exported symbol set does not vary with build configuration: the remote constructors are
+ * always present and report ELYSIUMKV_CONFIG when absent, so a binding resolving symbols at load
+ * time cannot fail to load. This is how it asks whether they will work. */
 #define ELYSIUMKV_FEATURE_AWS 1u
 
 ELYSIUMKV_API uint32_t elysiumkv_features(void);
@@ -100,17 +91,15 @@ ELYSIUMKV_API uint32_t elysiumkv_features(void);
 ELYSIUMKV_API elysiumkv_options* elysiumkv_options_create(void);
 ELYSIUMKV_API void elysiumkv_options_destroy(elysiumkv_options*);
 
-/* Tiers (ARCHITECTURE.md "A tier is not a level"), appended hot to cold. `store` is a handle from one of the
- * blob-store constructors below. A negative or zero bound means "unset".
+/* Tiers (ARCHITECTURE.md "A tier is not a level"), appended hot to cold. `store` is a handle from
+ * one of the blob-store constructors below. A negative or zero bound means "unset".
  *
- * The last tier must not bound age, and must be durable; violations are reported
- * by elysiumkv_open as ELYSIUMKV_CONFIG.
+ * The last tier must not bound age and must be durable; elysiumkv_open reports violations as
+ * ELYSIUMKV_CONFIG.
  *
- * `max_bytes` is the *tier's* capacity, evicted oldest-first. There is no
- * per-file size bound: this function used to take one, and it was removed because
- * size gave a second, independent route to a colder tier and placement has to be
- * monotone in age alone. To keep large files off a fast tier, lower that level's
- * target_file_bytes so large files are not produced. */
+ * `max_bytes` is the tier's capacity, evicted oldest-first. Placement is monotone in age alone, so
+ * there is no per-file size bound; to keep large files off a fast tier, lower that level's
+ * target_file_bytes. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options*, void* store,
                                         elysiumkv_durability durability, int64_t max_age_ms,
                                         int64_t max_bytes, int64_t stall_age_ms);
@@ -118,15 +107,10 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options*, vo
 /* Levels (ARCHITECTURE.md "Compaction"), LSM structure only — no storage decisions. `level` may skip
  * numbers; gaps inherit the nearest shallower entry. A negative bound is
  * "unset". */
-/* Replaces the level map with the classic geometric layout: L0 by file count, each deeper level
- * `multiplier` times the capacity of the one above, and the last carrying none because it absorbs
- * everything.
- *
- * For embedders who want the usual shape without stating `count` capacities by hand. Everything
- * else here is explicit on purpose — there is no base size and no multiplier on a level, because
- * those are a formula for producing this map and stating it directly is clearer. `count` is chosen
- * against expected total size: more levels means lower write amplification, and configured levels
- * sitting empty cost nothing. */
+/* Replaces the level map with the geometric layout: L0 bounded by file count, each deeper level
+ * `multiplier` times the capacity above it, and the last carrying none because it absorbs
+ * everything. Choose `count` against expected total size; configured levels sitting empty cost
+ * nothing. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_geometric_levels(elysiumkv_options*,
                                                                      uint64_t base,
                                                                      int multiplier, int count);
@@ -136,60 +120,39 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, i
                                          int max_files, int slowdown_at, int stop_at,
                                          size_t target_file_bytes);
 
-/* Everything on Options that is neither a tier nor a level, in one call. ARCHITECTURE.md "The ABI boundary"
- * forbids per-field setters on an aggregate: with nine of them a half-built
- * Options is representable, and the binding that forgets one gets a silently
- * different engine rather than a compile error.
+/* Everything on Options that is neither a tier nor a level, in one call. One call rather than
+ * per-field setters so a half-built Options is not representable.
  *
- * A zero numeric field means "leave the engine default". The two flags are
- * tri-state because `false` is a meaningful setting that zero cannot tell apart
- * from "unset": negative keeps the default, zero disables, positive enables.
- * `block_on_stall` defaults to enabled, so passing 0 there is a real change —
- * a write that would stall then returns ELYSIUMKV_STALLED instead of blocking.
- * The stall valve itself is not configurable off.
+ * A zero numeric field leaves the engine default. The three flags are tri-state, because `false`
+ * is a meaningful setting that zero cannot distinguish from unset: negative keeps the default,
+ * zero disables, positive enables. `block_on_stall` defaults to enabled, so passing zero makes a
+ * stalling write return ELYSIUMKV_STALLED rather than block. The stall valve cannot be disabled.
  *
- * `obsolete_retention_ms` defers deleting an object this instance superseded, so a
- * *read-only* instance in another process holding an older version can still read
- * it. The collector cannot see that reader — liveness is tracked per process — so
- * this delay is the only thing protecting it. Zero deletes immediately, which is
- * correct when nothing else has the store open.
+ * `obsolete_retention_ms` defers deleting an object this instance superseded, so that a read-only
+ * instance in another process holding an older version can still read it. Liveness is tracked per
+ * process, so this delay is the only thing protecting that reader. Zero deletes immediately.
  *
- * `orphan_retention_ms` is how long an object must be *continuously observed*
- * unreferenced before the sweep deletes it, and it protects a concurrently-writing
- * process. Zero leaves the engine default of 24 hours; there is no configuration in
- * which deleting an object seen unreferenced once is correct, which is why the way
- * to switch the sweep off is orphan_sweep_interval_ms rather than this. Must be at
- * least obsolete_retention_ms — elysiumkv_open reports ELYSIUMKV_CONFIG otherwise,
- * because a crash empties the pending queue and a superseded object comes back as
- * an orphan protected by this window alone.
+ * `orphan_retention_ms` is how long an object must be *continuously observed* unreferenced before
+ * the sweep deletes it, which is what protects a concurrently-writing process. Zero leaves the
+ * default of 24 hours; switch the sweep off with orphan_sweep_interval_ms instead. Must be at
+ * least obsolete_retention_ms, or elysiumkv_open reports ELYSIUMKV_CONFIG: a crash empties the
+ * pending queue, and a superseded object then returns as an orphan protected by this window alone.
  *
- * `orphan_sweep_interval_ms` is how often to list the stores looking for orphans.
- * Zero disables the sweep, which costs storage and nothing else: correctness never
- * depends on reclamation happening.
+ * `orphan_sweep_interval_ms` is how often to list the stores looking for orphans. Zero disables
+ * the sweep, which costs storage only — correctness never depends on reclamation.
  *
- * `flush_interval_ms` is the second, independent flush trigger: the memtable is flushed once it
- * has been open this long even if it never reaches `memtable_bytes`. Zero leaves it unset, so
- * size alone decides. It bounds how long a write can sit in memory under a trickle of traffic,
- * which no tier age bound can do — those act on files, and an unflushed memtable is not one.
+ * `flush_interval_ms` flushes the memtable once it has been open this long, whatever its size, and
+ * bounds how long a write sits in memory under a trickle of traffic. No tier age bound can do
+ * that: those act on files, and an unflushed memtable is not one. Zero leaves it unset.
  *
- * `maintenance_interval_ms` is how often the maintenance coordinator reconciles: it evaluates
- * every background policy — flush, compaction, migration off a transient tier, capacity eviction,
- * obsolete-object collection — against current state and the clock, and dispatches what is due.
- * It exists because a policy driven by time needs a trigger that is not a write. Zero leaves the
- * default of one second. Not a latency knob: the interval is the smallest term in the exposure
- * window `max_age + interval + queueing behind an in-flight compaction + the migration itself`.
- * An idle tick performs no version scan, which is what makes a short default affordable across
- * many instances in one process.
+ * `maintenance_interval_ms` is how often the coordinator evaluates every background policy against
+ * current state and dispatches what is due. Zero leaves the default of one second. Not a latency
+ * knob: it is the smallest term in the exposure window.
  *
- * `compaction_window_bytes` is how much of a compaction input is read at a time; zero leaves the
- * default. Total requests are `input bytes / this`, which against object storage is what a
- * compaction costs — and it is traded directly against memory, because every input of a compaction
- * holds two of these at once and they are all live together. Charged to `memory_budget`.
- *
- * `allow_reads_before_recovery` is tri-state like the flags beside it: negative leaves it, zero
- * refuses reads until `elysiumkv_mark_recovery_complete`, positive serves them. Off by default,
- * because what survives a discard is *wrong* rather than merely incomplete and a flag an embedder
- * has to know to check makes noticing it opt-in. Writes are never refused either way. */
+ * `allow_reads_before_recovery` serves reads after a transient store is discarded, before the
+ * embedder has replayed the gap. The default refuses them with ELYSIUMKV_RECOVERY_REQUIRED,
+ * because a discarded store is wrong rather than incomplete. Writes are never refused either way.
+ */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, void* manifest_catalog,
                                                      void* memory_budget,
                                                      size_t memtable_bytes, size_t block_bytes,
@@ -209,58 +172,46 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure(elysiumkv_options*, v
 
 /* Compaction tuning that is a workload judgement rather than a capacity one.
  *
- * A separate call rather than two more positions on the fifteen-argument one above: appending to a
- * shipped signature breaks every existing caller, and a new symbol breaks none.
- *
  * `tombstone_density_trigger` compacts a file once that fraction of its entries are tombstones.
- * Zero, the default, leaves it off. It exists because the size ratios cannot express it: a
- * delete-heavy store whose levels stay inside their byte and file budgets never trips a compaction,
- * so the tombstones accumulate and every scan over the deleted region pays to skip them — visible
- * only as scans getting slower.
+ * Zero, the default, leaves it off. The trigger the size ratios cannot express: a delete-heavy
+ * store staying inside its byte and file budgets never compacts, so tombstones accumulate and
+ * every scan over the deleted region pays to skip them.
  *
- * `tombstone_density_min_entries` is the floor a file must reach before its density counts. Zero
- * leaves the default. Without it a file of two entries, one a tombstone, scores 0.5 and fires a
- * compaction that rewrites nothing — then does it again on the output. */
+ * `tombstone_density_min_entries` is the floor a file must reach before its density counts, so a
+ * two-entry file holding one tombstone does not score 0.5 and compact itself repeatedly. Zero
+ * leaves the default. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_compaction(elysiumkv_options*,
                                                      double tombstone_density_trigger,
                                                      uint64_t tombstone_density_min_entries);
 
-/* Spreads the two age triggers so instances that reached the same state at the same moment do not
- * act on it at the same moment. Both are fractions in [0, 1]; zero, the default, keeps the trigger
- * exact. Anything outside that range is ELYSIUMKV_CONFIG.
+/* Spreads the two age triggers, so a store whose files all carry nearly the same write time — a
+ * rebuild from a log — migrates as a trickle rather than one burst. Both are fractions in [0, 1];
+ * zero, the default, keeps the trigger exact. Outside that range is ELYSIUMKV_CONFIG.
  *
- * Stores drift apart on their own, and this is for the times they do not: a rebuild stamps every
- * file it replays within the same few minutes, so the whole store crosses `max_age` together and
- * migrates as one burst instead of a trickle. For an embedder that rebuilds on assignment that
- * repeats after every rebalance.
+ * `age_jitter` applies per file and only ever fires it *earlier*, because a transient tier's
+ * `max_age` is an exposure bound the engine promises. The offset is derived from the file's number
+ * and write time rather than rolled, so a reopen recomputes the same one. A tier's `stall_age` is
+ * left exact: it is an alarm.
  *
- * `age_jitter` applies per file, and only ever fires it **earlier** — a transient tier's `max_age`
- * is an exposure bound the engine promises, so a file may cross early but never late. The offset is
- * derived from the file's number and write time rather than rolled, so a reopen recomputes it
- * instead of re-clustering what it just spread. A tier's `stall_age` is deliberately left exact:
- * it is an alarm, and blurring it only makes the alarm harder to read.
- *
- * `flush_interval_jitter` applies per memtable and fires either way, since a late flush costs
- * replay on restart and breaks no promise. What it smooths is compaction queue depth — instances
- * opened together flush together, and their L0 files reach the compactor as one wave. */
+ * `flush_interval_jitter` applies per memtable and fires either way — a late flush costs replay on
+ * restart and breaks no promise. It smooths compaction queue depth. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_configure_jitter(elysiumkv_options*,
                                                      double age_jitter,
                                                      double flush_interval_jitter);
 
 /* --- diagnostics -----------------------------------------------------------
  *
- * The engine has no logger of its own and nothing here is persisted; `write` is the only way it
- * says anything. `event` is a stable code (elysiumkv_log_event) so a binding can route and count
- * without parsing `message`.
+ * Nothing here is persisted; `write` is the only way the engine says anything. `event` is a stable
+ * code (elysiumkv_log_event) so a binding can route and count without parsing `message`.
  *
- * **Called on engine threads — flush, compaction and maintenance — synchronously, with no engine
- * lock held.** A sink that blocks applies backpressure to the operation that produced the line, so
- * hand it to an async appender rather than doing work in it. It must not call back into the store.
+ * Called on engine threads — flush, compaction, maintenance — synchronously and with no engine
+ * lock held. A blocking sink applies backpressure to the operation that produced the line. The
+ * sink must not call back into the store.
  *
- * `message` is not NUL-terminated and is valid only for the duration of the call; copy to keep it.
+ * `message` is not NUL-terminated and is valid only for the duration of the call.
  *
  * `min_level` follows elysiumkv_log_level: 0 debug, 1 info, 2 warn, 3 error, 4 off. A NULL vtable
- * turns logging off, which is the default and costs one comparison per candidate line. */
+ * disables logging, which is the default. */
 typedef enum {
     ELYSIUMKV_LOG_DEBUG = 0,
     ELYSIUMKV_LOG_INFO = 1,
@@ -309,14 +260,14 @@ ELYSIUMKV_API void elysiumkv_manifest_catalog_destroy(void*);
 
 /* A store supplied by the binding. Every callback receives `context`.
  *
- * `get` writes at most `len` bytes from `offset` into `out` and sets `*out_len`
- * to what it wrote; a read past the end is truncated rather than an error.
- * `list` reports names through `emit`, once per name.
+ * `get` writes at most `len` bytes from `offset` into `out` and sets `*out_len` to what it wrote;
+ * a read past the end is truncated rather than an error. `list` reports names through `emit`, once
+ * per name.
  *
- * The failure rules of ARCHITECTURE.md "Immutable named objects" are the implementation's to honour, and the engine
- * depends on them: ELYSIUMKV_NOT_FOUND means the object is *definitely* absent,
- * ELYSIUMKV_IO means the store could not determine anything. Returning NOT_FOUND
- * where IO is meant is how a store loses data that was never lost. */
+ * The implementation must honour ARCHITECTURE.md "Immutable named objects": ELYSIUMKV_NOT_FOUND
+ * means the object is definitely absent and ELYSIUMKV_IO means the store could not determine
+ * anything. Recovery draws conclusions from absence, so reporting NOT_FOUND for a failure to look
+ * causes data loss. */
 typedef struct {
     void* context;
     const char* (*id)(void* context);
@@ -344,18 +295,15 @@ ELYSIUMKV_API void* elysiumkv_blob_store_from_vtable(const elysiumkv_blob_store_
 
 /* --- encryption at rest -----------------------------------------------------------------
  *
- * Two seams, and most embedders need only the second: the engine owns the cryptography, the
- * embedder owns the key custody. There is always a provider — one that does nothing is registered
- * under the reserved empty id and is primary unless another is named — so an unencrypted store is
- * not a special case, it is the passthrough being primary.
+ * Two seams: the engine owns the cryptography, the embedder owns the key custody. A passthrough
+ * provider is registered under the reserved empty id and is primary unless another is named, so an
+ * unencrypted store is that provider being primary rather than a special case.
  *
- * Every callback returns ELYSIUMKV_OK or an error, and every out-parameter is written only on OK.
- * A buffer too small is ELYSIUMKV_CONFIG with the required length in the *_len out-parameter, so a
- * caller can size and retry.
+ * Every callback returns ELYSIUMKV_OK or an error, and out-parameters are written only on OK. A
+ * buffer too small is ELYSIUMKV_CONFIG with the required length in the *_len out-parameter.
  *
- * **Key material handed to the engine is copied into engine-owned storage and the caller's buffer
- * is zeroed before the call returns.** Ownership of that hygiene is stated here because otherwise
- * it belongs to nobody. */
+ * Key material handed to the engine is copied into engine-owned storage and the caller's buffer is
+ * zeroed before the call returns. */
 
 /* Wrapping and unwrapping. Keys are 32 bytes; anything else is a configuration error. */
 typedef struct {
@@ -373,17 +321,16 @@ typedef struct {
 
 /* A whole construction, for an embedder that must use a specific one.
  *
- * **One vtable rather than a provider and a separate cipher**, so there is one lifetime crossing
- * the boundary rather than two: create and open return an opaque cipher handle that the remaining
- * calls operate on, and destroy_cipher ends it.
+ * One vtable rather than two, so a single lifetime crosses the boundary: create and open return an
+ * opaque cipher handle that the remaining calls operate on, and destroy_cipher ends it.
  *
- * chunk_bytes and overhead_bytes must be constant for a cipher's life — they are read once and
- * cached, and a value that varies corrupts reads in a way the engine cannot detect. object_id must
- * return what create was given, recorded in the metadata: migration renumbers a byte-for-byte copy,
- * so authenticating against a file's current number would strand every migrated file.
+ * chunk_bytes and overhead_bytes must be constant for a cipher's life; they are read once and
+ * cached, and a varying value corrupts reads undetectably. object_id must return what create was
+ * given: migration renumbers a byte-for-byte copy, so a chunk authenticated against the file's
+ * current number would strand every migrated file.
  *
- * seal and open_chunk are called **once per chunk, on background threads**. A binding that upcalls
- * into a managed runtime has to attach those threads. */
+ * seal and open_chunk are called once per chunk on background threads. A binding that upcalls into
+ * a managed runtime must attach them. */
 typedef struct {
     void* context;
     elysiumkv_status (*create)(void* context, uint64_t object_id, void** cipher_out,
@@ -417,15 +364,12 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
 
 /* The same construction, keyed by one master key held in this process rather than by a callback.
  *
- * **A data key is still minted per object and wrapped under the master key**, because the engine's
- * nonces are derived from the chunk index: one key across every object would repeat nonces, which
- * breaks GCM outright. So this is a key-custody choice, not a weaker construction.
+ * A data key is still minted per object and wrapped under the master key: nonces are derived from
+ * the chunk index, so one key across every object would repeat them. This is a key-custody choice,
+ * not a weaker construction.
  *
  * `master_key` must be exactly 32 bytes. It is copied into storage the engine zeroes
- * deterministically; the caller's buffer is untouched and remains theirs to wipe.
- *
- * Suitable where the master key arrives from a secrets manager at startup. Where it must never
- * enter the process at all, use the KMS form below or supply a manager through the vtable. */
+ * deterministically; the caller's buffer is untouched and remains theirs to wipe. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
     elysiumkv_options*, const char* id, const uint8_t* master_key, size_t master_key_len,
     size_t chunk_bytes);
@@ -433,11 +377,11 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_
 /* The same construction over AWS KMS: `GenerateDataKey` per object, `Decrypt` to reopen one, so the
  * key that wraps them never enters this process.
  *
- * Absent unless the library was built with the AWS SDK — ELYSIUMKV_CONFIG naming the build option
- * otherwise, like the remote seams below. NULL for `region`, `endpoint` or the credentials means
- * the same as it does there; zero for `timeout_ms` means the built-in default.
+ * Absent unless built with the AWS SDK, reporting ELYSIUMKV_CONFIG and naming the build option.
+ * NULL for `region`, `endpoint` or the credentials means the same as it does for the remote seams
+ * below; zero for `timeout_ms` means the built-in default.
  *
- * **`key_id` is what a rotation changes.** The wrapped form records which key produced it, so files
+ * `key_id` is what a rotation changes. A wrapped data key records which key produced it, so files
  * written under an earlier one keep opening without it being named here. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_kms(
     elysiumkv_options*, const char* id, const char* key_id, const char* region,
@@ -456,24 +400,21 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_primary_encryption_provider
 /* Rewrite files recorded under any other provider, in the background, until none are left. Off by
  * default.
  *
- * **Changing the primary does not finish a rotation.** Existing files keep the provider they were
- * written under, and a cold one may never be compacted; this is what makes the rotation converge.
+ * Changing the primary does not finish a rotation: existing files keep the provider they were
+ * written under, and a cold one may never be compacted. This is what makes it converge.
  * `files_pending_reencryption` in the stats buffer reaches zero when it has, which is the moment
  * the retired provider may be unregistered — the manifest is re-sealed as part of it. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_encryption_rewrite_to_primary(
     elysiumkv_options*, int enabled);
 
-/* --- the shared memory budget (ARCHITECTURE.md "A process-wide memory budget") -----------------------------------------
+/* --- the shared memory budget (ARCHITECTURE.md "A process-wide memory budget") ------------------
  *
- * **Per process, not per instance**, which is the entire reason it is a separate handle
- * rather than a number on elysiumkv_options. Many embedders run one instance per shard,
- * partition or tenant, so memtable and cache sizing multiplies by instance count; a
- * per-instance constant is the wrong unit. One budget is created and passed to every
- * instance and every in-memory cache in the process.
+ * Per process, not per instance, which is why it is a handle rather than a number on
+ * elysiumkv_options: sizing multiplies by instance count when an embedder runs one per shard. One
+ * budget is passed to every instance and every in-memory cache in the process.
  *
- * When the budget is exceeded the engine sheds, in this order: evict the block cache,
- * flush memtables, then stall writes. **No write ever fails because of it** — refusing a
- * put because another instance is using memory would be a surprising failure mode.
+ * Exceeding it sheds in order: evict the block cache, flush memtables, stall writes. No write ever
+ * fails because of it.
  *
  * Must outlive every options object, database and cache it was given to. */
 ELYSIUMKV_API void* elysiumkv_memory_budget_create(size_t total_bytes);
@@ -481,23 +422,19 @@ ELYSIUMKV_API void elysiumkv_memory_budget_destroy(void*);
 /* Bytes currently charged. May exceed the total — see elysiumkv_stats_snapshot. */
 ELYSIUMKV_API size_t elysiumkv_memory_budget_used(const void*);
 
-/* --- cache layers (ARCHITECTURE.md "Caches chain") -----------------------------------------------------
+/* --- cache layers (ARCHITECTURE.md "Caches chain") ----------------------------------------------
  *
- * Anything faster in front of an authoritative store, as a decorator over the same
- * seam. Because a cache is itself a store, they chain: memory over disk over S3 is
- * two calls. The handle they return is a store handle like any other — pass it to
- * elysiumkv_options_add_tier, destroy it with elysiumkv_blob_store_destroy.
+ * A cache is a store wrapping a store, so they chain: memory over disk over S3 is two calls. The
+ * handle returned is a store handle like any other.
  *
- * `delegate` is a store handle, and **must outlive the cache built over it**: the
- * cache holds a reference to the store, not a copy of the handle.
+ * `delegate` must outlive the cache built over it: the cache holds a reference to the store, not a
+ * copy of the handle.
  *
- * A cache may never be the innermost store of a tier — a cache holds only copies, so
- * making one the only home for a file is the one arrangement discard has nothing to
- * fall back on. elysiumkv_open reports ELYSIUMKV_CONFIG for it.
+ * A cache may never be a tier's innermost store — it holds only copies, so eviction would have
+ * nothing to fall back on. elysiumkv_open reports ELYSIUMKV_CONFIG for that arrangement.
  *
- * These report a status for the same reason the remote constructors do: a bad
- * argument is ELYSIUMKV_CONFIG and a cache directory that cannot be created is
- * ELYSIUMKV_IO, and a NULL return cannot say which. */
+ * These report a status because a bad argument is ELYSIUMKV_CONFIG while an uncreatable cache
+ * directory is ELYSIUMKV_IO, and a NULL return could not distinguish them. */
 
 /* `cache_on_write` populates on put, write-through and never write-back. It pays
  * mostly for L0, whose files are read almost immediately by the next L0-to-L1
@@ -520,16 +457,11 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_memory_cache_blob_store_create(void* de
 /* The same two caches, with a fetch granularity.
  *
  * A miss is rounded out to a chunk of `fetch_granularity` bytes and the whole chunk is cached, so a
- * sequential read costs one request per chunk rather than one per block. Against a remote store
- * that is the difference between one round trip per block and one per chunk, and unlike a readahead
- * inside the iterator it needs no notion of a scan: a point lookup whose neighbour is read later is
- * served from what the first one pulled.
+ * sequential read costs one request per chunk rather than one per block. It needs no notion of a
+ * scan: a point lookup whose neighbour is read later is served from what the first one pulled.
  *
- * Amplification is bounded by the chunk, not by the object: a small read against a large file pulls
- * one chunk, never the file. Zero fetches exactly what was asked, which is what the constructors
- * above do.
- *
- * Separate symbols rather than two more arguments, for the same reason as the compaction call. */
+ * Amplification is bounded by the chunk rather than the object — a small read against a large file
+ * pulls one chunk. Zero fetches exactly what was asked. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_memory_cache_blob_store_create_chunked(void* delegate,
                                                                   void* budget,
                                                                   size_t max_cache_bytes,
@@ -553,26 +485,21 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_disk_cache_blob_store_create_chunked(vo
 ELYSIUMKV_API elysiumkv_status elysiumkv_blob_cache_stats(void* store, uint64_t* hits,
                                                     uint64_t* misses);
 
-/* --- remote seams (ARCHITECTURE.md "The ABI boundary", ARCHITECTURE.md "Ownership is one compare-and-set") --------------------------------------------
+/* --- remote seams (ARCHITECTURE.md "The ABI boundary", ARCHITECTURE.md "Ownership is one
+ * compare-and-set") ------------------------------------------------------------------------------
  *
- * S3 and DynamoDB, which is what makes a cold tier actually cold. Absent unless
- * the library was built with them; ELYSIUMKV_FEATURE_AWS says which, and these
- * return ELYSIUMKV_CONFIG naming the missing build option otherwise.
+ * S3 and DynamoDB. Absent unless built with them; ELYSIUMKV_FEATURE_AWS says which, and these
+ * report ELYSIUMKV_CONFIG naming the missing build option otherwise.
  *
- * **These report a status and hand back the handle, unlike the local
- * constructors that just return a pointer.** They can fail two ways that must
- * not be conflated: a bad bucket or table name is ELYSIUMKV_CONFIG and retrying
- * is pointless, while `create_table_if_missing` against an unreachable DynamoDB
- * is ELYSIUMKV_IO and retrying is the correct response. A NULL return cannot say
- * which, and ELYSIUMKV_IO is the retryable class and nothing else is.
+ * These report a status and hand back the handle, rather than returning a pointer like the local
+ * constructors, because two failures must stay distinct: a bad bucket or table name is
+ * ELYSIUMKV_CONFIG and retrying is pointless, while `create_table_if_missing` against an
+ * unreachable DynamoDB is ELYSIUMKV_IO and retrying is correct.
  *
- * NULL for `endpoint` means the real service; anything else points at
- * LocalStack or a compatible endpoint. NULL credentials mean the SDK's own
- * credential chain — environment, profile, instance role — which is what a
- * deployed process should use. Zero for any timeout means the built-in default.
+ * NULL for `endpoint` means the real service. NULL credentials mean the SDK's own chain —
+ * environment, profile, instance role. Zero for any timeout means the built-in default.
  *
- * Handles are destroyed with elysiumkv_blob_store_destroy /
- * elysiumkv_manifest_catalog_destroy, like every other store and catalog. */
+ * Handles are destroyed with elysiumkv_blob_store_destroy / elysiumkv_manifest_catalog_destroy. */
 
 /* `prefix` separates stores sharing a bucket; `store_id` overrides the derived
  * `s3://bucket/prefix` identity, which the manifest records — pass NULL unless
@@ -616,19 +543,16 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_open_with_result(const elysiumkv_option
                                         const char** discarded_stores, size_t* n_stores,
                                         uint64_t* discarded_files, bool* requires_recovery);
 
-/* Closing with pins or iterators outstanding is a programming error, and the
- * count is returned so a binding's tests can fail on it — a leaked pin holds a
- * block-cache entry forever. Zero means a clean close.
+/* Returns the number of pins and iterators still outstanding, so a binding's tests can fail on a
+ * leak. Zero means a clean close.
  *
- * Closing releases every outstanding pin and detaches every live iterator: a
- * detached iterator yields nothing further, and destroying it afterwards is
- * safe. A pin handle, by contrast, is only meaningful together with its db, so
- * elysiumkv_unpin after close is a use-after-free like any other.
+ * Closing releases every pin and detaches every live iterator: a detached iterator yields nothing
+ * further and is safe to destroy. A pin handle is only meaningful with its db, so elysiumkv_unpin
+ * after close is a use-after-free.
  *
- * Closing also *attempts* a flush, because there is no write-ahead log and a
- * memtable dropped on a clean shutdown is lost for no reason. The attempt is
- * best-effort and its failure is not reported here — elysiumkv_flush is still
- * the only way to know. Use elysiumkv_close_without_flush to skip it. */
+ * Closing also attempts a flush, since there is no write-ahead log. The attempt is best-effort and
+ * its failure is not reported here; elysiumkv_flush is the only way to know. Use
+ * elysiumkv_close_without_flush to skip it. */
 ELYSIUMKV_API uint64_t elysiumkv_close(elysiumkv_db*);
 
 /* Closes without attempting the flush that elysiumkv_close performs, discarding
@@ -665,52 +589,41 @@ ELYSIUMKV_API uint64_t elysiumkv_pins_outstanding(const elysiumkv_db*);
 ELYSIUMKV_API elysiumkv_status elysiumkv_put(elysiumkv_db*, const uint8_t* key, size_t key_len, const uint8_t* value,
                            size_t value_len);
 ELYSIUMKV_API elysiumkv_status elysiumkv_delete(elysiumkv_db*, const uint8_t* key, size_t key_len);
-/* Drops every key below `key` in one manifest edit, rather than one tombstone
- * per key.
+/* Drops every key below `key` in one manifest edit rather than one tombstone per key.
  *
- * Monotone: a call at or below the current point is a no-op returning OK, so
- * this is safe to drive from a loop that does not track what it already asked
- * for. There is no un-truncate.
+ * Monotone: a call at or below the current point is a no-op returning OK, so a caller need not
+ * track what it already asked for. There is no un-truncate.
  *
- * Visibility changes at once; space returns over time. A file whose keys are all
- * below the point is unlinked whole; one straddling it is narrowed by the next
- * compaction. An open iterator is unaffected — it holds the version it started
- * on, exactly as it does across a compaction. */
+ * Visibility changes at once; space returns over time. A file entirely below the point is unlinked
+ * whole, one straddling it is narrowed by the next compaction. An open iterator holds the version
+ * it started on and is unaffected. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_truncate_below(elysiumkv_db*, const uint8_t* key,
                                              size_t key_len);
 
-/* Deletes every key in [lower, upper) — the counterpart to elysiumkv_truncate_below
- * for a range that is not a prefix of the keyspace. A tenant sitting in the
- * middle of a keyspace is the case that needs it.
+/* Deletes every key in [lower, upper) — the counterpart to elysiumkv_truncate_below for a range
+ * that is not a prefix of the keyspace.
  *
- * Bounds keep their meaning rather than their role: lower is included, upper is
- * not, the same convention the iterators use. An empty or inverted range deletes
- * nothing and returns OK, exactly as an iterator over those bounds yields
- * nothing.
+ * Lower is included and upper is not, the convention the iterators use. An empty or inverted range
+ * deletes nothing and returns OK.
  *
- * Unlike a truncation point this is not permanent: the range may be written to
- * again straight away, and a later write wins. Nor is it as cheap — a truncation
- * moves one value in the manifest, while this writes a tombstone that reads in
- * the range consult until compaction resolves it. Space returns as the covered
- * files are rewritten, or at once for a file the range covers whole. */
+ * Not permanent, unlike a truncation point: the range may be written again immediately and a later
+ * write wins. Not as cheap either — this writes a tombstone that reads in the range consult until
+ * compaction resolves it. Space returns as covered files are rewritten, or at once for a file the
+ * range covers whole. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_delete_range(elysiumkv_db*, const uint8_t* lower,
                                            size_t lower_len, const uint8_t* upper,
                                            size_t upper_len);
 
 /* Whether a `delete_range(lower, upper)` has finished travelling through the tree: no file at any
- * level still holds data in the band. Writes 1 or 0 to `erased`.
+ * level still holds data in the band. Writes 1 or 0 to `erased`. Costs no reads — every file's key
+ * range is already in the manifest.
  *
- * Deletion in an LSM is a promise about the future — the tombstone is recorded now and the bytes go
- * when compaction reaches them — so "has it actually gone?" normally has no answer. This one costs
- * no reads: every file's key range is in the manifest already.
+ * Conservative, because a recorded range is a hull and a file can overlap the band while holding no
+ * key in it. 1 means every file that could have held one is gone; 0 carries no information. A band
+ * hidden by a truncation point is not erased: the objects remain until the reclaim collects them.
  *
- * **Conservative.** A recorded range is a hull, so a file can overlap the band while holding no key
- * in it: 0 means "possibly still present" and carries no information, while 1 means every file that
- * could have held one is gone. A band hidden by a truncation point is *not* erased — the objects
- * are there until the reclaim collects them, and unreadable is not the same as gone.
- *
- * Answers about files, so a write made into the band after the deletion is a new write rather than
- * a survival, and sits in the memtable until it is flushed. Available on a read-only handle. */
+ * Answers about files, so a write into the band after the deletion is a new write and sits in the
+ * memtable until flushed. Available on a read-only handle. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_range_is_erased(elysiumkv_db*, const uint8_t* lower,
                                            size_t lower_len, const uint8_t* upper,
                                            size_t upper_len, int* erased);
@@ -743,15 +656,11 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_iter_create(elysiumkv_db*, const uint8_
 ELYSIUMKV_API elysiumkv_status elysiumkv_iter_prefix(elysiumkv_db*, const uint8_t* prefix, size_t prefix_len,
                                    elysiumkv_iter** out);
 
-/* The same two scans, descending: elysiumkv_iter_next still means "advance", and
- * it advances towards smaller keys. The first call yields the largest key in
- * range.
+/* The same two scans, descending: elysiumkv_iter_next still advances, towards smaller keys. The
+ * first call yields the largest key in range.
  *
- * Bounds mean what they mean forward — `lo` inclusive, `hi` exclusive — so both
- * directions describe the same set and only the delivery order differs.
- *
- * Separate entry points rather than a flag on elysiumkv_iter_create, because adding
- * a parameter to a shipped signature is an ABI break and a new symbol is not. */
+ * Bounds keep their forward meaning — `lo` inclusive, `hi` exclusive — so both directions describe
+ * the same set and only the order differs. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_iter_create_reverse(elysiumkv_db*, const uint8_t* lo,
                                                    size_t lo_len, const uint8_t* hi,
                                                    size_t hi_len, elysiumkv_iter** out);
@@ -762,24 +671,18 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_iter_prefix_reverse(elysiumkv_db*, cons
 ELYSIUMKV_API bool elysiumkv_iter_next(elysiumkv_iter*);
 ELYSIUMKV_API void elysiumkv_iter_key(elysiumkv_iter*, const uint8_t** key, size_t* key_len);
 ELYSIUMKV_API void elysiumkv_iter_value(elysiumkv_iter*, const uint8_t** value, size_t* value_len);
-/* Advances up to `cap` bytes' worth of entries in one call, packing them into
- * `buf` as `u32 key_len | key | u32 value_len | value`, little-endian, repeated
- * `*out_count` times over `*out_bytes` bytes.
+/* Advances up to `cap` bytes' worth of entries in one call, packing them into `buf` as
+ * `u32 key_len | key | u32 value_len | value`, little-endian, repeated `*out_count` times over
+ * `*out_bytes` bytes.
  *
- * This exists because of a measurement, not a hunch (ARCHITECTURE.md "The ABI boundary"). Per entry, a scan
- * through next/key/value costs about 272ns from Java against roughly 36ns in
- * C++ — and only ~37ns of that is the advance. The rest is three crossings per
- * entry on the path ARCHITECTURE.md "Absence is an answer, not an error" calls the dominant read pattern. Batching amortises them.
+ * Amortises the boundary crossings a scan otherwise pays three times per entry, which dominate its
+ * cost from a managed runtime (ARCHITECTURE.md "The ABI boundary"). It trades zero-copy for that:
+ * the bytes are copied into the caller's buffer rather than borrowed from the block, which is the
+ * right trade for a scan and the wrong one for a point lookup — elysiumkv_get still pins.
  *
- * It trades zero-copy for crossings, deliberately: the bytes are copied into the
- * caller's buffer rather than borrowed from the block. That is the right trade
- * for a scan and the wrong one for a point lookup, which is why elysiumkv_get
- * still pins.
- *
- * `*out_count == 0` with ELYSIUMKV_OK means the iteration is exhausted — unless
- * `*out_bytes` is non-zero, which means the next entry needs a buffer that
- * large and none was made. Check elysiumkv_iter_status afterwards, as with
- * next(). */
+ * `*out_count == 0` with ELYSIUMKV_OK means the iteration is exhausted, unless `*out_bytes` is
+ * non-zero, which means the next entry needs a buffer that large. Check elysiumkv_iter_status
+ * afterwards, as with next(). */
 ELYSIUMKV_API elysiumkv_status elysiumkv_iter_next_batch(elysiumkv_iter*, uint8_t* buf, size_t cap,
                                                    size_t* out_count, size_t* out_bytes);
 
@@ -789,16 +692,11 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
 
 /* --- statistics -------------------------------------------------------------
  *
- * One call for the whole aggregate, serialized into a caller buffer. ARCHITECTURE.md "The ABI boundary" — a
- * snapshot assembled from per-field accessors is *torn* — each call observes a
- * different instant of a live engine, so the compaction counters will not match
- * the level file counts that are supposed to explain them. Reading it in one
- * call is the only way the cross-field relationships hold, and they do: every
- * file sits in exactly one level and exactly one tier, so summing `bytes` over
- * levels and over tiers must give the same total.
- *
- * Serializing rather than filling a struct keeps every binding's type shapes out
- * of the glue and survives a field being added.
+ * One call for the whole aggregate, serialized into a caller buffer
+ * (ARCHITECTURE.md "Statistics are a buffer, not a struct"). A snapshot assembled from per-field
+ * accessors would be torn, each call observing a different instant. Read in one call the
+ * cross-field relationships hold: every file sits in exactly one level and exactly one tier, so
+ * summing `bytes` over levels and over tiers gives the same total.
  *
  * Layout, little-endian throughout, all offsets from the start of the buffer:
  *
@@ -829,9 +727,8 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *     u64 reencryptions, files_pending_reencryption    offset 248
  *                                                      header_bytes = 264
  *
- * `watermark_present` exists because **zero is a valid watermark** — a store at the
- * start of its log — so the value alone cannot express absence. An exporter omits
- * the series entirely when the flag is zero rather than publishing zero.
+ * `watermark_present` exists because zero is a valid watermark — a store at the start of its log —
+ * so the value alone cannot express absence. An exporter omits the series when the flag is zero.
  *   level record, level_count of them
  *     i32 level, i32 file_count, u64 bytes, u64 oldest_file_age_ms,
  *     i32 files_stale_codec, u8 age_triggered, u8 stalling, u8 reserved[2]
@@ -839,10 +736,9 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *     i32 tier, i32 file_count, u64 bytes, u64 oldest_file_age_ms,
  *     i32 files_pending_migration, u8 stalling, u8 reserved[3]
  *
- * **Decode by the declared sizes, not by sizeof.** A reader that starts records
- * at `header_bytes` and steps by `*_record_bytes`, ignoring trailing bytes it
- * does not recognise, keeps working when a field is appended. One that hardcodes
- * the offsets in this comment does not.
+ * Decode by the declared sizes, not by sizeof: a reader that starts records at `header_bytes`,
+ * steps by `*_record_bytes` and ignores trailing bytes it does not recognise survives a field
+ * being appended.
  *
  * Pass buf = NULL, cap = 0 to ask for the size. When `cap` is too small nothing
  * is written, `*out_bytes` is set to what was needed, and the status is still
@@ -855,39 +751,33 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_mark_recovery_complete(elysiumkv_db*);
 
 /* --- watermark --------------------------------------------------------------
  *
- * Records that every write completed so far is at a position at or before
- * `position` in whatever log the embedder replays — a changelog offset, typically.
- * The engine orders it, carries it with the data and hands it back at the next
- * open; it never invents, interpolates or interprets one.
+ * Records that every write completed so far is at or before `position` in whatever log the embedder
+ * replays. The engine orders it, carries it with the data and hands it back at the next open; it
+ * never interprets one.
  *
- * It is a *position*, not a time, and unrelated to a tier's max_age. Positions
- * must be non-decreasing; a decreasing one returns ELYSIUMKV_CONFIG rather than
- * being clamped, because clamping would hide a replay that went backwards.
+ * A position, not a time, and unrelated to a tier's max_age. Positions must be non-decreasing; a
+ * decreasing one returns ELYSIUMKV_CONFIG rather than being clamped, since clamping would hide a
+ * replay that went backwards.
  *
- * Cheap: one store under the lock the write path already takes. It forces no
- * flush and writes no manifest, so it can be called as often as the embedder
- * commits — the value becomes durable when the memtable holding it is flushed,
- * which is why elysiumkv_flush promotes it immediately. */
+ * One store under the lock the write path already takes: it forces no flush and writes no manifest,
+ * so it may be called as often as the embedder commits. The value becomes durable when the memtable
+ * holding it is flushed, which elysiumkv_flush does immediately. */
 /* --- read-only -------------------------------------------------------------
  *
- * Opens without taking ownership: no manifest write of any kind, no background
- * threads, no reclamation, no compare-and-set. Several may be open at once,
- * alongside a writer, and there is no registration and so no limit on how many.
+ * Opens without taking ownership: no manifest write, no background threads, no reclamation, no
+ * compare-and-set. Any number may be open at once alongside a writer, with no registration.
  *
- * Refuses a store with no manifest (ELYSIUMKV_NOT_FOUND) rather than creating one,
- * and refuses a store whose Transient tier has lost files, because repairing that
- * is a manifest write and serving a version with holes presents stale values as
- * current.
+ * Refuses a store with no manifest (ELYSIUMKV_NOT_FOUND) rather than creating one, and refuses one
+ * whose Transient tier has lost files: repairing that is a manifest write, and serving a version
+ * with holes would present stale values as current.
  *
- * **The C ABI cannot express the C++ split**, where a read-only handle is a
- * different type and passing it somewhere that writes is a compile error. Here
- * there is one handle type and the write entry points — put, remove, write, flush,
- * compact_level, set_watermark — return ELYSIUMKV_CONFIG on a read-only handle.
+ * Unlike the C++ API there is one handle type, so the write entry points — put, remove, write,
+ * flush, compact_level, set_watermark — return ELYSIUMKV_CONFIG on a read-only handle.
  *
- * The writer must set obsolete_retention_ms for any of this to be safe: its
- * collector cannot see a reader in another process, so that delay is the only
- * thing standing between a compaction there and a vanished file here. A reader
- * that falls behind the window is told ELYSIUMKV_STALE, never ELYSIUMKV_CORRUPT. */
+ * The writer must set obsolete_retention_ms for this to be safe: its collector cannot see a reader
+ * in another process, so that delay is the only thing between a compaction there and a vanished
+ * file here. A reader that falls behind the window is told ELYSIUMKV_STALE, never
+ * ELYSIUMKV_CORRUPT. */
 ELYSIUMKV_API elysiumkv_status elysiumkv_open_read_only(const elysiumkv_options*, elysiumkv_db** out);
 
 /* Re-reads the manifest and installs the newest version. Explicit, never
@@ -898,23 +788,17 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_refresh(elysiumkv_db*);
 
 ELYSIUMKV_API elysiumkv_status elysiumkv_set_watermark(elysiumkv_db*, uint64_t position);
 
-/* The last position whose effect on the store is known to have survived, as
- * established at *open*. Replaying only the positions **after** it yields the
- * same logical key-value state as replaying the entire log — exclusive, so `80`
- * means resume at `81`.
+/* The last position whose effect on the store is known to have survived, as established at open.
+ * Replaying only the positions after it yields the same logical state as replaying the whole log —
+ * exclusive, so `80` means resume at `81`.
  *
- * A getter on the database rather than another out-parameter on
- * elysiumkv_open_with_result, which already carries five: the recovered watermark
- * is a property of the opened store, not of the open event.
+ * `*present` is 0 when nothing can be certified — no watermark was ever set, or a lost transient
+ * store held data predating the first one — and the embedder should replay from the beginning.
+ * Distinct from a watermark of zero. `*out` is untouched when `*present` is 0.
  *
- * `*present` is set to 0 when nothing can be certified — no watermark was ever
- * set, or a lost transient store held data predating the first one — and the
- * embedder should replay from the beginning. Distinct from a watermark of zero.
- * `*out` is untouched when `*present` is 0.
- *
- * A restore must use this value, never one that has been through a metrics
- * pipeline: the stats buffer carries the *live* frontier for observation, and
- * many metrics systems round a uint64 through a double. */
+ * A restore must use this value rather than the stats buffer's `durable_watermark`, which is the
+ * live frontier for observation and may have been rounded through a double by a metrics pipeline.
+ */
 ELYSIUMKV_API elysiumkv_status elysiumkv_watermark(elysiumkv_db*, uint64_t* out, bool* present);
 
 #ifdef __cplusplus

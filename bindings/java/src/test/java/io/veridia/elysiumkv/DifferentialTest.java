@@ -26,7 +26,7 @@ import org.junit.jupiter.api.io.TempDir;
  * an independent model finds them.
  *
  * <p>Ordering matters and is easy to get wrong: the engine compares keys as
- * <b>unsigned</b> bytes, so the oracle must too. A signed comparator would agree
+ * unsigned bytes, so the oracle must too. A signed comparator would agree
  * on ASCII and diverge the moment a key goes above 0x7F — which is exactly why
  * the generated keys below include high bytes.
  */

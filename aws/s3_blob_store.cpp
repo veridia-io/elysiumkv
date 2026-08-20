@@ -65,19 +65,10 @@ std::mutex SdkGuard::mutex_;
 int SdkGuard::refs_ = 0;
 Aws::SDKOptions* SdkGuard::options_ = nullptr;
 
-/// **The discard path rests on this function.** `Status::NotFound` is positive
-/// evidence that an object is absent, and a successful `list` omitting a
-/// referenced file is the only loss signal the engine accepts — so anything that
-/// merely means "could not determine" has to be `Io`:
-///
-///   * `403` is not absence. A permissions failure says nothing about whether the
-///     object exists, and reporting it as absence lets a misconfigured role look
-///     exactly like a wiped bucket.
-///   * `NoSuchBucket` is not absence either. Buckets do not spontaneously vanish,
-///     so it always means misconfiguration — and a deleted bucket is anyway
-///     indistinguishable from a mistyped one.
-///
-/// Only a genuine per-object 404 earns `NotFound`.
+/// The discard path rests on this mapping: `Status::NotFound` is positive evidence of absence, so
+/// anything meaning "could not determine" must be `Io`. A `403` says nothing about whether the
+/// object exists, and `NoSuchBucket` always means misconfiguration — a deleted bucket is
+/// indistinguishable from a mistyped one. Only a per-object 404 earns `NotFound`.
 template <typename Error>
 Status classify(const Error& error) {
     if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_KEY ||
@@ -278,7 +269,7 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
     Aws::S3::Model::CreateMultipartUploadRequest create;
     create.SetBucket(impl_->options.bucket);
     create.SetKey(key);
-    // **Counted per request to S3, not per call to this class.** A multipart put is one `put`
+    // Counted per request to S3, not per call to this class. A multipart put is one `put`
     // and several billed round trips — create, a part each, complete — and the figure this exists
     // to produce is the one on the invoice.
     auto created = impl_->bulk_client->CreateMultipartUpload(create);
@@ -286,7 +277,7 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
     if (!created.IsSuccess()) return Status::Io;
     const Aws::String upload_id = created.GetResult().GetUploadId();
 
-    // **Aborted on every failing path below.** S3 charges for the parts of an incomplete
+    // Aborted on every failing path below. S3 charges for the parts of an incomplete
     // upload until something removes them, so an early return that skipped this would be a
     // recurring bill for an operation that already failed.
     const auto abort = [&] {
@@ -370,15 +361,11 @@ std::future<Status> S3BlobStore::put(std::string_view name, Slice bytes) {
     auto outcome = impl_->point_client->PutObject(request);
     note_put(outcome.IsSuccess() ? Status::Ok : Status::Io, bytes.size());
     if (outcome.IsSuccess()) return make_ready_future(Status::Ok);
-    // A rejected conditional means the name is already taken, which under the
-    // no-reuse rule means a zombie writer reusing file numbers. Terminal, not
-    // transient, so it must not look retryable.
+    // A rejected conditional means the name is taken, which under the no-reuse rule means a zombie
+    // writer. Terminal rather than transient, so it must not look retryable.
     //
-    // **`Unusable`, which is what the blob-store contract already requires** — this
-    // returned `Config` while `DiskBlobStore` returned `Unusable` for the
-    // identical condition. The contract suite pins it (`PutAtAnExistingName-
-    // NeverOverwrites`), and this implementation was not being run through it,
-    // which is exactly how the divergence survived being written down.
+    // `Unusable` is what the blob-store contract requires of every implementation, pinned by
+    // `PutAtAnExistingNameNeverOverwrites`.
     return make_ready_future(classify_conditional_put(outcome.GetError().GetResponseCode()));
 }
 
@@ -439,7 +426,7 @@ std::future<ListResult> S3BlobStore::list(std::string_view prefix) {
         note_list(outcome.IsSuccess() ? ListResult(std::vector<std::string>{})
                                       : ListResult(std::unexpected(Status::Io)));
         if (!outcome.IsSuccess()) {
-            // **Never absence.** An empty list in an existing bucket is a
+            // Never absence. An empty list in an existing bucket is a
             // meaningful empty result; a failure to look is not, and conflating
             // them is how a store loses data that was never lost.
             return make_ready_future(ListResult(std::unexpected(Status::Io)));

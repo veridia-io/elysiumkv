@@ -12,7 +12,7 @@ inline uint64_t jitter_window_ms(uint64_t span_ms, double fraction) {
     return static_cast<uint64_t>(static_cast<double>(span_ms) * fraction);
 }
 
-/// A stable offset in `[0, window_ms)`, **derived from the seeds rather than rolled.**
+/// A stable offset in `[0, window_ms)`, derived from the seeds rather than rolled.
 ///
 /// A rolled offset would let the two sites that need one disagree: `placement()` decides which
 /// tier a file belongs on and `next_time_transition()` decides when the store next looks at it,

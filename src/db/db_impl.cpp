@@ -217,7 +217,7 @@ DbImpl::DbImpl(const Options& options, ResolvedLevels config, ResolvedTiers tier
 }
 
 DbImpl::~DbImpl() {
-    // **Before anything is torn down**, because `flush()` waits on the flush executor and returns
+    // Before anything is torn down, because `flush()` waits on the flush executor and returns
     // early once `shutting_down_` is set — a flush attempted after the lines below would quietly do
     // nothing. Best-effort by construction: there is no write-ahead log, so a memtable dropped on a
     // clean shutdown is lost for no reason, but a destructor has nowhere to report a failure to and
@@ -279,7 +279,7 @@ void DbImpl::log_emit(LogLevel level, LogEvent event, const std::string& message
 
 Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable,
                                 bool read_only) {
-    // **Every rejection below says which one it was.** A dozen distinct configuration mistakes all
+    // Every rejection below says which one it was. A dozen distinct configuration mistakes all
     // report `Status::Config`, and an operator holding only that has to guess; the message is the
     // whole difference between a five-minute fix and a bisect through the options struct.
     const auto refuse = [](std::string_view why) {
@@ -306,7 +306,7 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
     // and it reads as "unset" rather than as a choice.
     //
     // The upper bound is arithmetic and nothing more: the budget charges two windows, so anything
-    // past half the address space wraps. **Deliberately not bounded by `max_compaction_bytes`** — a
+    // past half the address space wraps. Deliberately not bounded by `max_compaction_bytes` — a
     // store with a small compaction budget is a real configuration, and a window wider than the
     // whole compaction simply reads each input in one request, which is the best case rather than
     // an error. Bounding it that way rejected `TinyCompactionBudget` outright.
@@ -323,7 +323,7 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
                       "of open(): a transient store can lose data and the caller has to see that");
     }
 
-    // **A `Transient` tier needs at least two levels.** An L0 file cannot be migrated — that
+    // A `Transient` tier needs at least two levels. An L0 file cannot be migrated — that
     // would reorder L0's positional recency — so it leaves its tier by being compacted into L1,
     // and `compact_l0_file_off_its_tier` gives up when there is no L1 to compact into. With one
     // level that is permanent exposure: L0 files can never leave the transient tier, no timer
@@ -334,10 +334,10 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
                       "by being compacted into L1, so with one level it can never leave");
     }
 
-    // **The orphan window must be at least the reader window.** An obsolete object is, to the
+    // The orphan window must be at least the reader window. An obsolete object is, to the
     // sweep, indistinguishable from an orphan — the edit that removed it is committed, so the
     // current manifest does not reference it, which is the sweep's own test. The pending queue keeps
-    // the sweep off objects this instance obsoleted, but **a crash empties that queue**: an object
+    // the sweep off objects this instance obsoleted, but a crash empties that queue: an object
     // obsoleted before the crash comes back as an orphan afterwards, protected by the orphan window
     // and nothing else. Ordered the other way, the reader window would be silently inert after any
     // restart. Checked rather than documented, like every other bound here.
@@ -398,7 +398,7 @@ Result<std::unique_ptr<ReadOnlyDB>> DB::open_read_only(const Options& options) {
 }
 
 Status DbImpl::recover() {
-    // **Resolved before the manifest is touched**, because the manifest is itself encrypted: the
+    // Resolved before the manifest is touched, because the manifest is itself encrypted: the
     // first thing `VersionSet::recover` does is open a payload, and it needs the registry to do it.
     // The passthrough is added rather than configured, so there is always a provider and never a
     // null one; an embedder registering its reserved id is refused rather than silently overriding
@@ -439,7 +439,7 @@ Status DbImpl::recover() {
         last_error_ = versions_->last_error();
     }
     if (status == Status::NotFound && read_only_) {
-        // **A reader does not create a store.** Finding no manifest means it opened the wrong place
+        // A reader does not create a store. Finding no manifest means it opened the wrong place
         // or arrived before the writer; either way that is not a reader's decision to make, and
         // creating one would be the manifest write this mode exists to avoid.
         last_error_ = "read-only open found no manifest: the store does not exist yet";
@@ -480,7 +480,7 @@ void DbImpl::adopt_recovered_watermark() {
     }
     recovered_watermark_ = recovery_watermark_.resume_after();
 
-    // **A loss recorded by an earlier recovery still binds this one.** `resume_after` reasons from
+    // A loss recorded by an earlier recovery still binds this one. `resume_after` reasons from
     // the files present now, and with nothing discarded it trusts `max(high)` over them — an
     // argument whose premise is that no state was ever lost. The discard that falsified it also
     // erased the evidence, so the floor is what carries it forward. See `Version::watermark_floor`.
@@ -506,7 +506,7 @@ void DbImpl::adopt_recovered_watermark() {
 }
 
 void DbImpl::start_background() {
-    // **A reader runs no background work at all**: no flush, no compaction, no migration, no
+    // A reader runs no background work at all: no flush, no compaction, no migration, no
     // collection, and no sweep. Every one of those either writes the manifest or deletes an object,
     // and a reader has authority to do neither.
     if (read_only_) return;
@@ -519,7 +519,7 @@ void DbImpl::start_background() {
     flush_thread_ = std::thread([this] { background_flush_loop(); });
     compaction_thread_ = std::thread([this] { background_compaction_loop(); });
 
-    // **One synchronous reconcile before the first write can arrive.** A store reopened already
+    // One synchronous reconcile before the first write can arrive. A store reopened already
     // past a transient tier's `stall_age` must hold writes immediately; if the published flag
     // started false it would accept them for nearly a full interval. Forced, because there is no
     // previous reconcile for the gate to compare against.
@@ -569,7 +569,7 @@ Status DbImpl::delete_range(Slice lower, Slice upper) {
     // still exists and get on with it.
     //
     // The version is held in a named variable for the length of the check. `current()` hands back
-    // the `shared_ptr` **by value**, so `current()->truncation_point()` yields a reference into a
+    // the `shared_ptr` by value, so `current()->truncation_point()` yields a reference into a
     // Version whose last owner dies at the semicolon — and a compaction installing a new version at
     // that moment frees the string this is still reading. Binding a reference to a member of a
     // temporary's pointee extends nothing.
@@ -608,7 +608,7 @@ Status DbImpl::remove(Slice key) {
 
 /// The floor is permanent, so a write below it is refused rather than accepted and hidden.
 ///
-/// **This is the whole of what makes truncation cheap.** Keys below the point are unreadable
+/// This is the whole of what makes truncation cheap. Keys below the point are unreadable
 /// because the *point* says so, not because anything was written per key — so the engine has no
 /// way to tell a key written before the truncation from one written after, positional recency
 /// being the only ordering it has. Accepting such a write would mean a `put` that returned `Ok`
@@ -622,7 +622,7 @@ Status DbImpl::truncate_below(Slice key) {
     if (read_only_) return Status::Config;   // the C ABI has one handle type; C++ has two
     if (key.empty()) return Status::Ok;      // nothing sorts below the empty key
 
-    // **Published before the edit, under the memtable lock.** That is what makes the refusal
+    // Published before the edit, under the memtable lock. That is what makes the refusal
     // airtight: from here on every writer sees the new floor, and any write already in the
     // memtable happened before the truncation and is hidden by the read clamp, which is what a
     // truncation means. Holding the lock across the manifest write instead would stall every
@@ -640,7 +640,7 @@ Status DbImpl::truncate_below(Slice key) {
         write_floor_ = key.to_string();
     }
 
-    // **The memtables are deliberately left alone.** The read clamp hides keys below the point
+    // The memtables are deliberately left alone. The read clamp hides keys below the point
     // wherever they live, memtable included, so touching them would change no answer — and it is
     // not even the optimisation it looks like: the skiplist cannot unlink a node, so `remove` adds
     // a tombstone record. Truncating a memtable would therefore make it *larger*, turn its puts
@@ -666,7 +666,7 @@ Status DbImpl::truncate_below(Slice key) {
 }
 
 Result<bool> DbImpl::range_is_erased(Slice lower, Slice upper) const {
-    // **The truncation point is deliberately not consulted.** A band below the floor is
+    // The truncation point is deliberately not consulted. A band below the floor is
     // unreadable, and unreadable is not erased — the objects are still there until the reclaim
     // collects them. A receipt that counted "you cannot read it" as "it is gone" would be the one
     // kind of wrong answer this is for.
@@ -680,17 +680,14 @@ Status DbImpl::write(WriteBatch& batch) {
     // unit, so discovering an oversized entry halfway through would leave the
     // store holding half of it.
     //
-    // The floor is read once, under `mem_mutex_` and below, so every range in the batch is clamped
-    // against the same one and the refusal uses that same one — a batch is a unit, and a floor
-    // that moved underneath it halfway through would make it a sequence again. It used to be read
-    // here while `check_below_truncation` re-read the Version per operation, so within one batch
-    // the clamp and the refusal could already disagree.
+    // The floor is read once for the whole batch, so every range is clamped against the same one
+    // and the refusal uses it too. A batch is a unit; a floor moving underneath it would make it a
+    // sequence.
     // Each op's resolved range, or nothing for an op that is not one or deletes nothing.
     //
-    // **One entry per op rather than one per range**, indexed by the same loop variable below. A
-    // vector holding only the ranges would need its own cursor, and a cursor that advances on a
-    // different condition than the loop is a drift waiting to happen — the first empty range in a
-    // batch would silently shift every later one onto the wrong bounds.
+    // One entry per op rather than one per range, indexed by the loop variable below: a vector of
+    // ranges alone would need a cursor advancing on a different condition than the loop, and the
+    // first empty range would shift every later one onto the wrong bounds.
     std::vector<std::optional<std::pair<std::string, std::string>>> ranges(batch.ops().size());
     if (Status status = throttle_writes(); status != Status::Ok) return status;
 
@@ -715,7 +712,7 @@ Status DbImpl::write(WriteBatch& batch) {
                 status != Status::Ok) {
                 return status;
             }
-            // **Clamped, where a `put` in the same batch would be refused**, and the difference is
+            // Clamped, where a `put` in the same batch would be refused, and the difference is
             // not an inconsistency. A write below the floor is refused because the engine cannot
             // tell it from one made before the truncation; a delete below the floor asks for
             // something already true. Doing this per operation rather than per batch is what lets
@@ -988,17 +985,14 @@ Status DbImpl::flush() {
 
 /// The flush executor: memtable flushing and nothing else.
 ///
-/// **It has its own thread for write availability.** One immutable memtable is allowed in
+/// It has its own thread for write availability. One immutable memtable is allowed in
 /// flight, so if flushing shared a worker with compaction, a memtable filling while a
 /// compaction ran would block the next rotation and stall writes for the length of that
 /// compaction — up to `max_compaction_bytes` over throughput.
 ///
-/// It evaluates no predicates. Deciding *whether* a flush is due belongs to the coordinator,
-/// which also performs the rotation: a pointer swap under `mem_mutex_` is not long-running work,
-/// and doing it there means the age-driven flush is one entry in the shared predicate table
-/// instead of this loop's own private timer. `flush_interval` was the first instance of the
-/// push-based pattern in this engine, and leaving it on separate machinery is how one of two
-/// adjacent loops ends up with a bug the other does not have.
+/// It evaluates no predicates. Whether a flush is due belongs to the coordinator, which also
+/// performs the rotation — a pointer swap under `mem_mutex_` is not long-running work — so the
+/// age-driven flush is one entry in the shared predicate table rather than a private timer here.
 void DbImpl::background_flush_loop() {
     while (true) {
         {
@@ -1027,7 +1021,7 @@ void DbImpl::background_flush_loop() {
 
 namespace {
 
-/// How often the coordinator evaluates every predicate **regardless of the gate**.
+/// How often the coordinator evaluates every predicate regardless of the gate.
 ///
 /// The gate is itself a push dependency — narrower than the one it replaced, but real — so a
 /// predicate whose invalidating transitions were never wired into the epoch would otherwise be
@@ -1084,15 +1078,15 @@ uint64_t DbImpl::next_time_transition(const Version& version, uint64_t now) cons
         // when it outgrows the tier it is on. Size mismatches are not time-driven — they are
         // true the moment the file exists, and the epoch covers them.
         if (tier.max_age.has_value()) {
-            // The same offset `placement()` will apply, re-derived rather than remembered. If the
-            // two disagreed the store would wake at a deadline placement no longer calls due, or
-            // sleep straight past one that came early.
+            // The same offset `placement()` applies, re-derived rather than remembered: the two
+            // must agree, or the store wakes at a deadline placement does not honour, or sleeps
+            // past one that came early.
             const uint64_t span = static_cast<uint64_t>(tier.max_age->count());
             consider(file.min_write_time_ms + span
                      - tier_age_jitter_ms(tiers_, file.file_number, file.min_write_time_ms, span));
         }
-        // The stall valve is a published predicate, so its crossing has to open the gate too or
-        // the flag would go stale on a store that has stopped being written to.
+        // The stall valve is a published predicate, so its crossing must open the gate too — the
+        // flag would otherwise go stale on a store nothing is writing to.
         if (tier.durability == Durability::Transient && tier.stall_age.has_value()) {
             consider(file.min_write_time_ms + static_cast<uint64_t>(tier.stall_age->count()));
         }
@@ -1105,12 +1099,8 @@ void DbImpl::publish_transient_stall(const Version& version, uint64_t now) {
     // Computed unconditionally, pin or no pin: `transient_stalled()` is where the override is
     // applied, so this keeps the real value fresh and unpinning is correct immediately rather than
     // at the next tick.
-    // One pass over the files, keyed by store. The tiers used to be the outer loop with
-    // `all_files()` inside it, so a store on four tiers copied every file's metadata four times —
-    // and this runs at the rate of background work, not of the clock.
-    //
-    // Keyed by store id rather than by tier index because several tiers may name one store, and
-    // each of them has to see that store's oldest file.
+    // One pass over the files, keyed by store id rather than by tier index: several tiers may name
+    // one store, and each has to see that store's oldest file.
     std::map<std::string, uint64_t> oldest_by_store;
     for (const auto& level : version.levels()) {
         for (const FileMetadata& file : level) {
@@ -1205,7 +1195,7 @@ void DbImpl::maintenance_loop() {
             std::unique_lock<std::mutex> lock(maintenance_mutex_);
             ELYSIUMKV_LOCK_AUDIT();
             if (shutting_down_maintenance_) return;
-            // **Always bounded.** Waiting untimed when no tier has a `max_age` was the first
+            // Always bounded. Waiting untimed when no tier has a `max_age` was the first
             // draft's shape and it reintroduces the defect: a tier crossing `max_bytes`, a
             // level's score passing 1, a version becoming collectible — none of those has an
             // age bound, so an indefinite wait plus a missed notification is a task that never
@@ -1264,7 +1254,7 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     // The seal time: an exact upper bound on the writes in this memtable, and what an age-based
     // expiry measures against.
     file.max_write_time_ms = memtable->sealed_time_ms();
-    // **The sealed memtable's interval, not the interval current when the file is written.** The
+    // The sealed memtable's interval, not the interval current when the file is written. The
     // dangerous variant is the latter: a watermark set after this memtable was sealed covers
     // writes still sitting in the live one, so reporting it would tell the embedder to skip
     // replaying data the engine never stored. Flushes are ordered — one immutable memtable at a
@@ -1273,7 +1263,7 @@ Status DbImpl::flush_memtable(const std::shared_ptr<SkiplistMemtable>& memtable)
     file.watermark = memtable->watermark();
 
     VersionEdit edit;
-    // **A flush does not touch the floor**, deliberately — see `WatermarkFloor::lower_to`. Files
+    // A flush does not touch the floor, deliberately — see `WatermarkFloor::lower_to`. Files
     // written during a replay are the youngest data in the store and sit on the tier that just
     // failed, so crediting them would certify a position the next loss could destroy again.
     edit.added.push_back(std::move(file));
@@ -1443,7 +1433,7 @@ EncryptionProvider* DbImpl::provider_for(const std::string& id) const {
     return encryption_.find(id);
 }
 
-/// **No special case for "not encrypted".** The empty id resolves to `NoEncryptionProvider` like
+/// No special case for "not encrypted". The empty id resolves to `NoEncryptionProvider` like
 /// any other id resolves to its provider, and that provider returns an identity cipher. One path
 /// through the read and write paths, so there is one path to get right and one to test — which is
 /// what the reserved id is for.
@@ -1484,7 +1474,7 @@ Result<std::shared_ptr<SstReader>> DbImpl::reader_for(const FileMetadata& file) 
                                   reader_options);
     if (!reader) {
         if (reader.error() == Status::NotFound && read_only_) {
-            // **Staleness is not corruption, and telling them apart needs no coordination.**
+            // Staleness is not corruption, and telling them apart needs no coordination.
             // Objects are write-once and file numbers are never reused, so a missing object means
             // one of two things, and re-reading the manifest pointer says which: if it has advanced
             // past the version holding this file, the writer collected it legitimately and this
@@ -1521,7 +1511,7 @@ Result<std::shared_ptr<SstReader>> DbImpl::reader_for(const FileMetadata& file) 
 void DbImpl::forget_reader(uint64_t file_number) { readers_.forget(file_number); }
 
 std::vector<FileMetadata> DbImpl::delete_obsolete(const std::vector<FileMetadata>& files) {
-    // **Grouped by store, one bulk call each.** A level's files routinely sit on
+    // Grouped by store, one bulk call each. A level's files routinely sit on
     // several tiers, and `remove_many` is per store — so the grouping has to happen
     // here, which is also the only place that can turn a `store_id` into a store.
     // Against S3 this is the difference between one DeleteObjects and one DELETE
@@ -1559,7 +1549,7 @@ std::vector<FileMetadata> DbImpl::delete_obsolete(const std::vector<FileMetadata
 
 /// Whether a read must be refused because a discard has not been replayed yet.
 ///
-/// **Reads only.** The replay is writes, and refusing those would make the condition permanent.
+/// Reads only. The replay is writes, and refusing those would make the condition permanent.
 bool DbImpl::reads_are_blocked() const {
     return requires_recovery_.load(std::memory_order_relaxed) &&
            !options_.allow_reads_before_recovery;
@@ -1568,7 +1558,7 @@ bool DbImpl::reads_are_blocked() const {
 Result<Pinned> DbImpl::get(Slice key) {
     if (reads_are_blocked()) return std::unexpected(Status::RecoveryRequired);
 
-    // **Taken once, and used for both the clamp and the level walk.** Two takes cost two locked
+    // Taken once, and used for both the clamp and the level walk. Two takes cost two locked
     // refcounts on every lookup, and they can disagree: a truncation landing between them would
     // let a key pass a clamp the version it is then read against says hides it.
     auto version = versions_->current();
@@ -1605,14 +1595,14 @@ Result<Pinned> DbImpl::get(Slice key) {
         // recent; deeper levels are non-overlapping, so there is at most one.
         const std::vector<FileMetadata>& files = version->files_at(level);
 
-        // **Binary search where the level allows it**, which is what ARCHITECTURE.md - A read
+        // Binary search where the level allows it, which is what ARCHITECTURE.md - A read
         // describes and what this loop did not do: below L0 the data spans are disjoint and
         // sorted by smallest key, so `lower_bound` on the largest key lands on the only file that
         // can hold it. That is O(log n) against a scan of the level, and for a bottom level of
         // 50,000 files the scan is 50,000 string comparisons per lookup — the one cost a bloom
         // filter cannot remove, because it is paid before any file is opened.
         //
-        // **Not when the level carries range tombstones.** Their spans are neither bounded by the
+        // Not when the level carries range tombstones. Their spans are neither bounded by the
         // data span nor disjoint across files, so the ordering the search relies on does not hold
         // for the second reason to open a file, and the level is scanned as before.
         size_t begin = 0;
@@ -1714,7 +1704,7 @@ std::unique_ptr<Iterator> DbImpl::make_iterator(Slice lower, Slice upper, bool h
     for (int level = 0; level < static_cast<int>(version->num_levels()); ++level) {
         // Prune by key range before opening anything: this is what keeps a
         // prefix scan from touching files it cannot contain (ARCHITECTURE.md "Absence is an answer, not an error").
-        // **One child for the whole level, opening one file at a time**, where the level allows it:
+        // One child for the whole level, opening one file at a time, where the level allows it:
         // below L0 the files are disjoint and sorted, so at most one can answer any key. That is
         // what keeps a scan from opening every file it *might* need before returning its first
         // entry. Not when the level carries range tombstones — those shadow entries in sibling
@@ -1832,9 +1822,9 @@ Stats DbImpl::stats() const {
     // ARCHITECTURE.md "Statistics are a buffer, not a struct" — the tier axis: where files physically live, and what a loss of each
     // store would reach back to.
     //
-    // **One pass over every file, and the store ids read once.** This was a full walk of every
+    // One pass over every file, and the store ids read once. This was a full walk of every
     // level per tier, and the walk compared `file.store_id` against `tier.store->id()` — which
-    // returns a `std::string` **by value**, so it allocated once per file per tier. The watermark
+    // returns a `std::string` by value, so it allocated once per file per tier. The watermark
     // below was a second walk, and its `store_is_discardable` allocated per tier per file again.
     // `stats()` is the one call an operator is told to make continuously, times every instance in
     // the process; at ten thousand files and two tiers that was forty thousand allocations a
@@ -1846,7 +1836,7 @@ Stats DbImpl::stats() const {
         tier_store_ids.push_back(tiers_.tiers[static_cast<size_t>(index)].store->id());
     }
 
-    // **A store id maps to every tier that names it, not to one.** Nothing forbids two tiers
+    // A store id maps to every tier that names it, not to one. Nothing forbids two tiers
     // sharing a store, and a file on it belongs to both — which is what the per-tier loop did by
     // construction and what a single pass has to be told.
     std::unordered_map<std::string_view, std::vector<int>> tiers_by_store;
@@ -1871,7 +1861,7 @@ Stats DbImpl::stats() const {
     };
     std::vector<TierAccumulator> per_tier(static_cast<size_t>(last_tier) + 1);
 
-    // The **live** watermark frontier, accumulated in the same pass. Deliberately not the maximum
+    // The live watermark frontier, accumulated in the same pass. Deliberately not the maximum
     // watermark over current files: that is tier-blind, so a flush to a transient tier would
     // advance it while changing nothing an operator can rely on. This is the same expression
     // recovery uses, evaluated live — the position whose state would survive losing every
@@ -1939,7 +1929,7 @@ Stats DbImpl::stats() const {
         stats.tiers.push_back(tier_stats);
     }
 
-    // **The lock covers taking the memtables, not reading them**, which is what `get` and
+    // The lock covers taking the memtables, not reading them, which is what `get` and
     // `make_iterator` already do. Every figure below is an atomic the arena and the skiplist
     // maintain for exactly this reader, so holding the write path's mutex across them bought
     // nothing — and `stats()` is scraped continuously.
@@ -2007,21 +1997,16 @@ Stats DbImpl::stats() const {
     return stats;
 }
 
-// ARCHITECTURE.md "A process-wide memory budget" — **the shedding order, and why it is that order.** The budget is process-wide,
-// so an instance over it is usually over because of its neighbours, not itself; the
-// response has to be to give memory back rather than to fail.
+// The shedding order (ARCHITECTURE.md "A process-wide memory budget"). The budget is process-wide,
+// so an instance over it is usually over because of its neighbours; the response is to give memory
+// back rather than to fail.
 //
-//   1. The block cache. The only consumer whose loss is *purely* latency, and the
-//      cheapest to release — bytes held as an optimisation and nothing else.
-//   2. Memtables, by freezing and flushing. This costs I/O and it costs write
-//      throughput, so it comes second; it cannot be first because a memtable holds
-//      writes that are not anywhere else yet.
-//   3. Stalling, which is the caller's problem and is handled by `throttle_writes`
-//      below. Last, because it is the only one visible to the application.
+//   1. The block cache — bytes held purely as an optimisation, so the only loss is latency.
+//   2. Memtables, by freezing and flushing. Costs I/O and write throughput, and cannot be first
+//      because a memtable holds writes that are nowhere else yet.
+//   3. Stalling, handled by `throttle_writes` below. Last, being the only step the application sees.
 //
-// Nothing here fails a write. A budget is a shaping mechanism, not an admission
-// control: refusing a `put` because another instance in the process is using memory
-// would be a surprising and unhelpful failure mode.
+// Nothing here fails a write: a budget shapes rather than admits.
 /// One place that builds a memtable, so the budget and the clock cannot be attached in
 /// two of the three places and forgotten in the third.
 std::shared_ptr<SkiplistMemtable> DbImpl::new_memtable() {
@@ -2029,18 +2014,16 @@ std::shared_ptr<SkiplistMemtable> DbImpl::new_memtable() {
     memtable->set_memory_budget(options_.memory_budget.get());
     memtable->set_creation_time_ms(now_ms());
 
-    // **The watermark interval starts closed at whatever is established right now.** Both bounds,
-    // and the lower one is the point: `set_watermark(M)` asserts every write so far is at a
-    // position ≤ M, so a memtable created while M is current holds no write at or below M. That
-    // is the lower bound the recovery proof needs, and capturing it here — at creation, not at
-    // seal — is what makes it true. A later `set_watermark` on this memtable moves only the
-    // upper bound; it says nothing about writes already in here.
+    // The interval starts closed at whatever is established now, and the lower bound is what the
+    // recovery proof needs: `set_watermark(M)` asserts every write so far is at a position <= M, so
+    // a memtable created while M is current holds no write at or below M. Capturing it at creation
+    // rather than at seal is what makes that true. A later `set_watermark` moves only the upper
+    // bound.
     //
-    // Absent when nothing has been established yet: such a memtable has no lower bound at all,
-    // and losing it means nothing can be certified. That is why recovery reports `nullopt`
-    // rather than zero, which is a valid position.
+    // Absent when nothing has been established: such a memtable has no lower bound, so losing it
+    // certifies nothing — which is why recovery reports `nullopt` rather than zero.
     //
-    // **Call with `mem_mutex_` held** — it reads `established_watermark_`.
+    // Precondition: `mem_mutex_` is held, since this reads `established_watermark_`.
     if (established_watermark_.has_value()) {
         memtable->set_watermark_bounds({*established_watermark_, *established_watermark_});
     }
@@ -2055,10 +2038,9 @@ Status DbImpl::mark_recovery_complete() {
     if (read_only_) return Status::Ok;
     if (!versions_->current()->watermark_floor().has_value()) return Status::Ok;
 
-    // **Cleared outright rather than raised to what the replay reached.** The floor exists because
-    // the files over-report after a loss; the embedder saying its replay is done is the one signal
-    // that they no longer do. Anything short of that leaves it standing, so a crash mid-replay
-    // repeats the replay rather than half-crediting it.
+    // Cleared outright rather than raised to what the replay reached: the embedder declaring the
+    // replay done is the only signal that the files no longer over-report. A crash mid-replay
+    // therefore repeats the replay rather than half-crediting it.
     VersionEdit edit;
     edit.floor_update = VersionEdit::FloorUpdate::Clear;
     return versions_->apply(std::move(edit));
@@ -2072,10 +2054,9 @@ Status DbImpl::set_watermark(uint64_t position) {
     ELYSIUMKV_LOCK_AUDIT();
     if (bg_error_ != Status::Ok && is_terminal(bg_error_)) return bg_error_;
 
-    // Taking the write path's own lock is what makes "every write completed before this call"
-    // a well-defined set, and a store has one writer. The proof the recovery rule rests on has
-    // no other premise; an embedder able to call this concurrently with a write would make the
-    // boundary unsound rather than merely imprecise.
+    // Taking the write path's own lock is what makes "every write completed before this call" a
+    // well-defined set, which the recovery rule depends on. Calling this concurrently with a write
+    // would make that boundary unsound.
     if (established_watermark_.has_value() && position < *established_watermark_) {
         // A caller bug, refused rather than clamped: clamping would hide a replay that went
         // backwards, and the whole value of the watermark is that it can be trusted.
@@ -2084,7 +2065,7 @@ Status DbImpl::set_watermark(uint64_t position) {
     established_watermark_ = position;
     if (mem_ != nullptr) {
         if (mem_->empty()) {
-            // **Empty, so both bounds move.** There are no writes for a lower bound to be wrong
+            // Empty, so both bounds move. There are no writes for a lower bound to be wrong
             // about, and every write this memtable goes on to accept is at a position above
             // `position` by the premise. Not merely an optimisation: this is the state right
             // after a flush, which is exactly where a changelog consumer commits — the
@@ -2121,22 +2102,18 @@ bool DbImpl::shed_if_over_budget() {
     over = budget->overage();
     if (over == 0) return false;
 
-    // 2. Flush the memtable — **but only if it holds enough to be worth an SST.**
+    // 2. Flush the memtable — but only if it holds enough to be worth an SST.
     //
     // A flush trades memtable bytes for a file, and the file is permanent: it joins L0 and
     // carries compaction debt for the rest of the store's life. Flushing a memtable holding a
     // handful of entries releases almost nothing and buys all of that.
     //
-    // It matters because a budget smaller than one memtable can never be satisfied by
-    // flushing, so the unguarded version did it on *every write*: L0 filled with thousands of
-    // near-empty files, compaction work grew with each one, and the cost per operation climbed
-    // without bound. A 5,000-operation differential replay reached a single operation taking
-    // over five minutes before the liveness watchdog killed it — a livelock in all but name,
-    // and the full-profile run is what surfaced it.
+    // The guard is load-bearing: a budget smaller than one memtable can never be satisfied by
+    // flushing, so without it every write would flush, filling L0 with near-empty files and growing
+    // compaction work without bound.
     //
-    // When there is nothing worth flushing, the overage is somewhere this step cannot reach —
-    // a blob cache, another instance, or a budget simply set too low — and the honest next
-    // step is the third one, which is the caller's rate.
+    // When nothing is worth flushing the overage is somewhere this step cannot reach — a blob cache,
+    // another instance, or a budget set too low — and the next step is the caller's rate.
     {
         std::lock_guard<std::mutex> lock(mem_mutex_);
         ELYSIUMKV_LOCK_AUDIT();
@@ -2184,17 +2161,15 @@ Status DbImpl::throttle_writes() {
     // problem that no amount of compaction fixes, and the two cheapest remedies are
     // free of the compaction machinery entirely.
     //
-    // **Stalling on the budget is bounded by progress, not by the budget clearing.** A
-    // level stall clears when compaction catches up; a budget stall clears only if memory
-    // is given back, and if the budget is simply set too low for the instances sharing it,
-    // nothing ever will. Waiting for that is a hang, not backpressure — the Java binding,
-    // which has no inline mode to fall back on, wedged on the first attempt at this. So
-    // the writer waits only while the overage is *shrinking*: real backpressure when the
-    // system can recover, and a bounded delay when it cannot.
+    // Stalling on the budget is bounded by progress, not by the budget clearing. A
+    // level stall clears when compaction catches up; a budget stall clears only if memory is given
+    // back, and a budget set too low for the instances sharing it never gives any. So the writer
+    // waits only while the overage is shrinking: backpressure when the system can recover, and a
+    // bounded delay when it cannot.
     bool budget_stall = shed_if_over_budget();
     size_t budget_overage = budget_stall ? options_.memory_budget->overage() : 0;
 
-    // **Every path that loops must run this**, or the budget stall never ends. It lived only
+    // Every path that loops must run this, or the budget stall never ends. It lived only
     // in the threaded branch at first, and the inline branch — which `continue`s after
     // compacting — spun on `compact_until_quiet()` for as long as compaction had any work at
     // all. With a budget that cannot be satisfied that is forever, and the L0 churn shedding
@@ -2211,7 +2186,7 @@ Status DbImpl::throttle_writes() {
     };
 
     while (true) {
-        // **Not taken unless something needs it.** The valve reads file counts and nothing else,
+        // Not taken unless something needs it. The valve reads file counts and nothing else,
         // and `VersionSet` publishes those as atomics — so the common case, a write that is not
         // throttled at all, costs no lock and no refcount. Inline mode takes it regardless: it has
         // to publish the transient-stall flag itself, and is single-threaded anyway.
@@ -2237,13 +2212,11 @@ Status DbImpl::throttle_writes() {
         // bound a guarantee rather than an expectation, so it is not
         // configurable off.
         //
-        // **Read, not computed.** The maintenance coordinator owns this predicate and publishes
-        // the answer; evaluating it here as well would put the same definition in two places,
-        // where it can diverge — which is how a valve ends up engaged by one and not the other.
-        // It also makes the write path's cost O(1) instead of O(files). The cost is that
-        // engaging lags by up to one tick, which is the same `+ interval` term the exposure
-        // window already carries; `open` reconciles synchronously so the flag is never stale on
-        // the first write.
+        // Read, not computed: the maintenance coordinator owns this predicate and publishes the
+        // answer, so there is one definition rather than two that can diverge, and the write path
+        // costs O(1) instead of O(files). Engaging therefore lags by up to one tick — the same
+        // `+ interval` term the exposure window carries. `open` reconciles synchronously, so the
+        // flag is never stale on the first write.
         if (inline_mode()) {
             // No coordinator to publish it, so the writer that would otherwise wait for one
             // evaluates it itself — the same asymmetry `flush_interval` already documents.
@@ -2338,13 +2311,13 @@ Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice byte
     // allocate a new file number instead; the partial object becomes an orphan and is
     // collected". A taken name is a numbering accident, not a verdict on ownership.
     //
-    // **Ownership is arbitrated at the manifest, which is the only place with a
-    // compare-and-swap.** This used to report `Fenced` here instead, which made a crashed
-    // writer's leftover object — sitting at exactly the number recovery hands back out —
-    // permanently fatal: every reopen collided on the same name. Open stepping over what the
-    // stores hold makes that rare, and renumbering makes it harmless when it happens anyway.
-    // Resolved once rather than per attempt: the retry loop below changes the file number, not the
-    // provider. The empty id resolves like any other, to the one that does nothing.
+    // Ownership is arbitrated at the manifest, the only place with a compare-and-swap, so a name
+    // collision here is a numbering accident and is resolved by renumbering rather than by
+    // fencing. Reporting `Fenced` would make a crashed writer's leftover object — sitting at the
+    // number recovery hands back out — permanently fatal, colliding again on every reopen.
+    //
+    // The provider is resolved once rather than per attempt: the retry loop below changes the file
+    // number, not the provider. The empty id resolves like any other, to the one that does nothing.
     EncryptionProvider* provider = provider_for(encryption_.primary);
     if (provider == nullptr) return std::unexpected(Status::Config);
 
@@ -2353,7 +2326,7 @@ Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice byte
         const uint64_t file_number = versions_->allocate_file_number();
         const std::string name = sst_object_name(file_number);
 
-        // **Sealed inside the loop, because the ciphertext depends on the number.** The file number
+        // Sealed inside the loop, because the ciphertext depends on the number. The file number
         // is the object id bound into every chunk's authentication, so a renumber is a different
         // object and its bytes have to be produced again. Sealing once outside would write, on the
         // second attempt, ciphertext that authenticates as belonging to a file that does not exist.
@@ -2423,12 +2396,12 @@ Status DbImpl::sweep_orphans() {
     std::lock_guard<std::mutex> sweeping(sweep_mutex_);
     ELYSIUMKV_LOCK_AUDIT();
 
-    // **Re-read the manifest before deciding anything.** This is what turns a repeated observation
+    // Re-read the manifest before deciding anything. This is what turns a repeated observation
     // into a sustained one: a file whose edit committed since the last sweep is referenced now and
     // leaves the candidate set on its own, rather than being argued about. It is also a fence
     // detector — a pointer that moved under us means another writer owns this store.
     //
-    // **Through `manifest_advanced`, which compares under the manifest mutex.** Reading our own
+    // Through `manifest_advanced`, which compares under the manifest mutex. Reading our own
     // generation and then reading the pointer as two separate steps is not the same check: this
     // writer rolls its own generation between them often enough — a sweep overlapping a compaction
     // is the ordinary case — and the two would then differ for a reason that has nothing to do with
@@ -2453,7 +2426,7 @@ Status DbImpl::sweep_orphans() {
     for (const auto& [store_id, store] : tiers_.stores) {
         ListResult& names = listings[listed++];
         if (!names) {
-            // **Failure to look is not evidence of absence**, and this is the most destructive
+            // Failure to look is not evidence of absence, and this is the most destructive
             // possible place to forget that: treating an unreadable store as "everything here is
             // unreferenced" would delete the store.
             return names.error() == Status::NotFound ? Status::Io : names.error();
@@ -2496,13 +2469,13 @@ Status DbImpl::sweep_orphans() {
     return Status::Ok;
 }
 
-/// **Nothing else reclaims a manifest generation.** The roll writes the new snapshot, installs the
+/// Nothing else reclaims a manifest generation. The roll writes the new snapshot, installs the
 /// pointer, then deletes the previous generation — so a crash between the last two leaves that
 /// generation's snapshot and up to `manifest_edits_per_generation` edits behind for ever. The
 /// orphan sweep lists blob stores only, and the catalog has no listing operation it is required to
 /// provide. On DynamoDB that is dead items, on S3 dead objects, and neither shows up anywhere.
 ///
-/// **"Below the live pointer" is a positive statement**, unlike an unreferenced object: the pointer
+/// "Below the live pointer" is a positive statement, unlike an unreferenced object: the pointer
 /// is authoritative about generations, so nothing has to be inferred from absence and the sweep's
 /// usual argument about a concurrent writer does not arise. What does arise is a *reader*, which
 /// may be part way through loading a generation this is about to delete — four round trips against
@@ -2520,7 +2493,7 @@ uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
             if (generation < live) candidates.push_back(generation);
         }
     } else if (listed.error() == Status::Unsupported) {
-        // **The fallback, and its limit stated rather than discovered.** Without a listing the only
+        // The fallback, and its limit stated rather than discovered. Without a listing the only
         // way to find a generation is to ask for it, so this probes a short window below the live
         // one. That covers what a crash during a roll leaves — the previous generation — and
         // cannot see a leak from further back.
@@ -2557,7 +2530,7 @@ uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
 
 /// Every store's full listing, in `tiers_.stores` order.
 ///
-/// **One thread per store, because the seam is not enough.** Every `BlobStore` here completes its
+/// One thread per store, because the seam is not enough. Every `BlobStore` here completes its
 /// future synchronously, so issuing the listings before collecting them runs them one after another
 /// exactly as a plain loop does. Against object storage each is a round trip, and an instance with a
 /// hot tier and a cold one pays both in series for no reason. The calling thread takes the last, so
@@ -2610,7 +2583,7 @@ Status DbImpl::verify_stores_and_discard() {
             return names.error() == Status::NotFound ? Status::Io : names.error();
         }
 
-        // **Step over what the store already holds.** Anything here at or above our counter
+        // Step over what the store already holds. Anything here at or above our counter
         // is either a dead writer's residue — an object whose edit never became durable, so
         // recovery handed its number back — or a live writer's work. We cannot tell those
         // apart, and do not need to: stepping over both is free, and it is what removes the
@@ -2621,7 +2594,7 @@ Status DbImpl::verify_stores_and_discard() {
         listings.emplace(store_id, std::move(*names));
     }
 
-    // **Indexed, not scanned.** Both sizes here are "files in this store", so a linear lookup per
+    // Indexed, not scanned. Both sizes here are "files in this store", so a linear lookup per
     // file made open quadratic — at 10,000 files that is ~10^8 string comparisons before the store
     // opens, on a path an embedder runs at every rebalance.
     //
@@ -2659,14 +2632,13 @@ Status DbImpl::verify_stores_and_discard() {
         const bool transient = tiers_.store_is_discardable(store_id);
 
         if (read_only_) {
-            // **A reader reports and refuses.** The discard is a manifest write, and serving the
+            // A reader reports and refuses. The discard is a manifest write, and serving the
             // version unrepaired is worse than refusing: dropping newer files uncovers older values,
             // so reads would return *stale* data presented as current. A reader is the wrong process
             // to improvise with a damaged store — let the writer perform the discard first.
-            // Corrupt either way, and the ternary that used to be here said `Corrupt : Corrupt`
-            // — implying the two cases differ when they do not. A reader cannot repair either one:
-            // a durable store missing files is damaged, and a transient one needs the *writer* to
-            // discard and replay, which is not a reader's manifest write to make.
+            // Corrupt either way: a reader can repair neither. A durable store missing files is
+            // damaged, and a transient one needs the writer to discard and replay, which is not a
+            // reader's manifest write to make.
             return fail_terminal(Status::Corrupt,
                                  "read-only open found store '" + store_id +
                                      "' missing files; a writer must discard and repair it first");
@@ -2677,7 +2649,7 @@ Status DbImpl::verify_stores_and_discard() {
                                      " is missing from durable store '" + store_id + "'");
         }
 
-        // Loss is per store: drop **every** file on it, wherever it sits. Tier
+        // Loss is per store: drop every file on it, wherever it sits. Tier
         // and level are independent, so those files are scattered across levels
         // rather than forming a contiguous band — which is why whole-store is
         // the only sane granularity here, not merely the preferred one.
@@ -2694,7 +2666,7 @@ Status DbImpl::verify_stores_and_discard() {
             recovery_watermark_.observe_discarded(file.watermark);
         }
 
-        // **The one number the loss produced, written down in the edit that erases its evidence.**
+        // The one number the loss produced, written down in the edit that erases its evidence.
         // After this edit the discarded files are gone from the manifest, so the next open has no
         // lost set to reason from and would fall back to `max(high)` over survivors — which is
         // sound only while nothing has ever been lost. See `Version::watermark_floor`.
@@ -2721,7 +2693,7 @@ Status DbImpl::verify_stores_and_discard() {
         version = versions_->current();
     }
 
-    // **Nothing is reclaimed here, and there is no flag to turn it on.** Deleting on a single
+    // Nothing is reclaimed here, and there is no flag to turn it on. Deleting on a single
     // instantaneous observation cannot tell a dead writer's residue from a live writer's
     // just-committed file — open takes no lock and performs no compare-and-set — and that is not a
     // defaulting problem, it is the observation being too weak to support the conclusion. The

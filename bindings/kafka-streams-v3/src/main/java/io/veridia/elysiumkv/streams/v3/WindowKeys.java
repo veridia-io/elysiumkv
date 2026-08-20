@@ -10,23 +10,18 @@ import org.apache.kafka.common.utils.Bytes;
  *   segmentId (8 B, big-endian) ‖ user key ‖ timestamp (8 B, big-endian) ‖ seqnum (4 B, big-endian)
  * </pre>
  *
- * <p><b>The suffix is not ours to choose.</b> {@code key ‖ timestamp ‖ seqnum} is what Streams'
+ * <p>The suffix is not ours to choose. {@code key ‖ timestamp ‖ seqnum} is what Streams'
  * change logger writes to the changelog, so restore hands those exact bytes back. Matching it means
  * a restored record needs a segment prefix and nothing else — no decode, no re-encode. It is pinned
  * byte-for-byte against Kafka's own {@code WindowKeySchema} in the tests; the class itself is
  * internal, so this reimplements the layout rather than depending on it.
  *
- * <p><b>The prefix is ours, and it is the whole design.</b> Kafka's stores put the user key first
- * and partition time across separate physical stores — one RocksDB per segment — because retention
- * then means dropping a store. That costs an instance, and its threads, per segment per partition.
- * Leading with the segment id instead makes every expired entry one contiguous run at the bottom of
- * the keyspace, so retention is a single {@code truncateBelow} against one store. What a fetch pays
- * for that is a scan per segment its time range spans, which is two or three for a window much
- * shorter than the segment interval — the ordinary case.
+ * <p>The segment-id prefix is ours. Leading with it makes every expired entry one contiguous run
+ * at the bottom of the keyspace, so retention is a single {@code truncateBelow} against one store
+ * rather than Kafka's store-per-segment. A fetch pays a scan per segment its time range spans.
  *
- * <p>Timestamps are written signed, as Kafka writes them, so the ordering these keys imply is the
- * ordering of the numbers only for non-negative times. Streams does not produce negative window
- * starts, and matching Kafka's encoding matters more than defending against one that cannot occur.
+ * <p>Timestamps are written signed, as Kafka writes them, so key order matches numeric order only
+ * for non-negative times. Streams does not produce negative window starts.
  */
 final class WindowKeys {
     static final int TIMESTAMP_BYTES = 8;

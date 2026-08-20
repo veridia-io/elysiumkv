@@ -1,6 +1,6 @@
 // The open-`SstReader` cache: the one cache in the engine that had neither a bound
 // nor a number. Two properties carry everything else here — the bound is a bound, and
-// **evicting a reader someone is using cannot break them**, because every user holds
+// evicting a reader someone is using cannot break them, because every user holds
 // its own `shared_ptr`. The second is what makes bounding this cheap at all.
 
 #include "sst/sst_reader_cache.hpp"
@@ -101,7 +101,7 @@ TEST_F(SstReaderCacheTest, AResidentReaderIsReturnedAndCountedAsAHit) {
     EXPECT_EQ(cache.hits(), 1u);
 }
 
-/// **The property that makes a bound safe.** A reader evicted while someone is reading
+/// The property that makes a bound safe. A reader evicted while someone is reading
 /// through it must keep working: the cache's reference is not the only one.
 TEST_F(SstReaderCacheTest, EvictingAReaderInUseDoesNotBreakItsUser) {
     SstReaderCache cache(64u << 20, nullptr);

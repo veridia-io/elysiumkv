@@ -12,16 +12,14 @@ import org.testcontainers.containers.wait.strategy.Wait;
  * One LocalStack container for the whole suite, plus the two preconditions the
  * remote tests need.
  *
- * <p><b>The image is pinned, and both obvious choices are wrong.</b> {@code latest}
- * refuses to start — "License activation failed". {@code 3.8} starts and
- * <em>silently ignores {@code If-Match}</em>: a stale ETag comes back 200 and
- * overwrites the object. That one is the dangerous one, because
- * {@code If-None-Match: *} does work there, so the write-once tests pass while
- * {@code compare_and_set} with a stale token succeeds — a suite showing the fence
- * working while two writers both install. 4.4.0 needs no licence and every
- * conditional is correct, which was verified before anything was built on it.
+ * <p>The image is pinned, and both obvious choices are wrong. {@code latest} refuses to start —
+ * "License activation failed". {@code 3.8} starts and <em>silently ignores {@code If-Match}</em>:
+ * a stale ETag comes back 200 and overwrites the object, while {@code If-None-Match: *} does work,
+ * so the write-once tests pass and {@code compare_and_set} with a stale token succeeds — a suite
+ * showing the fence working while two writers both install. 4.4.0 needs no licence and every
+ * conditional is correct.
  *
- * <p><b>Skipping is deliberate but must not be silent.</b> A machine with no Docker,
+ * <p>Skipping is deliberate but must not be silent. A machine with no Docker,
  * or a native library built without {@code -DELYSIUMKV_BUILD_AWS=ON}, cannot run
  * these; they skip with a reason rather than fail. But a skip that nobody notices
  * is indistinguishable from a pass, so CI passes

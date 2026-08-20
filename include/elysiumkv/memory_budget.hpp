@@ -6,7 +6,7 @@
 
 namespace elysiumkv {
 
-/// ARCHITECTURE.md "A process-wide memory budget" — **per process, not per instance.**
+/// ARCHITECTURE.md "A process-wide memory budget" — per process, not per instance.
 ///
 /// Public because `Options::memory_budget` is: this lived under `src/` while being the
 /// declared type of a public field, so an embedder could see the field and had no way to

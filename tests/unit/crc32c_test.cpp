@@ -1,6 +1,6 @@
 // The two CRC32C implementations against each other.
 //
-// **The table path is otherwise dead code that ships.** `crc32c` dispatches to the hardware
+// The table path is otherwise dead code that ships. `crc32c` dispatches to the hardware
 // instruction on every machine this is built for and every machine CI runs on, so a coverage run
 // shows the portable half never once executing — while a platform without the instruction depends
 // on it for every block read and every footer. Comparing the two is the only way it is exercised

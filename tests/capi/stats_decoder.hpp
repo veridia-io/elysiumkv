@@ -88,7 +88,7 @@ struct DecodedStats {
         return total;
     }
 
-    /// Records the store physically holds — **an upper bound on distinct live keys**, never an
+    /// Records the store physically holds — an upper bound on distinct live keys, never an
     /// estimate of them. See `LevelStats::entries`.
     uint64_t entry_count() const {
         uint64_t total = memtable_entries - memtable_tombstones;

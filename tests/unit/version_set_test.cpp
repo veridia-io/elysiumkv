@@ -18,7 +18,7 @@ namespace {
 
 using test::TempDir;
 
-/// **Every `VersionSet` here frames its manifest payloads**, through the passthrough, exactly as an
+/// Every `VersionSet` here frames its manifest payloads, through the passthrough, exactly as an
 /// unencrypted store does. There is no unframed mode to fall back to, which is what keeps one
 /// format rather than two.
 const ProviderRegistry& plain_encryption() {
@@ -72,7 +72,7 @@ TEST_F(VersionSetTest, AnEmptyStoreHasNoPointer) {
     EXPECT_TRUE(versions->current()->all_files().empty());
 }
 
-/// **A store that never deletes must not accumulate version slots.** Every install appends a
+/// A store that never deletes must not accumulate version slots. Every install appends a
 /// `weak_ptr`, and the only place that pruned them sat behind an early return taken whenever
 /// nothing is pending — which a flush-only edit always is. A single configured level makes the
 /// picker decline outright, so this is a reachable configuration and not a contrived one.
@@ -204,7 +204,7 @@ TEST_F(VersionSetTest, DeletedFilesAreCollected) {
     EXPECT_EQ(versions->pending_deletions(), 0u);
 }
 
-// ARCHITECTURE.md "The ABI boundary" — **collection is one call for the whole set, not one per file.** Against
+// ARCHITECTURE.md "The ABI boundary" — collection is one call for the whole set, not one per file. Against
 // a remote store the per-file shape was one HTTP round trip each, and a compaction
 // routinely obsoletes dozens of objects at once. The count is what this asserts:
 // the files being deleted was already true when they were deleted one at a time.
@@ -313,20 +313,19 @@ TEST_F(VersionSetTest, AnEditThatCannotBePersistedChangesNothing) {
         << "and the version must still describe what is on disk";
 }
 
-// ARCHITECTURE.md "Ownership is one compare-and-set" — **the fence has to fire on the edit path, not only on a generation
-// roll.** Two writers sharing a catalog collide on an edit address long before
+// ARCHITECTURE.md "Ownership is one compare-and-set" — the fence has to fire on the edit path, not only on a generation
+// roll. Two writers sharing a catalog collide on an edit address long before
 // either rolls, because `next_seq_` advances from the same replayed state in both.
-// That used to surface as `Config`: a fenced writer told it had a configuration
-// problem, with `fenced_` still clear, carrying on with a stale view until its next
-// roll happened to notice.
+// Reporting `Config` there would leave `fenced_` clear, so the writer carries on with a stale
+// view until its next roll happens to notice.
 //
 // An occupied edit address cannot mean anything else. `next_seq_` is engine-owned
 // and monotonic, so this instance has never written where it is about to write.
 // --- a reader against a manifest that moves ------------------------------------
 
-/// Rolls the manifest **behind the reader's back**, at a chosen step of its load. Loading is four
+/// Rolls the manifest behind the reader's back, at a chosen step of its load. Loading is four
 /// round trips and a roll is one compare-and-set, so every one of those gaps is reachable in
-/// production; two of them used to be visible to a perfectly healthy reader.
+/// production.
 ///
 /// The roll is performed by a real `VersionSet` with `edits_per_generation = 1` rather than by
 /// copying the snapshot by hand — a hand-copied one would not have the previous generation's edits
@@ -389,7 +388,7 @@ private:
     When when_;
 };
 
-/// **A roll under a reader is not a damaged store.** The pointer named a generation, the writer
+/// A roll under a reader is not a damaged store. The pointer named a generation, the writer
 /// rolled and deleted it, and the snapshot came back absent — which was reported as `Corrupt`,
 /// sending an operator to a restore for a store with nothing wrong with it.
 TEST_F(VersionSetTest, AGenerationRolledWhileTheSnapshotIsReadIsNotCorruption) {
@@ -410,7 +409,7 @@ TEST_F(VersionSetTest, AGenerationRolledWhileTheSnapshotIsReadIsNotCorruption) {
     EXPECT_GT(reader.current()->file_count(0), 0u) << "and it landed on real content";
 }
 
-/// **The half that was silent.** The snapshot read wins the race and `list_edits` loses; a missing
+/// The half that was silent. The snapshot read wins the race and `list_edits` loses; a missing
 /// generation directory lists as *no edits* rather than as an error, so the snapshot installed with
 /// none of its edits replayed, `recover` returned `Ok`, and the reader's view moved backwards.
 TEST_F(VersionSetTest, AGenerationRolledWhileTheEditsAreListedDoesNotMoveAReaderBackwards) {

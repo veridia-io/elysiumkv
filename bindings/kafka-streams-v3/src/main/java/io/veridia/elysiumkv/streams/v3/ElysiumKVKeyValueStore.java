@@ -33,21 +33,13 @@ import org.apache.kafka.streams.state.KeyValueStore;
 /**
  * A Kafka Streams {@link KeyValueStore} backed by ElysiumKV.
  *
- * <p><b>Phase 1: Streams' fault tolerance is exactly what it was.</b> The changelog is still the
- * source of truth, restore still replays it, and the checkpoint file still says where replay
- * resumes. The only thing that changes is where the bytes live — which is the point, because that
- * is what lets state exceed local disk.
+ * <p>The plain variant. A KTable needs {@link ElysiumKVTimestampedKeyValueStore} instead; the two
+ * differ only by a marker interface, for the reasons given there.
  *
- * <p><b>This is the plain variant.</b> A KTable needs {@link ElysiumKVTimestampedKeyValueStore}
- * instead; the two differ only by a marker interface, for the reasons given there. Which one you
- * get is the supplier's choice, mirroring how Streams splits {@code RocksDBStore} from {@code
- * RocksDBTimestampedStore} rather than making one class serve both.
- *
- * <p><b>What this costs, stated rather than discovered.</b> In {@link StorageMode#REMOTE} a cold
- * read is an object-store GET on the processing path — tens of milliseconds against microseconds
- * locally. It pays off when key access is skewed toward recent data, so migrated files are rarely
- * touched; the cache chain softens repeat reads and does nothing for a genuine first touch. <b>A
- * topology that scans or randomly accesses the whole keyspace will be slower.</b>
+ * <p>In {@link StorageMode#REMOTE} a cold read is an object-store GET on the processing path — tens
+ * of milliseconds against microseconds locally. It pays off when key access is skewed toward recent
+ * data, so migrated files are rarely touched; the cache chain softens repeat reads and does nothing
+ * for a genuine first touch. A topology that scans the whole keyspace will be slower.
  */
 public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
     final String name;
@@ -61,10 +53,9 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
     /**
      * How far this store's contents have advanced through its input topics.
      *
-     * <p><b>Not optional for a store used through the DSL.</b> {@code StateStore.getPosition()} has
-     * a default that throws, and Streams' caching layer calls it on every commit — so a store that
-     * leaves it unimplemented cannot be materialized into a KTable at all. It fails at the first
-     * commit rather than at construction, which is why calling the store directly never revealed it.
+     * <p>Not optional for a store used through the DSL: {@code StateStore.getPosition()} has a
+     * default that throws and Streams' caching layer calls it on every commit, so leaving it
+     * unimplemented fails at the first commit rather than at construction.
      *
      * <p>Tracked from {@code recordMetadata()} rather than through Streams' internal helper, so this
      * adapter depends only on published API.
@@ -253,7 +244,7 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
     }
 
     /**
-     * An <b>upper bound</b> on the number of distinct live keys, not an estimate of them.
+     * An upper bound on the number of distinct live keys, not an estimate of them.
      *
      * <p>Records that compaction has not yet merged are counted, so on an update-heavy workload this
      * can exceed the true count substantially and then fall sharply when compaction catches up —
@@ -274,7 +265,7 @@ public class ElysiumKVKeyValueStore implements KeyValueStore<Bytes, byte[]> {
      * <p>Only {@link KeyQuery} and {@link RangeQuery} are answerable here — the window and versioned
      * queries address stores this is not one of, and are declined as unknown rather than guessed at.
      *
-     * <p><b>Reached only when caching is disabled.</b> {@code CachingKeyValueStore} answers {@code
+     * <p>Reached only when caching is disabled. {@code CachingKeyValueStore} answers {@code
      * KeyQuery} from the cache and never consults the store underneath, so with caching on this code
      * runs for range queries alone. Same shape as {@link #getPosition()}.
      */

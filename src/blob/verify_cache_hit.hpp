@@ -9,7 +9,7 @@
 
 namespace elysiumkv {
 
-/// ARCHITECTURE.md "Invariants and sanitizers" — **a cache that checks itself.** Compiled only under `ELYSIUMKV_PARANOID`,
+/// ARCHITECTURE.md "Invariants and sanitizers" — a cache that checks itself. Compiled only under `ELYSIUMKV_PARANOID`,
 /// which the debug and sanitizer presets set: every cache hit is re-fetched from the
 /// delegate and compared.
 ///
@@ -21,7 +21,7 @@ namespace elysiumkv {
 inline void verify_cache_hit(BlobStore& delegate, const char* layer, std::string_view name,
                             uint64_t offset, size_t len, const Buffer& served) {
     auto truth = delegate.get(name, offset, len).get();
-    // **Cannot verify is not a mismatch.** A cache serving a range while the store below
+    // Cannot verify is not a mismatch. A cache serving a range while the store below
     // is unreachable is the cache doing its job, and the fault-injection suite creates
     // that on purpose. Aborting here would make the checker's own presence turn a
     // deliberately injected failure into a crash.

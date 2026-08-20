@@ -1,14 +1,12 @@
 /* Structure-aware fuzzing of the four decoders (ARCHITECTURE.md "Invariants and sanitizers").
  *
- * **These are the surface a store you did not write reaches.** Every other gate here drives the
- * engine through its own encoders, so it only ever decodes bytes it produced; the kill-point
- * fuzzer explores crash *timing* and the bit-flip case in `sst_test.cpp` explores one byte at a
- * time. Nothing systematically explored malformed input — and a decoder is exactly where a reader
- * meets bytes it has no reason to trust: a rolled-back binary, a partially-written object, a
+ * These are the surface a store you did not write reaches. Every other gate drives the engine
+ * through its own encoders, so it only decodes bytes it produced, and a decoder is exactly where a
+ * reader meets bytes it has no reason to trust: a rolled-back binary, a partially-written object, a
  * bucket somebody else can write to.
  *
- * The contract each target asserts is the same and is deliberately weak: **decode must return,
- * with a status or a value, and must not crash, read out of bounds or allocate without bound.**
+ * The contract each target asserts is the same and is deliberately weak: decode must return,
+ * with a status or a value, and must not crash, read out of bounds or allocate without bound.
  * There is no expectation that malformed bytes are rejected — a CRC that happens to match makes a
  * decode legitimate — only that failing to reject them is not fatal. The sanitizers supply the
  * teeth; this supplies the inputs.

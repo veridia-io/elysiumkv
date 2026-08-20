@@ -20,7 +20,7 @@ public:
     virtual void evict_file(uint64_t file_number) = 0;
     virtual size_t approximate_bytes() const = 0;
 
-    /// ARCHITECTURE.md "A process-wide memory budget" — **the first thing shed when the shared memory budget is exceeded.**
+    /// ARCHITECTURE.md "A process-wide memory budget" — the first thing shed when the shared memory budget is exceeded.
     /// Evicts least-recently-used entries until at least `bytes` have been released, and
     /// returns how many actually were; less than asked means the cache is empty.
     ///
@@ -30,12 +30,10 @@ public:
     /// bytes this process is holding purely as an optimisation.
     virtual size_t evict_at_least(size_t bytes) = 0;
 
-    /// ARCHITECTURE.md "Statistics are a buffer, not a struct" — hit and miss counts, on the interface rather than on one
-    /// implementation. They were previously readable only from the concrete
-    /// sharded LRU, and only when the engine had constructed it itself, so any
-    /// embedder that supplied a cache — every binding does, through the C ABI —
-    /// saw both fields as a permanent zero. A statistic that silently reads zero
-    /// is worse than one that is absent: it answers the question wrongly.
+    /// ARCHITECTURE.md "Statistics are a buffer, not a struct" — hit and miss counts, on the
+    /// interface rather than on one implementation: an embedder that supplies its own cache, as
+    /// every binding does through the C ABI, would otherwise read both fields as a permanent zero,
+    /// which answers the question wrongly rather than not answering it.
     ///
     /// A decorating cache (ARCHITECTURE.md "Caches chain") reports its own layer; the chain is not summed
     /// here, because "the hit rate" of a chain is not a single number.

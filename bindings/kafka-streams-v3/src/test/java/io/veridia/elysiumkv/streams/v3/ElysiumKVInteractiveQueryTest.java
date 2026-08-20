@@ -42,7 +42,7 @@ import org.junit.jupiter.api.io.TempDir;
  * than through the {@code KeyValueStore} methods, and until this was implemented the default
  * reported every query as unsupported.
  *
- * <p><b>Caching is disabled throughout.</b> {@code CachingKeyValueStore} answers {@code KeyQuery}
+ * <p>Caching is disabled throughout. {@code CachingKeyValueStore} answers {@code KeyQuery}
  * out of its cache without consulting the store beneath it, so with caching on these tests would
  * pass no matter what this store did — they would be testing Kafka.
  */
@@ -106,7 +106,7 @@ class ElysiumKVInteractiveQueryTest {
     }
 
     /**
-     * A key that is not there is a <b>successful query with a null result</b>, not a failure. The
+     * A key that is not there is a successful query with a null result, not a failure. The
      * distinction is the caller's to act on: absent and broken deserve different handling, and
      * collapsing them into a failure would make an ordinary miss look like an outage.
      */
@@ -168,7 +168,7 @@ class ElysiumKVInteractiveQueryTest {
     }
 
     /**
-     * <b>A descending range is served, streamed.</b> The engine iterates backwards natively, so the
+     * A descending range is served, streamed. The engine iterates backwards natively, so the
      * result is produced one entry at a time in both directions — a range larger than memory is
      * answerable descending, which is the reason not to fake this by buffering and reversing.
      */
@@ -204,7 +204,7 @@ class ElysiumKVInteractiveQueryTest {
 
     /**
      * A position bound is a freshness demand. Naming an offset the store has not reached must be
-     * <b>refused</b> — serving the older state would answer a question the caller did not ask.
+     * refused — serving the older state would answer a question the caller did not ask.
      */
     @Test
     void aPositionBoundAheadOfTheStoreIsRefused(@TempDir Path dir) {
@@ -279,7 +279,7 @@ class ElysiumKVInteractiveQueryTest {
     }
 
     /**
-     * <b>The same queries against the default, caching-enabled configuration</b> — which is what
+     * The same queries against the default, caching-enabled configuration — which is what
      * {@code Materialized} builds unless told otherwise, and so what most callers will actually be
      * querying. The paths differ: {@code CachingKeyValueStore} answers a {@code KeyQuery} from its
      * cache and only a range query reaches this store. Both must work, and only one of them is
@@ -312,7 +312,7 @@ class ElysiumKVInteractiveQueryTest {
     }
 
     /**
-     * <b>Record timestamps survive.</b> Not an IQv2 concern on its face, but the same cause: a store
+     * Record timestamps survive. Not an IQv2 concern on its face, but the same cause: a store
      * that does not declare {@link org.apache.kafka.streams.state.TimestampedBytesStore} gets an
      * adapter spliced in front of it that drops the timestamp on write and returns {@code -1} on
      * read. Every {@code ValueAndTimestamp} this store produced was therefore stamped {@code -1} —

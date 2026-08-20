@@ -1,4 +1,4 @@
-// ARCHITECTURE.md "A process-wide memory budget" — **the shared budget, and the shedding order that makes it one.**
+// ARCHITECTURE.md "A process-wide memory budget" — the shared budget, and the shedding order that makes it one.
 //
 // Before this, the budget was accounting without control: the block cache reported to it
 // and ignored refusals, the reader cache and the blob cache honoured them, memtable
@@ -27,7 +27,7 @@ namespace test {
 namespace {
 
 
-/// **The largest transient allocation the engine makes was the one the budget could not see.** A
+/// The largest transient allocation the engine makes was the one the budget could not see. A
 /// flush materialises a whole output file before sending it, and a migration reads a whole file in
 /// before writing it out — neither was charged, in a design whose central argument is that
 /// per-instance sizing multiplies by instance count. Two concurrent 400 MiB migrations were
@@ -74,7 +74,7 @@ TEST(MemoryBudgetTest, AWholeFileCopyIsChargedWhileItIsHeld) {
         std::shared_ptr<MemoryBudget> budget_;
     };
 
-    // **Measured on the migration rather than on the flush.** A flush's output is built from the
+    // Measured on the migration rather than on the flush. A flush's output is built from the
     // memtable that produced it, so the arena is charged at the same moment and is the larger of
     // the two — the arena alone satisfies any comparison against the output, and the test cannot
     // tell the charge from its absence. A migration copies a file long after its memtable is gone,
@@ -121,7 +121,7 @@ TEST(MemoryBudgetTest, AWholeFileCopyIsChargedWhileItIsHeld) {
 // of it — and holds them all at once, because the merge interleaves its inputs. That is the largest
 // transient allocation the engine makes and it was invisible to the budget.
 //
-// **Sampled from inside the compaction**, because that is the only moment the windows exist: by the
+// Sampled from inside the compaction, because that is the only moment the windows exist: by the
 // time `stats()` could be called they are gone, and a test that looked afterwards would pass
 // against a charge that was never made.
 TEST(MemoryBudgetTest, CompactionWindowsAreChargedWhileTheMergeHoldsThem) {
@@ -298,7 +298,7 @@ TEST_F(BudgetedDbTest, TheBlockCacheIsShedBeforeAnythingElse) {
     }
 }
 
-/// **A write is never refused because of the budget.** The instance over it is usually
+/// A write is never refused because of the budget. The instance over it is usually
 /// over because of its neighbours, so failing its writes would be both surprising and
 /// useless. `block_on_stall = false` is the one case that reports back, and it reports
 /// `Stalled` — the same thing level pressure reports, retryable and not an error.

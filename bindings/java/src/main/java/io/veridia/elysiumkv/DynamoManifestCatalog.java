@@ -2,7 +2,7 @@ package io.veridia.elysiumkv;
 
 /**
  * The DynamoDB implementation of the {@link ManifestCatalog} seam (ARCHITECTURE.md "Ownership is one compare-and-set"), and
- * <b>the better fit for this workload</b> than object storage: small items,
+ * the better fit for this workload than object storage: small items,
  * conditional writes giving compare-and-swap without an ETag round trip, and
  * single-digit-millisecond commits against roughly 50 ms for S3. Commit latency
  * sits on every flush and every compaction, so that difference is not academic.
@@ -70,7 +70,7 @@ public final class DynamoManifestCatalog extends ManifestCatalog {
         }
 
         /**
-         * Off by default, and <b>should stay off outside tests</b>: a production
+         * Off by default, and should stay off outside tests: a production
          * table belongs to whatever provisions infrastructure, and creating one
          * silently would hide a misconfigured table name behind a working store.
          *

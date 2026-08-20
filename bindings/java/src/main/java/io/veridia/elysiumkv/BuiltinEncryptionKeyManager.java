@@ -3,7 +3,7 @@ package io.veridia.elysiumkv;
 /**
  * A key manager the engine already implements, configured rather than written.
  *
- * <p><b>The alternative to {@link EncryptionKeyManager}, not a kind of it.</b> That interface is a
+ * <p>The alternative to {@link EncryptionKeyManager}, not a kind of it. That interface is a
  * seam you fill; these are native-side, so no per-object call crosses back into the JVM and no key
  * material passes through a Java callback. Where both would do, prefer these: the envelope layout
  * is then produced by one implementation rather than two that must agree byte for byte.

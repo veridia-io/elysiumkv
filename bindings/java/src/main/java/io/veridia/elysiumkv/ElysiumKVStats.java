@@ -8,13 +8,11 @@ import java.util.OptionalLong;
 /**
  * One instant of the engine, decoded from a single native call.
  *
- * <p>That "single" is the point (ARCHITECTURE.md "The ABI boundary"). Assembled from per-field accessors, a
- * snapshot samples a different instant per field, so the compaction counters
- * would not describe the same engine state as the level counts beside them. In
- * one call the cross-field relationships hold — and there is a real one to lean
- * on: every file sits in exactly one level and exactly one tier, so {@link
- * #levelBytesTotal()} and {@link #tierBytesTotal()} are the same number seen
- * along the two axes.
+ * <p>A single call, so that cross-field relationships hold (ARCHITECTURE.md "The ABI boundary"):
+ * per-field accessors would sample a different instant each, leaving the compaction counters
+ * describing a different engine state from the level counts beside them. Every file sits in exactly
+ * one level and exactly one tier, so {@link #levelBytesTotal()} and {@link #tierBytesTotal()} are
+ * the same number along the two axes.
  *
  * <p>The decoder follows the record sizes declared in the buffer rather than the
  * field widths it happens to know, so a library newer than this binding decodes
@@ -104,14 +102,14 @@ public final class ElysiumKVStats {
         }
 
         /**
-         * Requests this tier's authoritative store has served since it was opened. <b>Against
-         * object storage this is the bill</b>, which is per request as much as per byte — and a
+         * Requests this tier's authoritative store has served since it was opened. Against
+         * object storage this is the bill, which is per request as much as per byte — and a
          * cache in front of the tier is not counted here, because its effect is its hit rate.
          *
          * <p>Zero from a native library older than these fields: the record width is in the
          * header, so an older layout is read as a shorter record rather than misparsed.
          *
-         * <p><b>Two tiers naming one store report the same numbers.</b> They belong to the store,
+         * <p>Two tiers naming one store report the same numbers. They belong to the store,
          * not the tier, so summing them across tiers double-counts.
          */
         public long gets() {
@@ -355,7 +353,7 @@ public final class ElysiumKVStats {
     /**
      * Compactions whose input set {@code maxCompactionBytes} cut down, of {@link #compactions()}.
      *
-     * <p><b>The budget biting is a trade, and this is the only way to see it.</b> A trimmed
+     * <p>The budget biting is a trade, and this is the only way to see it. A trimmed
      * compaction leaves files behind at an overlapping level, so that level compacts again sooner:
      * the budget buys a bounded exposure window with write amplification. Near zero means the
      * budget is never reached; near {@code compactions()} means nearly every one is being cut, and
@@ -367,9 +365,9 @@ public final class ElysiumKVStats {
     public long reencryptions() { return reencryptions; }
 
     /**
-     * Files whose recorded encryption provider is <b>not</b> the primary.
+     * Files whose recorded encryption provider is not the primary.
      *
-     * <p><b>Zero is the signal that a key rotation is complete</b> — and therefore the moment the
+     * <p>Zero is the signal that a key rotation is complete — and therefore the moment the
      * previous provider may be unregistered. Non-zero while
      * {@code rewriteToPrimary} is off means a rotation was started and never finished, which is a
      * store still depending on a key someone believes they retired.
@@ -386,9 +384,8 @@ public final class ElysiumKVStats {
      * count substantially and then fall sharply when compaction catches up. It is exact once
      * everything has merged into the bottommost level.
      *
-     * <p>It is deliberately <em>not</em> named {@code approximateNumEntries}: that name belongs to the
-     * Kafka Streams interface, and an adapter can implement it in terms of this without the engine
-     * adopting Streams' accuracy contract.
+     * <p>Not named {@code approximateNumEntries}: that name belongs to the Kafka Streams interface,
+     * whose accuracy contract the engine does not adopt.
      *
      * <p>Costs a {@link ElysiumKV#stats()} call, which is O(files). Fine on a reporting interval,
      * wrong in a per-record path.
@@ -405,10 +402,9 @@ public final class ElysiumKVStats {
      * files, which would advance on a flush to transient storage and so report progress an
      * operator cannot rely on.
      *
-     * <p><strong>This is the numerator of the only margin an operator can act on.</strong> When
-     * migration is failing it stops advancing while the changelog keeps expiring, and the distance
-     * between the log's earliest retained offset and this value is how much recovery capability is
-     * left.
+     * <p>The distance between the log's earliest retained offset and this value is how much
+     * recovery capability is left: when migration is failing this stops advancing while the
+     * changelog keeps expiring.
      *
      * <p>Empty when no watermark has been set. Zero is a valid position, so an exporter must omit
      * the series rather than publish zero. Observational: export it for the retention margin and

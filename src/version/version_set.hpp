@@ -21,13 +21,13 @@ namespace elysiumkv {
 /// library.
 ///
 /// A file is unlinked only when no live `Version` references it and no iterator
-/// holds it — **not** when compaction finishes. The failure this prevents is an
+/// holds it — not when compaction finishes. The failure this prevents is an
 /// iterator reading a file that compaction unlinked mid-scan: silent,
 /// load-dependent, and not reproducible without deliberate effort.
 class VersionSet {
 public:
-    /// Deletes obsolete objects and evicts their blocks, and **returns the ones it
-    /// could not delete** — those stay pending and are retried on the next pass.
+    /// Deletes obsolete objects and evicts their blocks, and returns the ones it
+    /// could not delete — those stay pending and are retried on the next pass.
     /// Supplied by the engine, which owns the stores.
     ///
     /// A batch rather than one call per file: a compaction can obsolete dozens of
@@ -38,12 +38,12 @@ public:
         std::function<std::vector<FileMetadata>(const std::vector<FileMetadata>&)>;
 
     /// `clock` and `obsolete_retention` govern how long a superseded object is kept after nothing
-    /// local references it. **The retention exists for readers in other processes**, which this
+    /// local references it. The retention exists for readers in other processes, which this
     /// collector cannot see: `live_versions_` is a process-local list of weak pointers, so without
     /// a delay a compaction here deletes objects a reader elsewhere is still reading. Zero
     /// retention is today's behaviour and is correct when there are no readers.
     /// `encryption` frames every manifest payload this instance writes and routes every one it
-    /// reads. **The same registry the SST path uses**, so a file and the edit recording it can
+    /// reads. The same registry the SST path uses, so a file and the edit recording it can
     /// never disagree about what a provider id means.
     VersionSet(ManifestCatalog& catalog, int edits_per_generation, DeleteObjects deleter,
                const ProviderRegistry& encryption,
@@ -63,7 +63,7 @@ public:
     /// Whether the manifest has moved on since this instance read it — a rolled generation, or a
     /// newer edit within the current one.
     ///
-    /// **The pointer alone is not enough**, and that is easy to get wrong: the pointer moves only on
+    /// The pointer alone is not enough, and that is easy to get wrong: the pointer moves only on
     /// a generation roll, while a writer obsoletes and collects files on every edit. So this checks
     /// the edit sequence too. Used by a read-only instance to tell "my version is older than the
     /// writer's retention window" from "this object is genuinely lost", which are the same symptom
@@ -82,7 +82,7 @@ public:
 
     /// The current version, by value.
     ///
-    /// **Hold the returned pointer for as long as anything reads into the Version.** A compaction
+    /// Hold the returned pointer for as long as anything reads into the Version. A compaction
     /// or a flush installs a new version at any moment, and the old one is destroyed as soon as its
     /// last owner goes — so `current()->truncation_point()` yields a reference that is dangling by
     /// the next statement, since the temporary owner dies at the semicolon and binding a reference
@@ -95,8 +95,8 @@ public:
 
     /// The installed version's file count at `level`, without taking the version.
     ///
-    /// **For the write path's valve, which asks on every write and needs nothing else from the
-    /// Version.** Taking the version there costs a lock and a refcount — measurably, at roughly a
+    /// For the write path's valve, which asks on every write and needs nothing else from the
+    /// Version. Taking the version there costs a lock and a refcount — measurably, at roughly a
     /// twentieth of a `put` — to read three integers that never change between installs. Published
     /// by `install` itself, so there is no second place that has to remember to update it.
     ///
@@ -115,7 +115,7 @@ public:
 
     /// Raises the counter so it never hands out `number` or anything below it.
     ///
-    /// **This is what lets open stop deleting.** A crash between an SST `put` and the edit
+    /// This is what lets open stop deleting. A crash between an SST `put` and the edit
     /// recording it leaves an object at a number recovery hands straight back out, because
     /// the edit carrying the advanced counter never landed. Stepping over what the stores
     /// already hold makes that residue harmless; the alternative — deleting every
@@ -157,7 +157,7 @@ public:
     /// the interesting property is that this stays bounded on a store that never deletes.
     size_t tracked_versions() const;
 
-    /// The same count, readable **without taking `mutex_`** — which matters because the
+    /// The same count, readable without taking `mutex_` — which matters because the
     /// maintenance coordinator asks every tick and that mutex is held across manifest writes
     /// to remote storage. A hint rather than a value: it may be a moment stale, which is
     /// harmless for a predicate that only decides whether to look.
@@ -172,7 +172,7 @@ public:
 
     /// Rolls to a new generation now, whatever the edit count is.
     ///
-    /// **For finishing an encryption rotation.** Manifest payloads are sealed under whichever
+    /// For finishing an encryption rotation. Manifest payloads are sealed under whichever
     /// provider was primary when they were written, so a store whose *files* have all been
     /// rewritten still cannot open without the retired provider until a fresh snapshot exists
     /// under the new one. Rolling is what writes that snapshot; there is nothing else that would.

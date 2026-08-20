@@ -97,7 +97,7 @@ int main() {
                       std::string(across->begin(), across->end()) == huge.substr((10u << 20) - 8, 16),
                   "a range spanning a part boundary is exact");
 
-            // **Write-once holds for multipart too**, which was verified of the endpoint
+            // Write-once holds for multipart too, which was verified of the endpoint
             // before the path was written: a multipart upload that silently overwrote would
             // break the central guarantee in the one case nobody tests by hand.
             check(m.put("000000000100.sst", Slice::from(huge)).get() == Status::Unusable,

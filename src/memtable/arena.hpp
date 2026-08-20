@@ -19,8 +19,8 @@ class MemoryBudget;
 class Arena {
 public:
     Arena() = default;
-    /// ARCHITECTURE.md "A process-wide memory budget" — **the memtable is the largest consumer, and it was the one that did not
-    /// report.** `memtable_bytes` is per instance, so an embedder running one instance
+    /// ARCHITECTURE.md "A process-wide memory budget" — the memtable is the largest consumer, and it was the one that did not
+    /// report. `memtable_bytes` is per instance, so an embedder running one instance
     /// per shard multiplied it by the shard count while the budget said nothing. Every
     /// block this arena takes is charged here and released when the arena dies, which
     /// for a memtable is after its flush completes.
@@ -29,7 +29,7 @@ public:
     /// engine has already accepted. Declining is the *write path's* job, which is why
     /// ARCHITECTURE.md "A process-wide memory budget" — the shedding order ends in "stall writes" rather than "fail an allocation".
     ///
-    /// **Safe to call at any point, including after allocating**, because it charges what
+    /// Safe to call at any point, including after allocating, because it charges what
     /// is already held. The first version of this required being called before the first
     /// allocation — and the engine promptly broke that rule, since a skip-list allocates
     /// its head node in its constructor. The budget then released one block it had never

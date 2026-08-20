@@ -11,7 +11,7 @@ namespace elysiumkv {
 
 struct KmsOptions {
     /// The KMS key that wraps every data key: an id, an alias or an ARN — whatever
-    /// `GenerateDataKey` accepts. **This is the thing that is rotated**, and rotating it means
+    /// `GenerateDataKey` accepts. This is the thing that is rotated, and rotating it means
     /// naming a new one and letting compaction rewrite files under it; the old one stays
     /// reachable for as long as any file's envelope was wrapped by it.
     std::string key_id;
@@ -33,7 +33,7 @@ struct KmsOptions {
 /// `GenerateDataKey` returns the plaintext key and its wrapped form in one call, which is exactly
 /// the shape `new_data_key` needs — the wrapped form is what lands in the manifest beside the file.
 ///
-/// **Every call is a network round trip.** One per object written, and one per object whenever its
+/// Every call is a network round trip. One per object written, and one per object whenever its
 /// reader is not resident — the reader holds the unwrapped key for as long as the cache keeps it,
 /// which is what makes the per-block case impossible. A reader cache sized well below the working
 /// set turns evictions into KMS traffic.

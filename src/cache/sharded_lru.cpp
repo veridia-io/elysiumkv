@@ -72,15 +72,10 @@ void ShardedLruBlockCache::insert(uint64_t file_number, uint64_t block_offset,
         release = evict_locked(shard, shard_capacity_);
     }
     if (budget_ != nullptr) {
-        // **Charged unconditionally, because the release side is unconditional.** This
-        // used to call `try_acquire`, which declines rather than charging when it would
-        // exceed the total — while eviction below released bytes regardless. Under a
-        // budget small enough to refuse anything, the two sides drifted apart and
-        // `used()` underflowed to near 2^64. It went unnoticed while nothing acted on the
-        // number; the moment the write path started shedding on it, it mattered.
-        //
-        // Unconditional is also the honest shape: the block is already in the cache by
-        // the time this runs, so there is nothing a refusal could undo.
+        // Charged unconditionally, because the release side is unconditional: a charge that could
+        // decline while eviction released regardless would drift, and `used()` would underflow.
+        // The block is also already in the cache by the time this runs, so a refusal could undo
+        // nothing.
         (void)budget_->try_acquire_over(acquire);
         if (release > 0) budget_->release(release);
     }

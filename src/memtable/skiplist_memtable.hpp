@@ -14,8 +14,8 @@ class MemoryBudget;
 
 /// ARCHITECTURE.md "A write" — a concurrent skip list over a bump arena.
 ///
-/// Concurrency contract, and it is exactly the and nothing wider: **one writer**
-/// (the application thread) with **concurrent readers** (the flush thread, plus
+/// Concurrency contract, and it is exactly the and nothing wider: one writer
+/// (the application thread) with concurrent readers (the flush thread, plus
 /// that same application thread). Nodes are spliced in with release stores and
 /// read with acquire loads, so a reader either sees a complete node or does not
 /// see it at all.
@@ -55,7 +55,7 @@ public:
 
     /// When this memtable stopped accepting writes.
     ///
-    /// **An exact upper bound on every write time in it**, and cheaper than one: stamping each
+    /// An exact upper bound on every write time in it, and cheaper than one: stamping each
     /// entry would cost a clock read per `put`, while nothing arrives after the freeze. It is what
     /// a flushed file records as the newest write it holds, which is what an age-based expiry has
     /// to be measured against — the *oldest* write would expire a file still holding fresh data.
@@ -84,7 +84,7 @@ public:
 
     /// Nothing here that a flush would have to write.
     ///
-    /// **A memtable holding only a range delete is not empty**, which is why this exists rather
+    /// A memtable holding only a range delete is not empty, which is why this exists rather
     /// than `num_entries() == 0` at each call site. The tombstone is the content: dropping it as
     /// "nothing to flush" would silently discard the deletion and let every key it covers come back
     /// from the older files it exists to shadow. It is a write in every sense that matters here —
@@ -131,7 +131,7 @@ private:
 
     /// One recorded range, in the arena and never freed.
     ///
-    /// **A linked list rather than a vector, for the same reason the skip list is a skip list**: the
+    /// A linked list rather than a vector, for the same reason the skip list is a skip list: the
     /// contract here is one writer with concurrent lock-free readers, and a vector that reallocates
     /// pulls the ground out from under a reader mid-walk. Pushing at the head is one release store,
     /// the nodes are immutable once published, and the arena outlives every reader of them.

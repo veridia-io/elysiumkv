@@ -1,6 +1,6 @@
 /* Encryption at rest, through the engine rather than through the cipher.
  *
- * **The invariant everything else is in service of is the first test here**: no byte a store holds
+ * The invariant everything else is in service of is the first test here: no byte a store holds
  * is plaintext. Every other property — that reads work, that compaction works, that migration stays
  * a byte-for-byte copy — is a way of showing the engine still functions with the boundary in place.
  * A suite that only checked those would pass against a build that encrypted nothing.
@@ -78,7 +78,7 @@ protected:
     TestStore store_{1};
 };
 
-/// **I1.** The one that matters.
+/// I1. The one that matters.
 TEST_F(EncryptionAtRest, NoStoredByteIsPlaintext) {
     Options options = encrypted_options();
     auto opened = DB::open(options);
@@ -101,7 +101,7 @@ TEST_F(EncryptionAtRest, NoStoredByteIsPlaintext) {
     // The canary substring alone, in case a value were stored split across a boundary.
     EXPECT_EQ(stored.find("PLAINTEXT-CANARY"), std::string::npos);
 
-    // **And the manifest, which is where a key most easily escapes.** Every file record carries its
+    // And the manifest, which is where a key most easily escapes. Every file record carries its
     // file's smallest and largest key, so a manifest in the clear leaks user keys however well the
     // SSTs are sealed. This is the assertion Phase 2 exists for.
     const std::string everything = all_bytes_under(store_.path());
@@ -160,7 +160,7 @@ TEST_F(EncryptionAtRest, TheStoreReopensAndStillReads) {
     }
 }
 
-/// **I6.** Turning encryption on for a populated store leaves the old files plaintext and writes the
+/// I6. Turning encryption on for a populated store leaves the old files plaintext and writes the
 /// new ones encrypted. Both must read, or enabling the feature is a migration rather than a switch.
 TEST_F(EncryptionAtRest, PlaintextAndEncryptedFilesCoexist) {
     {
@@ -204,7 +204,7 @@ TEST_F(EncryptionAtRest, PlaintextAndEncryptedFilesCoexist) {
 /// A file this configuration cannot read is a configuration failure, not damage. The operator's
 /// remedy is to register the provider, and `Corrupt` would send them to a restore instead.
 ///
-/// **The manifest has to stay readable for this to be about the file at all.** So the store is
+/// The manifest has to stay readable for this to be about the file at all. So the store is
 /// reopened with a *different* provider primary and the file's own absent — which is the shape a
 /// half-finished rotation actually has. Dropping the provider entirely is the case below.
 TEST_F(EncryptionAtRest, AFileWhoseProviderIsNotRegisteredIsAConfigurationError) {
@@ -243,7 +243,7 @@ TEST_F(EncryptionAtRest, AFileWhoseProviderIsNotRegisteredIsAConfigurationError)
     EXPECT_TRUE((*reopened)->get(Slice::from(key_at(900))).has_value());
 }
 
-/// **The manifest is encrypted too, so the same mistake is caught a step earlier.** Dropping the
+/// The manifest is encrypted too, so the same mistake is caught a step earlier. Dropping the
 /// provider a store was written with now fails at `open` rather than at whichever read happened to
 /// touch an encrypted file first — and it says which provider is missing.
 TEST_F(EncryptionAtRest, AManifestWhoseProviderIsNotRegisteredRefusesToOpen) {
@@ -266,7 +266,7 @@ TEST_F(EncryptionAtRest, AManifestWhoseProviderIsNotRegisteredRefusesToOpen) {
         << "the failure has to name the provider to register: " << last_error();
 }
 
-/// **A rotation converges only because something drives it.** Changing `primary_provider` governs
+/// A rotation converges only because something drives it. Changing `primary_provider` governs
 /// what is written next; the files already on disk keep the provider they were written under, and
 /// for a cold file compaction may never touch them. That is precisely the file a key rotation was
 /// performed to stop depending on.
@@ -288,7 +288,7 @@ TEST_F(EncryptionAtRest, RewritingToThePrimaryFinishesARotation) {
     rotated.encryption.providers["kms-gcm-2"] = make_test_provider(2);
     rotated.encryption.primary_provider = "kms-gcm-2";
 
-    // **Off first, and this half is the point.** Without the switch a rotation stalls silently:
+    // Off first, and this half is the point. Without the switch a rotation stalls silently:
     // the store reads fine, so nothing complains, and the old key stays load-bearing for ever.
     {
         auto db = std::move(*DB::open(rotated));
@@ -356,7 +356,7 @@ TEST_F(EncryptionAtRest, AConvergedRotationOpensWithoutTheOldProvider) {
     }
 }
 
-/// **I12.** A configuration the engine cannot honour is refused at open, not at first write — and
+/// I12. A configuration the engine cannot honour is refused at open, not at first write — and
 /// each refusal says which one it was, because `Config` alone does not narrow it down at all.
 TEST_F(EncryptionAtRest, AnUnusableConfigurationIsRefusedAtOpen) {
     Options unknown_primary = make_options(store_, Compression::None, 64u << 10);
@@ -395,10 +395,10 @@ TEST_F(EncryptionAtRest, WithoutAProviderFilesRecordTheReservedEmptyId) {
     EXPECT_NE(stored.find(value_at(0)), std::string::npos) << "plaintext, as configured";
 }
 
-/// **I3.** Migration moves an object between tiers without decoding it, and that has to survive
+/// I3. Migration moves an object between tiers without decoding it, and that has to survive
 /// encryption or the cheapest operation in the engine becomes the most expensive.
 ///
-/// It is also the case that nearly broke: a migrated copy is **renumbered**, so authenticating
+/// It is also the case that nearly broke: a migrated copy is renumbered, so authenticating
 /// chunks against the file's current number would leave every migrated file unreadable. The identity
 /// is recorded when the object is first written and travels with it, which is what this pins.
 TEST_F(EncryptionAtRest, MigrationCopiesCiphertextUnchangedAndItStillReads) {
@@ -432,7 +432,7 @@ TEST_F(EncryptionAtRest, MigrationCopiesCiphertextUnchangedAndItStillReads) {
     ASSERT_EQ(db->stats().tiers[0].file_count, 0) << "everything aged off the hot tier";
     ASSERT_GT(db->stats().tiers[1].file_count, 0);
 
-    // **Byte for byte.** Not merely readable afterwards: the same ciphertext, which is what makes
+    // Byte for byte. Not merely readable afterwards: the same ciphertext, which is what makes
     // migration a copy rather than a re-encryption.
     EXPECT_EQ(all_stored_bytes(*tiers.store(1)), before)
         << "migration re-encrypted instead of copying";
@@ -444,7 +444,7 @@ TEST_F(EncryptionAtRest, MigrationCopiesCiphertextUnchangedAndItStillReads) {
     }
 }
 
-/// **The constraint that turned out not to exist.**
+/// The constraint that turned out not to exist.
 ///
 /// A cache rounds a miss out to its own granularity and then serves the exact window asked for out
 /// of what it holds — so a cached range beginning mid-chunk is never handed to the boundary as if it
@@ -497,10 +497,10 @@ private:
     std::shared_ptr<EncryptionProvider> inner_;
 };
 
-/// **I9.** Routing is by the id a file recorded, never by trying a provider and seeing whether it
+/// I9. Routing is by the id a file recorded, never by trying a provider and seeing whether it
 /// worked.
 ///
-/// **Counted rather than inferred from success**, because success does not distinguish the two: a
+/// Counted rather than inferred from success, because success does not distinguish the two: a
 /// trial implementation would ask the wrong provider, fail, fall back, and return the right bytes.
 /// What separates them is whether the wrong provider was asked at all.
 TEST_F(EncryptionAtRest, OnlyTheProviderThatWroteAFileIsAsked) {

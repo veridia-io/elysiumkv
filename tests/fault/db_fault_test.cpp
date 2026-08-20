@@ -290,7 +290,7 @@ TEST_F(DbFaultTest, AnUnreadableStoreFailsOpenRetryably) {
     expect_matches(*db, oracle);
 }
 
-// ARCHITECTURE.md "The ABI boundary" — **obsolete-object collection reaches the store as one bulk call.** The
+// ARCHITECTURE.md "The ABI boundary" — obsolete-object collection reaches the store as one bulk call. The
 // unit test proves the version set batches; this proves the engine's side of it, at
 // the interface an S3 store actually implements. Against a remote store the
 // per-file shape was one HTTP round trip per obsolete object after every
@@ -328,8 +328,8 @@ TEST_F(DbFaultTest, CollectingObsoleteObjectsIsOneBulkCall) {
     expect_matches(*db, oracle);
 }
 
-// ARCHITECTURE.md "The manifest is snapshots plus edits", ARCHITECTURE.md "Open and recovery" — **an orphan from a crashed write must not make the store
-// unwritable**, and two mechanisms together ensure it: open steps the file-number counter over
+// ARCHITECTURE.md "The manifest is snapshots plus edits", ARCHITECTURE.md "Open and recovery" — an orphan from a crashed write must not make the store
+// unwritable, and two mechanisms together ensure it: open steps the file-number counter over
 // what the stores already hold, and a write that still collides renumbers rather than fencing.
 //
 // The hazard is worth spelling out because it is not obvious that anything saves
@@ -339,10 +339,9 @@ TEST_F(DbFaultTest, CollectingObsoleteObjectsIsOneBulkCall) {
 // would put at a name that exists. Write-once refuses that, and the counter would return to
 // the same number on every subsequent open, so the store would be unwritable forever.
 //
-// **Deleting the orphan at open is what this used to rely on, and that is gone** — open destroys
-// nothing, because an unreferenced object is indistinguishable from a concurrent writer's
-// in-flight one. Stepping over it costs nothing and needs no such judgement. The object planted
-// here is exactly what such a crash leaves behind.
+// Open cannot delete the orphan instead: an unreferenced object is indistinguishable from a
+// concurrent writer's in-flight one. Stepping the counter over it needs no such judgement. The
+// object planted here is exactly what such a crash leaves behind.
 TEST_F(DbFaultTest, AnOrphanFromACrashedWriteDoesNotBlockTheNextFlush) {
     Oracle oracle;
     {
@@ -373,10 +372,10 @@ TEST_F(DbFaultTest, AnOrphanFromACrashedWriteDoesNotBlockTheNextFlush) {
     expect_matches(*reopened, oracle);
 }
 
-// ARCHITECTURE.md "Immutable named objects" — **a taken object name is survived by renumbering, not by failing.** The contract says
-// so outright: "a failed `put` must not be retried under the same name — allocate a new file
-// number instead". This used to report `Fenced`, which made a crashed writer's leftover object
-// permanently fatal, since recovery hands its number straight back out.
+// ARCHITECTURE.md "Immutable named objects" — a taken object name is survived by renumbering, not
+// by failing: "a failed `put` must not be retried under the same name — allocate a new file number
+// instead". Reporting `Fenced` there would make a crashed writer's leftover object permanently
+// fatal, since recovery hands its number straight back out.
 //
 // Ownership is arbitrated at the manifest, the only place with a compare-and-swap; see
 // `VersionSetTest`'s two fencing cases and the Java `theSecondWriterFencesTheFirst`.
@@ -404,7 +403,7 @@ TEST_F(DbFaultTest, ATakenSstNameIsSurvivedByRenumbering) {
     EXPECT_GE(names->size(), 3u) << "file 1, the squatter, and the flush's own output";
 }
 
-// **The bug this all exists for.** Open takes no lock and performs no compare-and-set, so it
+// The bug this all exists for. Open takes no lock and performs no compare-and-set, so it
 // cannot know it owns the store — and the version it recovers and the listing it takes are two
 // different points in time, so a file whose edit became durable in between is present in the
 // listing and absent from the version. Deleting it destroyed committed data whenever two
@@ -437,7 +436,7 @@ TEST_F(DbFaultTest, OpenLeavesAnotherWritersObjectsAlone) {
 // Reclamation still exists — it moved. Deleting at open rested on a *single instantaneous*
 // observation, which cannot tell a dead writer's residue from a live writer's just-committed file;
 // the sweep rests on a sustained one. So this asserts the capability, on the trigger it now has.
-/* **A crash between the pointer install and the delete leaks a generation for ever.** Rolling
+/* A crash between the pointer install and the delete leaks a generation for ever. Rolling
  * writes the new snapshot, compare-and-sets the pointer, then deletes the previous generation —
  * and nothing else ever looks at the catalog. The orphan sweep lists blob stores only, so on
  * DynamoDB that is dead items and on S3 dead objects, invisible in `Stats` either way.
@@ -565,8 +564,8 @@ TEST_F(DbFaultTest, OpenStepsTheFileNumberCounterOverExistingObjects) {
     expect_matches(*db, oracle);
 }
 
-// ARCHITECTURE.md "A process-wide memory budget" — **the reader cache is bounded end to end, and correctness does not depend on
-// the bound.** This was the one cache in the engine with neither a limit nor a
+// ARCHITECTURE.md "A process-wide memory budget" — the reader cache is bounded end to end, and correctness does not depend on
+// the bound. This was the one cache in the engine with neither a limit nor a
 // statistic: each reader holds its file's bloom filter, ~1.25 MB at 10 bits per key for
 // a million-entry file, so a store with a thousand files held over a gigabyte
 // unaccounted.
@@ -575,7 +574,7 @@ TEST_F(DbFaultTest, TheReaderCacheIsBoundedAndReadsStayCorrectAcrossEviction) {
     generous.memtable_bytes = 8u << 10;  // many small files, so many readers
     generous.block_bytes = 256;
 
-    // **Measured, not guessed.** The first draft picked an 8 KiB bound and asserted
+    // Measured, not guessed. The first draft picked an 8 KiB bound and asserted
     // that not every reader would fit; every reader fitted, because these files are
     // small. The per-reader cost is a property of the data, so read it off the engine
     // and derive the bound from it.

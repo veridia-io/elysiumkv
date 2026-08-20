@@ -77,8 +77,8 @@ int main() {
               std::memcmp(reopened->data(), first->key.data(), 32) == 0,
           "Decrypt returns exactly the key GenerateDataKey handed out");
 
-    // **The envelope names its own key, so a manager configured for a different one still opens
-    // it.** That is what lets a store keep reading files written before a key rotation.
+    // The envelope names its own key, so a manager configured for a different one still opens
+    // it. That is what lets a store keep reading files written before a key rotation.
     {
         KmsOptions rotated = o;
         rotated.key_id = other_key_id;

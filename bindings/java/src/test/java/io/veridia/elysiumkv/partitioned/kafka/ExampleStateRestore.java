@@ -19,7 +19,7 @@ import java.util.function.Function;
 import java.util.function.IntFunction;
 
 /**
- * Replays a state topic into a partition — <b>a worked example, not shipped API.</b>
+ * Replays a state topic into a partition — a worked example, not shipped API.
  *
  * <p>It lives in test sources deliberately. {@code PartitionedStore} does not own the caller's
  * consumer, its configuration or its lifecycle, and this class does all three: it takes a factory,
@@ -27,20 +27,19 @@ import java.util.function.IntFunction;
  * cancellation, metrics, backpressure, and pause/resume on the main consumer — so shipping it would
  * be offering an abstraction the first serious caller has to replace.
  *
- * <p>What is worth keeping is the arithmetic, which is why the tests next to it exist. Copy it.
+ * <p>What is worth keeping is the arithmetic, which is what the tests beside it pin. Copy it.
  *
- * <p>Three things here are load-bearing and each has been got wrong at least once in this design's
- * history:
+ * <p>Three things here are load-bearing:
  *
  * <ul>
- *   <li><b>The seek is {@code materializedThrough + 1}.</b> The parameter is inclusive — it is the
+ *   <li>The seek is {@code materializedThrough + 1}. The parameter is inclusive — it is the
  *       last position the store already holds — so resuming at it would replay one record twice.
  *       Harmless here because a replayed put is idempotent, but the same off-by-one in the other
  *       direction silently skips a record, and the name is what keeps the two apart.
- *   <li><b>The consumer must be {@code read_committed}</b>, which makes {@code endOffsets} the last
+ *   <li>The consumer must be {@code read_committed}, which makes {@code endOffsets} the last
  *       <em>stable</em> offset. Under {@code read_uncommitted} a replay restores records from an open
  *       or aborted transaction as though they were state.
- *   <li><b>The position travels with each batch.</b> Reporting it only at the end would leave a
+ *   <li>The position travels with each batch. Reporting it only at the end would leave a
  *       restore that dies partway with nothing to show for it, and a cold restore reporting nothing
  *       at all until the first later commit.
  * </ul>

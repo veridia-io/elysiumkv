@@ -18,31 +18,23 @@ int env_int(const char* name, int fallback) {
 /// The full profile is a nightly job; a PR runs a quick one under sanitizers. Both replay
 /// identically from a seed, because both run in `BackgroundMode::Inline`.
 ///
-/// **Many short streams, not a few long ones — and the reason is cost, not only coverage.**
-/// A replay is *superlinear* in stream length: the op mix contains scans, and each scan
-/// compares against an oracle that grows with the stream, so the work per operation rises as
-/// the run goes on. Measured in release on one machine, one seed of `TransientBand`:
+/// Many short streams, not a few long ones. A replay is *superlinear* in stream length — the op
+/// mix contains scans, and each scan compares against an oracle that grows with the stream — so
+/// stream length is the term that cannot be raised freely. Measured in release, one seed of
+/// `TransientBand`:
 ///
 ///     5k ops → 1.1 s     10k → 3.8 s     20k → 11.7 s     60k → 69 s      (≈ n^1.63)
 ///
-/// ARCHITECTURE.md "The differential oracle" asks for "1M-op runs across at least 100 seeds", and that extrapolates to about
-/// **1.9 hours per seed** — 190 hours for one config, and this suite has twelve. It was never
-/// a schedulable amount of work, and the nightly had been timing out against the 600 s
-/// per-test cap rather than running short.
+/// The "1M-op runs across at least 100 seeds" of ARCHITECTURE.md "The differential oracle"
+/// extrapolates to ~1.9 hours per seed, which is 190 hours for one of the twelve configs. The seed
+/// count therefore stays at "at least 100" and the deviation is in stream length alone: 100 seeds
+/// of 5k ops. Seed count is also what produces distinct starting states, where a long stream
+/// re-treads the space its first few thousand operations reached; both engine bugs this suite has
+/// found surfaced inside the first 2,400 operations.
 ///
-/// So the seed count is kept at the "at least 100" and the **deviation is in stream length
-/// alone**: 100 seeds of 5k ops. That is also the better trade for finding things — seed count
-/// is what produces distinct starting states, while a long stream mostly re-treads the state
-/// space its first few thousand operations already reached. Short streams shrink better too,
-/// and shrinking is what makes a failing seed debuggable. Both engine bugs this suite has found
-/// surfaced inside the first 2,400 operations of a 3,000-op stream.
-///
-/// **Size against the most expensive config, not the cheapest.** Per seed at 10k ops in
-/// release, `TransientBand` costs 3.8 s and `CachedTightBudget` 10 s — a cache chain whose
-/// every hit is re-read for verification, plus budget shedding, plus the continuous invariant
-/// checks. Sizing off the cheap one put five configs over the 600 s cap on the first attempt.
-/// At 5k ops the heaviest is ~3 s per seed, so ~5 minutes per config here and roughly a quarter
-/// hour on a slower runner.
+/// The sizing is against the most expensive config, not the cheapest: at 10k ops `TransientBand`
+/// costs 3.8 s per seed and `CachedTightBudget` 10 s, whose cache chain re-reads every hit for
+/// verification. At 5k ops the heaviest is ~3 s per seed, so ~5 minutes per config.
 ///
 /// Override with ELYSIUMKV_DIFF_SEEDS / ELYSIUMKV_DIFF_OPS to go deeper deliberately.
 bool full_profile() { return std::getenv("ELYSIUMKV_DIFF_FULL") != nullptr; }
@@ -95,7 +87,7 @@ TEST_P(DifferentialTest, MatchesTheOracle) {
     }
 }
 
-// **Designated initializers, deliberately.** `ReplayConfig` is a plain aggregate and this
+// Designated initializers, deliberately. `ReplayConfig` is a plain aggregate and this
 // list was written positionally; inserting a field in the middle of the struct then
 // silently repurposed two configs — `cached` landed where `threaded` had been, so two cases
 // that claimed to test the cache chain ran threaded and uncached instead, in the suite that
@@ -118,8 +110,8 @@ INSTANTIATE_TEST_SUITE_P(
         // runs throughout. The oracle is unchanged by it: which files a compaction takes is a
         // scheduling decision, and every answer must be identical to the same stream without it.
         //
-        // **The budget is sized against the files this config actually produces, and that is the
-        // whole point.** It was 48 KiB, chosen against the 32 KiB memtable — but Zstd over 40
+        // The budget is sized against the files this config actually produces, and that is the
+        // whole point. It was 48 KiB, chosen against the 32 KiB memtable — but Zstd over 40
         // distinct keys makes an L0 file about 1.4 KB, so the closure of five came to ~7 KB and
         // the trim never once ran. The config named for the trim path never reached it, and a
         // reordering bug in that path went out and had to be found by hand. 4 KiB against a ~1.4 KB
@@ -158,8 +150,8 @@ INSTANTIATE_TEST_SUITE_P(
         // found a committed write reverting to its previous value
         // (`compact_l0_file_off_its_tier` choosing by write time rather than by file number).
         //
-        // **That bug was in the L0-off-tier compaction, not in the migrator, and for a long time
-        // the migrator was the half this never reached.** The name promised migration; the counter
+        // That bug was in the L0-off-tier compaction, not in the migrator, and for a long time
+        // the migrator was the half this never reached. The name promised migration; the counter
         // said zero. The cause is worth writing down because it is not a tuning slip: a compaction
         // output is placed by the age of the *oldest* write it contains, and an output that merges
         // an existing L1 file inherits that file's age. Past the first few seconds of any run,
@@ -267,7 +259,7 @@ TEST(ThreadedDifferentialTest, MatchesTheOracleWithThreadsRunning) {
                      .memtable_bytes = 64u << 10,
                      .cached = true,
                      .threaded = true},
-        // ARCHITECTURE.md "A process-wide memory budget" — **the budget's stall loop is threaded-only code.** In inline mode the
+        // ARCHITECTURE.md "A process-wide memory budget" — the budget's stall loop is threaded-only code. In inline mode the
         // writer performs the compaction itself and returns early, so the "wait only while
         // the overage is shrinking" loop never runs there. Its entire exercise until now
         // was one Java test, which hung on the first attempt at it; nothing ran it under
@@ -303,7 +295,7 @@ TEST(ThreadedDifferentialTest, MatchesTheOracleWithThreadsRunning) {
     }
 }
 
-/// ARCHITECTURE.md "Fault injection" — **non-overlap safety.** Once a tombstone is dropped at a level that
+/// ARCHITECTURE.md "Fault injection" — non-overlap safety. Once a tombstone is dropped at a level that
 /// was bottommost for its range, no later compaction may place an older value
 /// for that key beneath it. The argument is that levels below L0 hold each key
 /// in at most one file, so a surviving older value would itself make a deeper

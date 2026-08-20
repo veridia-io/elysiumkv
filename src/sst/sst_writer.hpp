@@ -31,7 +31,7 @@ struct SstBuildResult {
     std::string smallest_key;
     std::string largest_key;
     uint64_t num_range_tombstones = 0;
-    /// The span the file's range tombstones cover, which is **not** bounded by `smallest_key` and
+    /// The span the file's range tombstones cover, which is not bounded by `smallest_key` and
     /// `largest_key`: a file can delete a range it holds no keys in at all, and a reader that
     /// consulted only the data span would walk straight past the tombstone that answers its query.
     std::string smallest_range_key;

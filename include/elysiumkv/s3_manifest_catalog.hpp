@@ -10,13 +10,13 @@
 namespace elysiumkv {
 
 /// ARCHITECTURE.md "Ownership is one compare-and-set" — a `ManifestCatalog` on S3. Generation objects live under a prefix; the
-/// pointer is a small object whose **ETag is the token**.
+/// pointer is a small object whose ETag is the token.
 ///
 /// Using the ETag is what makes the CAS free: `compare_and_set` becomes a single
 /// conditional `PutObject`, with no read-modify-write and no round trip to
 /// discover the current version.
 ///
-/// **Commit latency lands on every flush and every compaction**, and S3 pays
+/// Commit latency lands on every flush and every compaction, and S3 pays
 /// roughly 50 ms for it against single-digit milliseconds for DynamoDB. If commit
 /// latency matters more than having one fewer service, prefer
 /// `DynamoManifestCatalog`; this exists so an S3-only deployment is possible at

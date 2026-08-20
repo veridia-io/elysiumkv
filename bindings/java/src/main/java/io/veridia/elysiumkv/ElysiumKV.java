@@ -28,12 +28,12 @@ import java.util.Set;
  * }
  * }</pre>
  *
- * <p><b>Absence is null, never an exception.</b> Every other failure throws, and
- * the type says whether retrying makes sense — see {@link ElysiumKVException}. The
- * distinction is the ABI's first rule (ARCHITECTURE.md "The ABI boundary"): folding an unreachable store into
- * "no such key" turns an outage into apparent data loss.
+ * <p>Absence is null, never an exception. Every other failure throws, and the exception type says
+ * whether retrying makes sense — see {@link ElysiumKVException}. Folding an unreachable store into
+ * "no such key" would turn an outage into apparent data loss
+ * (ARCHITECTURE.md "The ABI boundary").
  *
- * <p><b>Single-writer.</b> The engine serialises writes internally, but handles
+ * <p>Single-writer. The engine serialises writes internally, but handles
  * — iterators and pins especially — belong to one thread. {@link
  * ElysiumKVOptions#paranoidChecks(boolean)} turns that from documentation into an
  * exception.
@@ -60,16 +60,12 @@ public final class ElysiumKV implements ReadOnlyStore {
 
     /**
      * Whether this native library contains the S3 and DynamoDB implementations —
-     * {@link S3BlobStore}, {@link S3ManifestCatalog}, {@link
-     * DynamoManifestCatalog}. They are an optional component, because the AWS SDK
-     * is by far the heaviest dependency in the native build and an embedder with
-     * no remote tier should not pay for it.
+     * {@link S3BlobStore}, {@link S3ManifestCatalog}, {@link DynamoManifestCatalog}. They are an
+     * optional component of the native build, since the AWS SDK is its heaviest dependency.
      *
-     * <p><b>They are always bound, present or not</b>, and fail with a {@link
-     * ConfigException} naming the missing build option when absent. Making them
-     * vanish instead would mean this class failed to <em>load</em> rather than
-     * failing to find a feature — the ABI's shape must not depend on how it was
-     * compiled.
+     * <p>They are always bound, present or not, and throw {@link ConfigException} naming the
+     * missing build option when absent: the ABI's shape must not depend on how it was compiled, or
+     * a missing feature would surface as this class failing to <em>load</em>.
      */
     public static boolean hasAwsSupport() {
         Native.ensureLoaded();
@@ -126,7 +122,7 @@ public final class ElysiumKV implements ReadOnlyStore {
 
     /**
      * Zero-copy lookup. Returns null if the key is absent — and only then.
-     * <b>Close the result</b>; a leaked pin holds a block-cache entry forever.
+     * Close the result; a leaked pin holds a block-cache entry forever.
      */
     @Override
     public Pinned get(byte[] key) {
@@ -210,7 +206,7 @@ public final class ElysiumKV implements ReadOnlyStore {
     /**
      * Drops every key below {@code key} in one manifest edit, rather than one tombstone per key.
      *
-     * <p><b>Monotone.</b> A call at or below the current point is a no-op, so this is safe to drive
+     * <p>Monotone. A call at or below the current point is a no-op, so this is safe to drive
      * from a loop that does not track what it already asked for. There is no un-truncate.
      *
      * <p>Visibility changes at once; space returns over time. An open iterator is unaffected — it
@@ -229,32 +225,28 @@ public final class ElysiumKV implements ReadOnlyStore {
      * {@code upper} is not, the same convention the iterators use. An empty or inverted range
      * deletes nothing and is not an error, exactly as an iterator over those bounds yields nothing.
      *
-     * <p><b>Not permanent, and not as cheap as a truncation.</b> The range may be written to again
-     * immediately and a later write wins. A truncation moves one value in the manifest; this writes
-     * a tombstone that reads in the range consult until compaction resolves it. Space returns as
-     * the covered files are rewritten, or at once for a file the range covers whole.
+     * <p>Not permanent, and not as cheap as a truncation: the range may be written to again
+     * immediately, and where a truncation moves one value in the manifest this writes a tombstone
+     * that reads in the range consult until compaction resolves it. Space returns as the covered
+     * files are rewritten, or at once for a file the range covers whole.
      */
     public void deleteRange(byte[] lower, byte[] upper) {
         Native.deleteRange(handle(), lower, upper);
     }
 
     /**
-     * Whether a {@link #deleteRange} has finished travelling through the tree: <b>no file at any
-     * level still holds data in the band.</b>
+     * Whether a {@link #deleteRange} has finished travelling through the tree: no file at any
+     * level still holds data in the band.
      *
-     * <p>Deletion in an LSM is a promise about the future — the tombstone is recorded now and the
-     * bytes go when compaction reaches them — so "has it actually gone?" usually has no answer.
-     * Here it does, from the manifest alone and with no reads.
+     * <p>Answered from the manifest alone, with no reads.
      *
-     * <p><b>Conservative.</b> A recorded key range is a hull, so a file can overlap the band while
-     * holding no key in it: {@code false} means "possibly still present" and carries no
-     * information, while {@code true} means every file that could have held one is gone. That is
-     * the direction that matters — an auditor accepts a receipt, not an absence of evidence.
+     * <p>Conservative: a recorded key range is a hull, so a file can overlap the band while holding
+     * no key in it. {@code true} means every file that could have held one is gone; {@code false}
+     * carries no information.
      *
-     * <p>A band hidden by {@link #truncateBelow} is <b>not</b> erased: the objects are there until
-     * the reclaim collects them, and unreadable is not the same as gone. And because it answers
-     * about files, a write made into the band after the deletion is a new write rather than a
-     * survival, and sits in the memtable until it is flushed.
+     * <p>A band hidden by {@link #truncateBelow} is not erased — the objects remain until the
+     * reclaim collects them. Because it answers about files, a write into the band after the
+     * deletion is a new write and sits in the memtable until flushed.
      */
     @Override
     public boolean rangeIsErased(byte[] lower, byte[] upper) {
@@ -420,15 +412,13 @@ public final class ElysiumKV implements ReadOnlyStore {
     /**
      * Closes, releasing any pin still held and detaching any live iterator.
      *
-     * <p>With {@link ElysiumKVOptions#paranoidChecks(boolean)} on, leaving either
-     * outstanding throws: a leaked pin is a block-cache entry that can never be
-     * evicted, which is a bug worth failing a test over rather than a tidiness
-     * complaint. Without it, closing simply cleans up.
+     * <p>With {@link ElysiumKVOptions#paranoidChecks(boolean)} on, leaving either outstanding
+     * throws — a leaked pin is a block-cache entry that can never be evicted. Without it, closing
+     * simply cleans up.
      *
-     * <p><b>Closing also attempts a flush.</b> There is no write-ahead log, so a memtable dropped
-     * on a clean shutdown is lost for no reason at all. The attempt is best-effort and a failure is
-     * not reported here — {@link #flush()} is still the only way to know — and
-     * {@link #closeWithoutFlush()} skips it.
+     * <p>Closing also attempts a flush, since there is no write-ahead log. The attempt is
+     * best-effort and a failure is not reported here — {@link #flush()} is the only way to know —
+     * and {@link #closeWithoutFlush()} skips it.
      */
     @Override
     public void close() {

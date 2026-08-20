@@ -71,7 +71,7 @@ void SstWriter::add_range_tombstone(Slice lower, Slice upper) {
     // tombstones get the same framing, checksum, compression and prefix compression as everything
     // else, and `seek_for_prev` answers "which tombstone covers this key" without a scan.
     //
-    // **`Put`, not `Delete`**, even though every entry here is a deletion: the type byte says
+    // `Put`, not `Delete`, even though every entry here is a deletion: the type byte says
     // whether the entry carries a value, and `BlockBuilder` drops the value of a `Delete` on the
     // floor. The upper bound *is* the value, so a tombstone written as a `Delete` would lose the
     // half of itself that says where it ends. What makes these deletions is the block they are in.
@@ -122,7 +122,7 @@ Result<SstBuildResult> SstWriter::finish() {
         footer.range_del.length = static_cast<uint32_t>(file_.size() - footer.range_del.offset);
     }
 
-    // **Every file, not only the ones that need a new field.** `range_del` is per file because a
+    // Every file, not only the ones that need a new field. `range_del` is per file because a
     // reader that cannot honour a range tombstone must refuse exactly the files carrying one; a
     // checksum is not like that — one written only sometimes leaves most files unprotected.
     footer.format_version = Footer::kFormatVersion3;

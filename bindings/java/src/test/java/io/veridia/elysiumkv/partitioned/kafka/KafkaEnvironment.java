@@ -17,14 +17,11 @@ import org.testcontainers.kafka.KafkaContainer;
 /**
  * One broker for the whole suite, and the topics the tests need.
  *
- * <p><b>Why a real broker at all</b>, when the differential suite already drives the protocol
- * against {@code InMemoryLog}: the thing a fake log cannot supply is Kafka's own semantics. A
- * transaction that aborts leaves records physically present in the partition that a
- * {@code read_committed} consumer must not see; the last stable offset is not the log end;
- * offsets are assigned by the broker rather than by a counter the test controls; and a producer
- * is fenced by another producer taking its {@code transactional.id}, not by a flag someone sets.
- * Those are the paths where {@code PartitionedStore}'s outcome handling either matches reality or
- * does not.
+ * <p>A real broker rather than {@code InMemoryLog}, because a fake log cannot supply Kafka's own
+ * semantics: a transaction that aborts leaves records physically present that a
+ * {@code read_committed} consumer must not see, the last stable offset is not the log end, offsets
+ * are assigned by the broker rather than by a counter the test controls, and a producer is fenced
+ * by another taking its {@code transactional.id} rather than by a flag someone sets.
  *
  * <p>The image tracks {@code kafka.version} in the pom. KRaft, so no ZooKeeper, and the
  * transaction-state topic is forced to a single replica because a one-broker cluster cannot

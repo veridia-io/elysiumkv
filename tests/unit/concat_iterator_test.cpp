@@ -3,7 +3,7 @@
 // creates: crossing a file boundary mid-scan, landing in the gap between two files, and turning up
 // nothing where the level holds nothing.
 //
-// **A level with only one file exercises none of it**, which is what the default test
+// A level with only one file exercises none of it, which is what the default test
 // configurations produce — so every case here forces several.
 
 #include "db/db_impl.hpp"
@@ -138,8 +138,8 @@ TEST_F(ConcatIteration, AReverseBoundedScanStartsBelowTheBound) {
     EXPECT_EQ(seen.back(), key_at(400));
 }
 
-// A range delete spanning many files of a level still reads correctly. **This does not test the
-// gate**: a level carrying range tombstones is presented file by file rather than collapsed, and
+// A range delete spanning many files of a level still reads correctly. This does not test the
+// gate: a level carrying range tombstones is presented file by file rather than collapsed, and
 // removing that check leaves this case passing — because the compaction that wrote the tombstone
 // also dropped the entries it covered, so nothing was left needing to be shadowed at read time. The
 // gate guards the case where it was not, which no test here can construct.

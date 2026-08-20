@@ -31,8 +31,8 @@ struct DynamoOptions {
     bool create_table_if_missing = false;
 };
 
-/// ARCHITECTURE.md "Ownership is one compare-and-set" — a `ManifestCatalog` on DynamoDB, and **the better fit for this
-/// workload** than object storage: small items, conditional writes giving CAS
+/// ARCHITECTURE.md "Ownership is one compare-and-set" — a `ManifestCatalog` on DynamoDB, and the better fit for this
+/// workload than object storage: small items, conditional writes giving CAS
 /// without an ETag round trip, and single-digit-millisecond commits against
 /// roughly 50 ms for S3. Commit latency lands on every flush and every
 /// compaction, so that difference is not academic.
@@ -59,7 +59,7 @@ public:
     std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override;
     std::future<Status> delete_generation(uint64_t generation) override;
 
-    // **`list_generations` is deliberately not overridden here.** The sort key is
+    // `list_generations` is deliberately not overridden here. The sort key is
     // `gen#{generation}#edit#{seq}`, so the generation varies in the middle and no prefix query
     // selects snapshots alone — enumerating would read every edit item, up to
     // `manifest_edits_per_generation` of them per generation, and DynamoDB charges for items read

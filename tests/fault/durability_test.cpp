@@ -88,12 +88,12 @@ protected:
 
 // --- what a clean shutdown saves, and what it does not ------------------------
 
-/* **A clean shutdown flushes.** There is no write-ahead log, so a memtable dropped at destruction
+/* A clean shutdown flushes. There is no write-ahead log, so a memtable dropped at destruction
  * is lost — and on a *clean* close that is a loss for no reason at all, since the process had every
  * opportunity to write it. RocksDB, which Kafka Streams runs with its WAL disabled, does the same
  * thing for the same reason: `avoid_flush_during_shutdown` defaults to false.
  *
- * **The attempt promises nothing**, which is why this asserts the outcome rather than a status: a
+ * The attempt promises nothing, which is why this asserts the outcome rather than a status: a
  * destructor has nowhere to report a failed flush to, and a durability guarantee nobody can check
  * would be worse than no guarantee. `flush()` remains the only way to know.
  */
@@ -171,7 +171,7 @@ TEST_F(DurabilityTest, AMissingFileOnADurableStoreIsCorruption) {
     EXPECT_EQ(opened.error(), Status::Corrupt);
 }
 
-// ARCHITECTURE.md "Open and recovery" — missing from a Transient store drops **every** file on that store, not
+// ARCHITECTURE.md "Open and recovery" — missing from a Transient store drops every file on that store, not
 // just the missing one — a partially-populated transient level is the
 // resurrection hazard in its least tractable form.
 TEST_F(DurabilityTest, LosingATransientStoreDiscardsEveryLevelOnIt) {
@@ -207,10 +207,10 @@ TEST_F(DurabilityTest, LosingATransientStoreDiscardsEveryLevelOnIt) {
     EXPECT_FALSE(db->stats().requires_recovery);
 }
 
-// ARCHITECTURE.md "A tier is not a level" — **the case the whole design exists to make safe.** A discard does not
+// ARCHITECTURE.md "A tier is not a level" — the case the whole design exists to make safe. A discard does not
 // merely lose recent writes: it resurrects stale ones, and a stale value is
 // indistinguishable from a valid one.
-/* **The default polarity: a discarded store refuses reads until the gap is replayed.**
+/* The default polarity: a discarded store refuses reads until the gap is replayed.
  *
  * `DiscardResurrectsStaleValuesAndSaysSo` below is what happens when that is turned off, and is
  * the reason it is off: what survives a discard is *wrong* rather than merely incomplete, and
@@ -231,7 +231,7 @@ TEST_F(DurabilityTest, ReadsAreRefusedUntilTheReplayIsMarkedComplete) {
     now_ += 200'000;
     ASSERT_EQ(engine.compact_until_quiet(), Status::Ok);
 
-    // **Roll the memtable past the clock jump first.** A file's placement reads the memtable's
+    // Roll the memtable past the clock jump first. A file's placement reads the memtable's
     // creation time, so one that predates the advance flushes straight past the transient tier onto
     // the durable one — and the wipe below would then take nothing.
     ASSERT_EQ(db->put(Slice::from(std::string("zzz-warmup")), Slice::from("x")), Status::Ok);
@@ -261,7 +261,7 @@ TEST_F(DurabilityTest, ReadsAreRefusedUntilTheReplayIsMarkedComplete) {
     EXPECT_FALSE(it->next());
     EXPECT_EQ(it->status(), Status::RecoveryRequired);
 
-    // **Writes are not refused**, or the condition could never be discharged.
+    // Writes are not refused, or the condition could never be discharged.
     ASSERT_EQ(reopened->put(Slice::from(key_at(0)), Slice::from("v2")), Status::Ok);
     ASSERT_EQ(reopened->remove(Slice::from(key_at(99))), Status::Ok);
     EXPECT_EQ(reopened->get(Slice::from(key_at(0))).error(), Status::RecoveryRequired)
@@ -279,7 +279,7 @@ TEST_F(DurabilityTest, ReadsAreRefusedUntilTheReplayIsMarkedComplete) {
 
 TEST_F(DurabilityTest, DiscardResurrectsStaleValuesAndSaysSo) {
     Options options = transient_options();
-    // **The resurrection is only observable with this on**, which is the whole point of the
+    // The resurrection is only observable with this on, which is the whole point of the
     // default being off: reads are refused until the replay finishes, so an embedder that never
     // read the documentation cannot serve an older value as current. The case below is what it is
     // opting into.
@@ -368,7 +368,7 @@ TEST_F(DurabilityTest, DiscardResurrectsStaleValuesAndSaysSo) {
     EXPECT_FALSE(reopened->stats().requires_recovery);
 }
 
-// ARCHITECTURE.md "Open and recovery" — **where a bug silently destroys intact data.** A store that fails to
+// ARCHITECTURE.md "Open and recovery" — where a bug silently destroys intact data. A store that fails to
 // answer has not lost anything: open must fail retryably, with no discard and no
 // manifest write.
 TEST_F(DurabilityTest, AnUnreachableStoreIsNotALostStore) {
@@ -436,7 +436,7 @@ TEST_F(DurabilityTest, AMissingRootIsNotAbsence) {
 
 // ARCHITECTURE.md "Open and recovery" — objects no version references are the residue of work that died before
 // its edit was durable. Open collects them.
-// ARCHITECTURE.md "Immutable named objects" — reclamation happens on the **sweep**, not at open: open
+// ARCHITECTURE.md "Immutable named objects" — reclamation happens on the sweep, not at open: open
 // cannot tell a dead writer's residue from a live writer's committed file, having taken no lock and
 // performed no compare-and-set, and no default fixes an observation that weak. The engine does not
 // need the deletion either — a stale file number is stepped over at open — so this tests a

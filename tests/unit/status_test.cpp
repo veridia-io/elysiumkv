@@ -7,7 +7,7 @@
 namespace elysiumkv {
 namespace {
 
-/// **Every enumerator, and adding one here is not optional.** `status_name` has a `switch` with no
+/// Every enumerator, and adding one here is not optional. `status_name` has a `switch` with no
 /// default, so a new status compiles — the switch falls through and returns "unknown" — and every
 /// property below is then simply never asked of it. Keep this list exhaustive.
 constexpr Status kAll[] = {

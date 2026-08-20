@@ -104,7 +104,7 @@ class ElysiumKVSessionTopologyTest {
     }
 
     /**
-     * <b>The merge.</b> A record arriving between two sessions closes the gap, and Streams asks the
+     * The merge. A record arriving between two sessions closes the gap, and Streams asks the
      * store to remove both and write one spanning them. A store whose removes miss leaves the
      * originals behind — visible here as three sessions instead of one.
      */

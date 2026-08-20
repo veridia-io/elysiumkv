@@ -36,7 +36,7 @@ private:
     EVP_CIPHER_CTX* ctx_;
 };
 
-/// **The nonce is the chunk index, and that is safe only because the key is per object.** With a
+/// The nonce is the chunk index, and that is safe only because the key is per object. With a
 /// key used for one object, every chunk index appears at most once under it — objects are
 /// write-once and file numbers are never reused, so there is no second encryption to collide with.
 /// The high four bytes carry a per-object random salt so that two objects never share a nonce
@@ -151,7 +151,7 @@ public:
             return Status::Io;
         }
 
-        // **The whole point of the suite.** A failure here means the bytes are not what was
+        // The whole point of the suite. A failure here means the bytes are not what was
         // written: a wrong key, a damaged chunk, or a chunk moved from somewhere else. The
         // plaintext produced above is discarded rather than returned, because unauthenticated
         // plaintext is exactly what an AEAD exists to refuse.
@@ -205,7 +205,7 @@ struct Aes256GcmEncryptionProvider::Impl {
         if (!key) return std::unexpected(key.error());
         if (key->size() != kKeyBytes) return std::unexpected(Status::Corrupt);
 
-        // **The recorded chunk size wins over the configured one.** Reading a file with a different
+        // The recorded chunk size wins over the configured one. Reading a file with a different
         // chunk size than it was written with produces garbage at every boundary, so configuration
         // must not be able to reinterpret an existing object.
         return std::shared_ptr<ObjectCipher>(std::make_shared<GcmCipher>(

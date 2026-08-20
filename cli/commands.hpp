@@ -10,7 +10,7 @@ namespace elysiumkv::cli {
 
 /// Reports and exits.
 ///
-/// CLI11's `RuntimeError` carries a message that `App::exit` deliberately does **not** print — it
+/// CLI11's `RuntimeError` carries a message that `App::exit` deliberately does not print — it
 /// assumes whoever threw it has already said something. Throwing one directly therefore produces a
 /// bare non-zero exit and no explanation, which is the worst possible failure for a tool reached
 /// for when something is already wrong. This is the only way a command should fail.

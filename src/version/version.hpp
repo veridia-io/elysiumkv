@@ -41,7 +41,7 @@ public:
 
     /// Whether any file at this level carries range tombstones.
     ///
-    /// **What it licenses is a binary search on the read path.** Below L0 the *data* spans are
+    /// What it licenses is a binary search on the read path. Below L0 the *data* spans are
     /// disjoint and sorted, so at most one file can hold a key — but a range tombstone span is
     /// neither bounded by its file's data span nor disjoint from its neighbours', so a file whose
     /// keys are elsewhere can still be the one that answers. When no file here carries any, that
@@ -66,8 +66,8 @@ public:
     /// started — the same rule that keeps its files alive.
     const std::string& truncation_point() const { return truncation_point_; }
 
-    /// **How far this store can still certify its embedder's log, when the files alone would
-    /// over-report it.**
+    /// How far this store can still certify its embedder's log, when the files alone would
+    /// over-report it.
     ///
     /// Recovery normally answers that from the files: with nothing discarded, `max(high)` over
     /// them is the newest established watermark and every write below it is still in some file.
@@ -88,12 +88,12 @@ public:
     /// Files no surviving key can be read from: reclaimable whole, with no rewrite.
     std::vector<FileMetadata> files_entirely_truncated() const;
 
-    /// A file that a **newer** file's range tombstones may cover completely, paired with the file
+    /// A file that a newer file's range tombstones may cover completely, paired with the file
     /// whose tombstones might do it.
     struct RangeDropCandidate {
         FileMetadata file;
         FileMetadata cover;
-        /// The cover carries exactly one range, so the span the manifest records **is** that range
+        /// The cover carries exactly one range, so the span the manifest records is that range
         /// and no further check is needed. With two or more that span is a hull with gaps in it,
         /// and a hull can show a file is *not* covered but never that it is — so the tombstones
         /// themselves have to be read, which a `Version` cannot do.
@@ -105,18 +105,18 @@ public:
     /// than merely expressible, and it is `files_entirely_truncated` generalised from a floor to a
     /// range.
     ///
-    /// **A shortlist, not an answer.** Every candidate here is soundly rejected-or-admitted by the
+    /// A shortlist, not an answer. Every candidate here is soundly rejected-or-admitted by the
     /// manifest alone, so a caller that reads nothing may act on the `exact` ones and drop the rest;
     /// a caller with store access settles the rest by reading one block per cover.
     std::vector<RangeDropCandidate> range_drop_candidates() const;
 
-    /// Files whose **newest** write is at or before `cutoff` and which can therefore be unlinked
+    /// Files whose newest write is at or before `cutoff` and which can therefore be unlinked
     /// whole. See `Options::ttl` for what this does and does not promise.
     std::vector<FileMetadata> files_expired_before(uint64_t cutoff) const;
 
 private:
     /// Whether any file older than `file` — a deeper level, or the same level and a lower number —
-    /// overlaps its key range. **The soundness condition for dropping a file by age**: remove one
+    /// overlaps its key range. The soundness condition for dropping a file by age: remove one
     /// that shadows an older version of the same key and the older version comes back, which is a
     /// resurrection rather than an expiry.
     bool older_file_overlaps(const FileMetadata& file) const;
@@ -128,31 +128,31 @@ public:
     /// Oldest write held anywhere at this level, or 0 when the level is empty.
     uint64_t oldest_write_time_ms(int level) const;
 
-    /// Files whose `[smallest, largest]` intersects the **half-open** interval
+    /// Files whose `[smallest, largest]` intersects the half-open interval
     /// `[lower, upper)`; an empty `upper` means "to the end of the keyspace".
     /// This is the *read* shape — ARCHITECTURE.md "Absence is an answer, not an error" makes iterator bounds half-open.
     std::vector<FileMetadata> overlapping_half_open(int level, Slice lower, Slice upper) const;
 
     /// The same set as `overlapping_half_open`, as a `[begin, end)` index range into
-    /// `files_at(level)` — **for a level whose files are sorted and disjoint and which carries no
-    /// range tombstones**, where the answer is necessarily contiguous. Two binary searches instead
+    /// `files_at(level)` — for a level whose files are sorted and disjoint and which carries no
+    /// range tombstones, where the answer is necessarily contiguous. Two binary searches instead
     /// of a scan, and no copy: an unbounded scan of a 697-file level copied every entry, two
     /// strings each, to build a list it then walked one file at a time.
     ///
     /// Undefined for L0 and for a level with range tombstones; the caller checks `carries_ranges`.
     std::pair<size_t, size_t> overlapping_index_range(int level, Slice lower, Slice upper) const;
 
-    /// `[begin, end)` into `files_at(level)` whose **data span** intersects the closed interval
+    /// `[begin, end)` into `files_at(level)` whose data span intersects the closed interval
     /// `[first, last]`.
     ///
     /// Distinct from `overlapping_index_range` in two ways that both matter: the interval is
     /// closed, matching a file's own `smallest..largest`; and it consults the data span only, so
-    /// unlike that one it is **valid for a level carrying range tombstones** — a level's data spans
+    /// unlike that one it is valid for a level carrying range tombstones — a level's data spans
     /// stay sorted and disjoint whatever its tombstone spans do. Undefined for L0, whose files
     /// overlap by construction.
     std::pair<size_t, size_t> data_span_index_range(int level, Slice first, Slice last) const;
 
-    /// Files whose `[smallest, largest]` intersects the **closed** interval
+    /// Files whose `[smallest, largest]` intersects the closed interval
     /// `[first, last]`. This is the *compaction* shape, and the distinction is
     /// load-bearing rather than pedantic: a file's `smallest_key..largest_key`
     /// includes both ends, so asking the half-open question about it silently
@@ -165,7 +165,7 @@ public:
 
     /// Whether any file at any level still holds data in `[lower, upper)`.
     ///
-    /// **Data spans only, deliberately.** A file carrying a range tombstone over the band overlaps
+    /// Data spans only, deliberately. A file carrying a range tombstone over the band overlaps
     /// it by its *effective* span while holding no keys there at all — matching on that would mean
     /// the answer could never become "nothing left", because the tombstone is itself the thing
     /// keeping the band deleted.

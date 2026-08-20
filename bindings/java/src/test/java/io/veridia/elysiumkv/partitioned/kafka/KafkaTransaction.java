@@ -24,23 +24,17 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * The only place in this design that touches Kafka's exception taxonomy — <b>a worked example, not
- * shipped API.</b>
+ * The only place in this design that touches Kafka's exception taxonomy — a worked example, not
+ * shipped API.
  *
- * <p>It is in test sources on purpose. {@code io.veridia.elysiumkv.partitioned} takes no Kafka
- * dependency: it reaches a log through {@code Changelog}, {@code Restore} and {@code CommitAction},
- * and shipping this alongside it would either force that dependency on the core artifact or publish
- * it beside the Kafka Streams adapter, whose users are precisely the people who will never need it.
- * Copy it.
+ * <p>In test sources on purpose: {@code io.veridia.elysiumkv.partitioned} takes no Kafka
+ * dependency, reaching a log through {@code Changelog}, {@code Restore} and {@code CommitAction}.
+ * Copy it. Living here is also what gets it compiled and exercised.
  *
- * <p>What is worth keeping is that a compiler checks it, and the tests beside it are the reason:
- * everything below was prose in a design document first, which is how it once declared an interface
- * its own example lambda could not implement.
- *
- * <p>It reduces every Kafka failure to <b>what the caller is then allowed to do</b>, which is a
- * different question from what happened. Classifying a fencing error as "definitely not committed"
- * is true and useless: the caller calls {@code abortTransaction()} on a producer for which closing
- * is the only remaining option, and the abort throws the same error back.
+ * <p>It reduces every Kafka failure to what the caller is then allowed to do, which is a different
+ * question from what happened. Classifying a fencing error as "definitely not committed" would be
+ * true and still wrong: the caller would call {@code abortTransaction()} on a producer for which
+ * closing is the only remaining option, and the abort would throw the same error back.
  *
  * <pre>
  * AbortableNotCommitted   discard, then abortTransaction()
@@ -48,7 +42,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * ProducerDead            discard, then close(); aborting would throw
  * </pre>
  *
- * <p><b>The send goes through here too</b>, not just the commit. {@code Producer.send} can throw
+ * <p>The send goes through here too, not just the commit. {@code Producer.send} can throw
  * synchronously — a serialization failure, a full buffer, an interrupt — and a send left in the
  * application's changelog callback throws something none of those three types cover, escaping every
  * catch in the processing loop and leaving the transaction open with batches staged.

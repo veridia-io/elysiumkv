@@ -28,7 +28,7 @@ namespace {
 
 /// Readers arriving together on the same cold object, through a cache over a slow store.
 ///
-/// **The shape a cold start actually has**, and the one no other benchmark here covers: every
+/// The shape a cold start actually has, and the one no other benchmark here covers: every
 /// benchmark below is single-threaded, so a cache that issues one fetch per *reader* rather than
 /// one per *chunk* measures identically to one that does not. Against a store with real latency
 /// that is the difference between one round trip and one per thread.
@@ -72,7 +72,7 @@ BENCHMARK(BM_CacheColdReadFanout)->Args({8, 2000})->Unit(benchmark::kMicrosecond
 
 /// Warm reads of *unrelated* objects, in parallel. What one mutex over the whole cache costs.
 ///
-/// **Reported, never gating.** A threaded benchmark's spread on a shared runner is far above the
+/// Reported, never gating. A threaded benchmark's spread on a shared runner is far above the
 /// ratchet's noise band, so `check_regression.py` prints it and skips the comparison — which is
 /// what should happen to a number that says as much about the machine as about the code.
 void BM_CacheWarmParallelReads(benchmark::State& state) {
@@ -138,7 +138,7 @@ public:
         Options options;
         options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir_.path());
         options.memtable_bytes = 32u << 20;
-        // **No engine threads during measurement.** Every benchmark here is a read against a store
+        // No engine threads during measurement. Every benchmark here is a read against a store
         // that is already built and flushed, so background work has nothing to do — but the
         // maintenance coordinator still wakes on its interval, and whether a tick lands inside a
         // given repetition is luck. That turns into a few percent of spread between repetitions,
@@ -204,12 +204,12 @@ void BM_PointLookupBloomRejected(benchmark::State& state) {
 }
 BENCHMARK(BM_PointLookupBloomRejected);
 
-/// ARCHITECTURE.md "Absence is an answer, not an error" and ARCHITECTURE.md "Benchmarks" — **a prefix scan must not scale with total key count.** The same
+/// ARCHITECTURE.md "Absence is an answer, not an error" and ARCHITECTURE.md "Benchmarks" — a prefix scan must not scale with total key count. The same
 /// 100-key prefix is scanned in a 100k-key store and a 1M-key store; ten times
 /// the keyspace must cost about the same, or SST pruning is not working.
 /// Built once per size and kept, like the point-lookup stores.
 ///
-/// **A local would be rebuilt several times per reported number**, not once: the framework calls a
+/// A local would be rebuilt several times per reported number, not once: the framework calls a
 /// benchmark repeatedly to find an iteration count and then once more per repetition, so a million
 /// keys were being written and flushed on each of those calls. That is most of the runtime, and it
 /// leaves the page cache and allocator in a different state each time — measurable as spread in the
@@ -243,7 +243,7 @@ BENCHMARK(BM_PrefixScan)->Arg(100000)->Arg(1000000);
 
 // --- the remote path ------------------------------------------------------------
 //
-// **Every benchmark above measures local disk, and the design target is object storage.** That gap
+// Every benchmark above measures local disk, and the design target is object storage. That gap
 // is not a nicety: a change that triples the number of round trips a read costs passes all of them,
 // because on local disk a round trip is a syscall. The engine's read cost against S3 is round
 // trips, so that is what these count.
@@ -319,7 +319,7 @@ void BM_RemotePointLookup(benchmark::State& state) {
     const uint64_t opens = store.db().stats().reader_cache_misses - opens_before;
     const auto per = static_cast<double>(lookups ? lookups : 1);
 
-    // **The gate.** Round trips per lookup, independent of the machine and of the injected
+    // The gate. Round trips per lookup, independent of the machine and of the injected
     // latency. Reported beside the number of readers opened, because the two together are what
     // make the figure explicable: a lookup costs one read per reader it has to open plus one per
     // data block it has to fetch, and a configuration where the reader cache absorbs the opens is
@@ -352,7 +352,7 @@ BENCHMARK(BM_RemotePrefixScan)->Arg(0)->Arg(200)->Unit(benchmark::kMicrosecond);
 
 // --- the write path --------------------------------------------------------------
 //
-// **Every benchmark above is a read against a store that was already built.** Nothing measured the
+// Every benchmark above is a read against a store that was already built. Nothing measured the
 // cost of building it, so nothing gated write amplification, flush cost or compaction throughput —
 // and write amplification is the number the level configuration exists to control. A change that
 // doubles the bytes compaction writes per byte the application writes passes every other gate here.
@@ -391,7 +391,7 @@ void BM_WriteAmplification(benchmark::State& state) {
         const std::string value(200, 'v');
         state.ResumeTiming();
 
-        // **Shuffled, not ascending.** Written in key order every L0 file holds a disjoint range,
+        // Shuffled, not ascending. Written in key order every L0 file holds a disjoint range,
         // so each compaction is a trivial move and the amplification is zero — a true number about
         // a workload nothing has, and a benchmark that could not see a regression in the merge.
         std::vector<int> order(static_cast<size_t>(keys));
@@ -418,7 +418,7 @@ void BM_WriteAmplification(benchmark::State& state) {
         state.ResumeTiming();
     }
 
-    // **The gate.** Bytes compaction rewrote per byte the caller wrote, for one full cycle. It is a
+    // The gate. Bytes compaction rewrote per byte the caller wrote, for one full cycle. It is a
     // property of the level configuration and the picker, not of the machine, so it moves only when
     // one of those changes.
     state.counters["write_amp"] = benchmark::Counter(amplification);
@@ -427,7 +427,7 @@ void BM_WriteAmplification(benchmark::State& state) {
 }
 BENCHMARK(BM_WriteAmplification)->Arg(50000)->Unit(benchmark::kMillisecond);
 
-/// Opening an unbounded iterator and taking one key. **What iterator construction costs**, which
+/// Opening an unbounded iterator and taking one key. What iterator construction costs, which
 /// no other benchmark isolates: a prefix scan prunes to a handful of files before opening any, so
 /// it says nothing about the case where the bound does not prune.
 void BM_FullScanFirstKey(benchmark::State& state) {
@@ -445,7 +445,7 @@ BENCHMARK(BM_FullScanFirstKey)->Arg(1000000)->Unit(benchmark::kMicrosecond);
 
 /// A many-file store on two tiers, with store ids the length real ones are.
 ///
-/// **Both details are load-bearing, and `BenchStore` has neither.** `stats()` walks per tier, so
+/// Both details are load-bearing, and `BenchStore` has neither. `stats()` walks per tier, so
 /// one tier hides the multiplication; and it compares `file.store_id` against `store->id()`, which
 /// returns by value — so an id short enough for the small-string buffer allocates nothing while a
 /// real one, defaulting to the canonicalised root path and in production an S3 bucket and prefix,
@@ -493,7 +493,7 @@ private:
     std::unique_ptr<DB> db_;
 };
 
-/// A `stats()` scrape. **The one call an operator is told to make continuously**, paid per instance
+/// A `stats()` scrape. The one call an operator is told to make continuously, paid per instance
 /// in the process — so an embedder running sixty partitions pays this sixty times per interval.
 void BM_StatsScrape(benchmark::State& state) {
     static StatsBenchStore store(static_cast<int>(state.range(0)));
@@ -510,7 +510,7 @@ BENCHMARK(BM_StatsScrape)->Arg(1000000)->Unit(benchmark::kMicrosecond);
 
 /// TTL reclamation over a large file set.
 ///
-/// **Built as a `Version` directly** rather than through a DB, because the cost being measured is a
+/// Built as a `Version` directly rather than through a DB, because the cost being measured is a
 /// pure function of the file list: `files_expired_before` asks, per expired candidate, whether any
 /// *older* file still holds keys in its range. Driving it through writes would spend all the time
 /// producing files instead.
@@ -553,7 +553,7 @@ BENCHMARK(BM_TtlReclamation)->Arg(2000)->Arg(10000)->Unit(benchmark::kMicrosecon
 
 /// A compaction whose inputs live on a store with real latency.
 ///
-/// **The case the windowed read only half fixed.** The window turned one request per block into one
+/// The case the windowed read only half fixed. The window turned one request per block into one
 /// per window, which is the request *count*; the merge still waits out every refill with nothing
 /// else in flight, and a compaction refills once per window per input. Nothing else here measures
 /// that: every other remote benchmark is a read against a store that is already built.
@@ -571,7 +571,7 @@ void BM_RemoteCompaction(benchmark::State& state) {
 
         Options options;
         options.manifest_catalog = std::make_shared<DiskManifestCatalog>(dir.path());
-        // **Files larger than the 2 MiB window**, or there is no next window to fetch and this
+        // Files larger than the 2 MiB window, or there is no next window to fetch and this
         // measures nothing — the first version of this benchmark produced 1 MiB inputs and showed a
         // flat line for exactly that reason.
         options.memtable_bytes = 8u << 20;
@@ -588,7 +588,7 @@ void BM_RemoteCompaction(benchmark::State& state) {
         auto db = std::move(*DB::open(options));
         const std::string value(200, 'v');
 
-        // **Shuffled, not ascending** — the same trap `BM_WriteAmplification` documents. Written in
+        // Shuffled, not ascending — the same trap `BM_WriteAmplification` documents. Written in
         // key order each L0 file holds a disjoint range, so the merge walks them one after another
         // and only one input is ever being read. A changelog partition arrives in key-arrival
         // order, which spreads every memtable across the whole keyspace, so the real merge

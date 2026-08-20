@@ -14,28 +14,16 @@ import java.util.Locale;
  * <p>The jar carries {@code native/{os}-{arch}/libelysiumkv_jni.{so,dylib}}, which
  * has to reach the filesystem before {@code System.load} will take it.
  *
- * <p><b>Every load gets its own file, and that is not wasteful — it is the
- * requirement.</b> The tempting design is to name the extracted file after a
- * digest of its contents, so repeated loads share one copy and a rebuilt library
- * can never be mistaken for the old one. That design is wrong here, and the JVM
- * says so out loud: {@code System.load} refuses a library <em>file</em> that is
- * already loaded in another class loader —
- * {@code "Native Library ... already loaded in another classloader"}. Two copies
- * of this class in one JVM is not an exotic case; it is two web applications in
- * one container. Sharing a path makes the second one fail.
+ * <p>Every load must get its own file — deduplicating by content digest would be an error.
+ * {@code System.load} refuses a library <em>file</em> already loaded in another class loader
+ * ({@code "Native Library ... already loaded in another classloader"}), which two copies of this
+ * class in one container would hit. {@link Files#createTempFile} is atomic and unique, so racing
+ * loaders never contend for a name and a half-written library — which, unlike an ordinary file,
+ * would be executed — is never visible.
  *
- * <p>A unique path per load also disposes of the concurrency problem ARCHITECTURE.md "The ABI boundary" raises
- * rather than solving it: {@link Files#createTempFile} is atomic and unique, so
- * racing loaders never contend for a name and a half-written library — which,
- * unlike a half-written ordinary file, would be executed — is never visible to
- * anyone. Staleness cannot arise either, because nothing is ever reused.
- *
- * <p>Permissions are requested rather than inherited, and the file goes straight
- * into the system temp directory rather than a subdirectory of our own. A
- * predictably named directory in a world-writable place can be pre-created as a
- * symlink before the JVM ever starts, and it earned its keep only when
- * extractions were named deterministically and worth grouping — which is exactly
- * what this class no longer does.
+ * <p>Permissions are set explicitly rather than inherited, and the file goes directly into the
+ * system temp directory: a predictably named subdirectory in a world-writable place can be
+ * pre-created as a symlink before the JVM starts.
  *
  * <p>Set {@code -Delysiumkv.library.path=/path/to/libelysiumkv_jni.dylib} to skip
  * extraction entirely and load a build directory directly.

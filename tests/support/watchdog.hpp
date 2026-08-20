@@ -12,7 +12,7 @@
 
 namespace elysiumkv::test {
 
-/// ARCHITECTURE.md "Benchmarks" — **liveness.** A deadlocked compaction or a write stall that never
+/// ARCHITECTURE.md "Benchmarks" — liveness. A deadlocked compaction or a write stall that never
 /// releases shows up as a hang, not a mismatch, and a stopped suite is easy to
 /// misread as a slow one. Every replay carries a per-operation timeout; when it
 /// expires the process aborts with the operation index, so CI reports a failure

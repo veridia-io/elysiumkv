@@ -81,7 +81,7 @@ class ElysiumKVStoreVariantTest {
     }
 
     /**
-     * <b>The mismatch is refused at startup.</b> Left to run, this store would write bare values on
+     * The mismatch is refused at startup. Left to run, this store would write bare values on
      * the live path and timestamp-prefixed values on restore — a divergence that shows up only after
      * a rebalance, as corrupt reads far from the code that caused them. An exception naming the
      * remedy is a better outcome than that, so the store refuses to open rather than half-work.

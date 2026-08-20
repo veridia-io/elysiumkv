@@ -88,7 +88,7 @@ class ElysiumKVSessionStoreTest {
     }
 
     /**
-     * <b>The two-sided predicate.</b> A session qualifies when it ended at or after
+     * The two-sided predicate. A session qualifies when it ended at or after
      * {@code earliestEnd} <em>and</em> began at or before {@code latestStart} — ordering gives the
      * first half, and the second has to be filtered.
      */
@@ -162,7 +162,7 @@ class ElysiumKVSessionStoreTest {
     }
 
     /**
-     * <b>Retention is durable, not just hidden.</b> The scan clamps to live segments from an
+     * Retention is durable, not just hidden. The scan clamps to live segments from an
      * in-memory field, so a store that never called {@code truncateBelow} would still <em>look</em>
      * expired — until it reopened and the field reset. Reopening is what separates the two: the
      * engine's truncation floor is in the manifest and survives, the clamp does not.
@@ -195,7 +195,7 @@ class ElysiumKVSessionStoreTest {
     }
 
     /**
-     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * Closing without an explicit flush must not lose the writes. The engine has no
      * write-ahead log, so a {@code close()} that does not flush discards everything still in the
      * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
      * closes, so no test that goes through a topology can see this; only closing the store directly

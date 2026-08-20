@@ -7,11 +7,11 @@ import java.nio.ByteBuffer;
  * native core: {@link #value()} is a direct buffer over the block in the cache,
  * so a lookup copies nothing (ARCHITECTURE.md "The ABI boundary").
  *
- * <p><b>Close it.</b> A leaked pin holds a block-cache entry indefinitely — not
+ * <p>Close it. A leaked pin holds a block-cache entry indefinitely — not
  * a leak of a few bytes, but a cache slot that can never be evicted. Use it in
  * try-with-resources and let {@link ElysiumKV#pinsOutstanding()} confirm.
  *
- * <p><b>The buffer dies with the pin, and Java cannot enforce that.</b> A direct
+ * <p>The buffer dies with the pin, and Java cannot enforce that. A direct
  * ByteBuffer's address cannot be revoked, so a reference kept past {@link
  * #close()} reads freed memory rather than throwing. {@link #value()} refuses
  * after close, and with {@link ElysiumKVOptions#paranoidChecks(boolean)} so does

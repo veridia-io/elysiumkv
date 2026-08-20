@@ -171,7 +171,7 @@ class EncryptionTest {
     }
 
     /**
-     * <b>The wrong master key must fail, and fail as configuration.</b> An engine that served
+     * The wrong master key must fail, and fail as configuration. An engine that served
      * something anyway would be the worst outcome available here, so this is asserted rather than
      * assumed from the cipher's C++ tests.
      *

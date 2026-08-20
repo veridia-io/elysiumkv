@@ -77,7 +77,7 @@ class ElysiumKVWindowVariantTest {
     }
 
     /**
-     * <b>The mismatch is refused at startup</b>, rather than left to diverge on the next restore.
+     * The mismatch is refused at startup, rather than left to diverge on the next restore.
      */
     @Test
     void theTimestampedVariantRefusesToBeAPlainStore(@TempDir Path dir) {

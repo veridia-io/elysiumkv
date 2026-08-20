@@ -187,7 +187,7 @@ class ElysiumKVKeyValueStoreTest {
     }
 
     /**
-     * <b>Restore is registered as a batching callback</b>, not the per-record form. Restore is the
+     * Restore is registered as a batching callback, not the per-record form. Restore is the
      * tail of every rebalance, so the difference is one write-path traversal per changelog record
      * against one per delivered chunk.
      *
@@ -427,7 +427,7 @@ class ElysiumKVKeyValueStoreTest {
     }
 
     /**
-     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * Closing without an explicit flush must not lose the writes. The engine has no
      * write-ahead log, so a {@code close()} that does not flush discards everything still in the
      * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
      * closes, so no test that goes through a topology can see this; only closing the store directly

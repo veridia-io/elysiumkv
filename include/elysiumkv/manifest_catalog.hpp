@@ -13,17 +13,17 @@
 
 namespace elysiumkv {
 
-/// ARCHITECTURE.md "Ownership is one compare-and-set" — **the one pluggable metadata seam.** All manifest state lives here:
+/// ARCHITECTURE.md "Ownership is one compare-and-set" — the one pluggable metadata seam. All manifest state lives here:
 /// the generation objects and the pointer naming which generation is live. The
 /// two are one concern — moving the pointer is only meaningful against objects
 /// the same component wrote.
 ///
-/// **Bytes are opaque.** Record encoding, CRC framing, replay, gap detection,
+/// Bytes are opaque. Record encoding, CRC framing, replay, gap detection,
 /// rolling policy and the GC ordering rule all stay in the engine. An
 /// implementation stores bytes at an address and swaps a pointer; it can get
 /// storage and CAS wrong and nothing else.
 ///
-/// **Objects are immutable and write-once.** A put at an existing address is a
+/// Objects are immutable and write-once. A put at an existing address is a
 /// programming error, not an overwrite.
 class ManifestCatalog {
 public:
@@ -52,7 +52,7 @@ public:
 
     /// Every generation this catalog holds, in any order.
     ///
-    /// **Optional.** The default reports `Status::Unsupported`, and the engine falls back to
+    /// Optional. The default reports `Status::Unsupported`, and the engine falls back to
     /// probing a bounded window below the live pointer — which finds the generation a crash
     /// between the pointer install and the delete leaves behind, and cannot find an older one. A
     /// catalog that can enumerate cheaply should, because that is what makes the reclaim complete

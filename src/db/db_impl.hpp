@@ -83,7 +83,7 @@ public:
     Status truncate_below(Slice key) override;
     Status delete_range(Slice lower, Slice upper) override;
     Result<bool> range_is_erased(Slice lower, Slice upper) const override;
-    /// **`mem_mutex_` must be held.** See `write_floor_` for why the Version is not consulted.
+    /// `mem_mutex_` must be held. See `write_floor_` for why the Version is not consulted.
     Status check_below_truncation(Slice key) const;
 
     std::unique_ptr<Iterator> iterator() override;
@@ -157,7 +157,7 @@ public:
     /// without waiting for a tick. `force_full` bypasses the O(1) gate, which is what the
     /// periodic bypass does every minute in the running loop.
     void reconcile_for_test(bool force_full) { reconcile(force_full); }
-    /// ARCHITECTURE.md "Negative controls" — drops wake notifications while **keeping** epoch
+    /// ARCHITECTURE.md "Negative controls" — drops wake notifications while keeping epoch
     /// invalidation, so a test asserts the property that actually holds: a wake is an
     /// optimisation, an invalidation is not. Suppressing both would assert a guarantee this
     /// design does not make, and would leave the test ambiguous about which one it claimed.
@@ -174,7 +174,7 @@ public:
     /// invalidating transitions were never wired up looks like from the gate's side. The periodic
     /// bypass is then the only thing that can find the work, which is the bound this exists to
     /// demonstrate.
-    /// Freezes at **the epoch as it is now**, not at zero. Freezing at zero would itself be a
+    /// Freezes at the epoch as it is now, not at zero. Freezing at zero would itself be a
     /// change the gate notices, so it would open once more before settling — and that one extra
     /// opening is enough to drain the work a negative control says cannot be drained, or to let a
     /// positive control pass without the mechanism it is supposed to be testing.
@@ -182,7 +182,7 @@ public:
         pinned_maintenance_epoch_.store(on ? static_cast<int64_t>(live_maintenance_epoch()) : -1);
     }
     /// Whether the coordinator has caught up with the current epoch, i.e. its gate is now closed on
-    /// state. **A test waits on this rather than sleeping**: "long enough for a few ticks" is a
+    /// state. A test waits on this rather than sleeping: "long enough for a few ticks" is a
     /// guess about a machine, and it was wrong on a loaded CI runner.
     bool maintenance_gate_closed_for_test() const {
         return last_reconciled_epoch_.load() == maintenance_epoch();
@@ -192,9 +192,9 @@ public:
     /// tell a write path that *reads* the flag from one that *computes* the predicate, and it works
     /// in both directions:
     ///
-    /// - pinned **true** with nothing actually past `stall_age`: a reader stalls, a computer does
+    /// - pinned true with nothing actually past `stall_age`: a reader stalls, a computer does
     ///   not;
-    /// - pinned **false** with the tier far past `stall_age`: a reader proceeds, a computer stalls.
+    /// - pinned false with the tier far past `stall_age`: a reader proceeds, a computer stalls.
     ///
     /// Neither involves timing, which matters — arranging for the flag to become true *naturally*
     /// races the rescue that clears it again, and that race is what made an earlier version of this
@@ -202,7 +202,7 @@ public:
     void pin_transient_stall_for_test(std::optional<bool> state) {
         pinned_transient_stall_.store(state.has_value() ? (*state ? 1 : 0) : -1);
     }
-    /// ARCHITECTURE.md "Negative controls" — **the engine as it was**: the coordinator's clock plays
+    /// ARCHITECTURE.md "Negative controls" — the engine as it was: the coordinator's clock plays
     /// no part, so neither a time transition nor the periodic bypass opens the gate and only an
     /// epoch change — which means a write — can cause work. That is precisely the defect this
     /// design removes, and a control that merely lengthened the interval is not equivalent, because
@@ -221,7 +221,7 @@ public:
     /// The published transient-tier stall state. One evaluator: the coordinator computes it, the
     /// write path reads it. See `publish_transient_stall`.
     ///
-    /// **The test pin is applied here rather than written into the flag**, and that is a race fix
+    /// The test pin is applied here rather than written into the flag, and that is a race fix
     /// rather than a tidying. Writing it meant `publish_transient_stall` — which reads the pin,
     /// then scans every file, then stores — could begin before the pin was set and finish after,
     /// putting the computed value back over it. The window is the length of a scan, which under a
@@ -251,12 +251,12 @@ private:
 
     /// Whether the active memtable should be flushed: `force`, or it has reached
     /// `memtable_bytes`, or it has been open longer than `flush_interval`. Size and age are
-    /// alternatives, not a conjunction. **Call with `mem_mutex_` held** — it reads `mem_`.
+    /// alternatives, not a conjunction. Call with `mem_mutex_` held — it reads `mem_`.
     bool memtable_flush_due(bool force) const;
 
     // --- maintenance scheduling
     //
-    // **Scheduling pulls; it does not wait to be pushed.** Every background policy is a
+    // Scheduling pulls; it does not wait to be pushed. Every background policy is a
     // predicate over current state plus the clock, evaluated by one coordinator on a fixed
     // tick — not a message a caller remembered to send. Three age-bounded behaviours in this
     // engine shipped with a write as their only trigger (the flush interval, age-driven
@@ -293,11 +293,11 @@ private:
     /// O(1) and is evaluated *ahead* of the gate on every tick, which covers both its size and
     /// its age trigger.
     uint64_t next_time_transition(const Version& version, uint64_t now) const;
-    /// Evaluates "is a transient tier past `stall_age`?" and publishes the answer. **One
-    /// evaluator:** if the write path computed this too, the same predicate would exist in two
-    /// places and could diverge — which is how a valve ends up engaged by one and not the other.
+    /// Evaluates "is a transient tier past `stall_age`?" and publishes the answer. The single
+    /// evaluator: the write path reads the published flag rather than computing it, so the
+    /// predicate cannot diverge between the two.
     void publish_transient_stall(const Version& version, uint64_t now);
-    /// ARCHITECTURE.md "The differential oracle" — **exactly one unit of flush work**, returning whether it did any.
+    /// ARCHITECTURE.md "The differential oracle" — exactly one unit of flush work, returning whether it did any.
     /// The flush thread is a loop calling this; synchronous mode calls the same
     /// function inline. The modes differ only in who calls the work, never in
     /// what the work does: a separate path "just for tests" would make the
@@ -346,7 +346,7 @@ private:
     /// One file re-sealed under the primary provider, when `rewrite_to_primary` is on. Returns
     /// true if it did work, so the maintenance loop drains it the way it drains migration.
     ///
-    /// **L0 is excluded, for the reason migration excludes it**: the rewrite gets a fresh file
+    /// L0 is excluded, for the reason migration excludes it: the rewrite gets a fresh file
     /// number, and at L0 a file number *is* its recency, so renumbering would reorder it against
     /// its neighbours. An L0 file leaves its old provider by being compacted, which happens soon
     /// and writes the output under the primary anyway.
@@ -360,9 +360,8 @@ private:
     bool compact_l0_file_off_its_tier(Status& status);
     Status write_compaction_outputs(const Compaction& compaction,
                                     std::vector<FileMetadata>& outputs);
-    /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. It no longer
-    /// depends on the file's size, so it no longer has to be evaluated after the bytes exist; the
-    /// call sites simply have not been moved earlier, and nothing requires them to be.
+    /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. Nothing
+    /// here depends on the file's size, so a call site need not wait until the bytes exist.
     /// `flush_interval` with this memtable's share of `flush_interval_jitter` folded in.
     uint64_t flush_interval_for(uint64_t created_ms) const;
     /// `file_number` is 0 for output that has not been written yet, which takes no `age_jitter`.
@@ -382,7 +381,7 @@ private:
     /// registered — which is a configuration failure, not corruption.
     EncryptionProvider* provider_for(const std::string& id) const;
 
-    /// The cipher `file` was written under. **Null for an unencrypted file**, which the callers
+    /// The cipher `file` was written under. Null for an unencrypted file, which the callers
     /// read as "use the store directly" — the short-circuit that keeps a store with encryption off
     /// paying nothing for the machinery being present.
     Result<std::shared_ptr<ObjectCipher>> cipher_for(const FileMetadata& file) const;
@@ -393,12 +392,12 @@ private:
                                                        const FileMetadata& file) const;
     Status verify_stores_and_discard();
     /// ARCHITECTURE.md "Immutable named objects" — lists every store and deletes objects that have
-    /// been **continuously unreferenced for `orphan_retention`**.
+    /// been continuously unreferenced for `orphan_retention`.
     ///
     /// A single instantaneous observation cannot tell a dead writer's residue from a live writer's
-    /// just-committed file, which is why deleting on one was removed. A sustained observation can,
-    /// and the manifest re-read below is what makes it sustained rather than merely repeated: an
-    /// object whose edit has since committed is referenced now and drops out of the set.
+    /// just-committed file, so deletion requires a sustained one. The manifest re-read below is what
+    /// makes it sustained rather than merely repeated: an object whose edit has since committed is
+    /// referenced now and drops out of the set.
     ///
     /// Skips what `pending_deletions` already holds — those have an exact unreferenced-since time
     /// and `obsolete_retention` of their own, and letting the sweep at them would undercut the
@@ -421,7 +420,7 @@ private:
     /// Generation → when it was first seen below the live pointer. Guarded by `sweep_mutex_`.
     std::map<uint64_t, uint64_t> stale_generation_first_seen_;
     /// Written by the maintenance executor when it sweeps, read by the coordinator when it
-    /// computes the next time-driven deadline. **Two threads, so atomic** — it is a deadline, not a
+    /// computes the next time-driven deadline. Two threads, so atomic — it is a deadline, not a
     /// lock, and a stale read costs at most one extra tick.
     std::atomic<uint64_t> next_sweep_ms_{0};
     /// Serialises `sweep_orphans`, which the maintenance executor and a test may both call.
@@ -443,7 +442,7 @@ private:
         std::string encryption_metadata;
     };
     /// `seal` false writes `bytes` verbatim, for the one caller that already holds a sealed
-    /// object: **migration copies between tiers byte for byte** and must not encrypt twice. It
+    /// object: migration copies between tiers byte for byte and must not encrypt twice. It
     /// carries the source file's provider and metadata forward instead, which stay valid because
     /// the chunks authenticate against the identity recorded there rather than the new number.
     Result<WrittenObject> write_new_sst(BlobStore& store, Slice bytes, bool seal = true);
@@ -482,8 +481,8 @@ private:
         log_emit(level, event, message.str());
     }
 
-    /// A line composed inside a critical section and emitted once it is left. **Declare it before
-    /// the lock**: destruction runs in reverse, so it outlives the guard and the sink sees no lock.
+    /// A line composed inside a critical section and emitted once it is left. Declare it before
+    /// the lock: destruction runs in reverse, so it outlives the guard and the sink sees no lock.
     class DeferredLine {
     public:
         explicit DeferredLine(const DbImpl* self) : self_(self) {}
@@ -523,8 +522,8 @@ private:
     std::unique_ptr<VersionSet> versions_;
 
     /// Whether every configured level is inside `VersionSet::kPublishedLevels`, decided once at
-    /// open. False makes the write valve read counts off the Version as it used to — correct, and
-    /// only reachable with more levels than any real configuration has.
+    /// open. False makes the write valve read counts off the Version instead — correct, and only
+    /// reachable with more levels than any real configuration has.
     bool published_level_counts_ = false;
 
     /// Resolved once at open: the configured providers plus the passthrough under `""`, and the id
@@ -533,7 +532,7 @@ private:
     ProviderRegistry encryption_;
 
     mutable std::mutex mem_mutex_;
-    /// The floor a write is refused against, **guarded by `mem_mutex_`** and published by
+    /// The floor a write is refused against, guarded by `mem_mutex_` and published by
     /// `truncate_below` *before* its manifest edit rather than after.
     ///
     /// The Version carries the authoritative point for *reads*, and that has to stay where it is —
@@ -603,8 +602,8 @@ private:
     /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
     std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};
-    /// Tri-state: -1 not pinned, 0 pinned clear, 1 pinned set. **Atomic, and an `optional<bool>`
-    /// here was a data race** — the coordinator thread reads this while a test thread writes it, and
+    /// Tri-state: -1 not pinned, 0 pinned clear, 1 pinned set. Atomic, and an `optional<bool>`
+    /// here was a data race — the coordinator thread reads this while a test thread writes it, and
     /// "the test writes it before the writes it cares about" is an argument about *intent*, not
     /// about synchronisation. TSAN reported it intermittently, which is what an unsynchronised
     /// access looks like when the interleaving usually happens to be benign.
@@ -655,7 +654,7 @@ private:
     /// Set when a file vanishes from under a live Version (ARCHITECTURE.md "A tier is not a level"): repair cannot
     /// run alongside live iterators, so the instance is finished.
     std::atomic<bool> unusable_{false};
-    /// **No manifest write of any kind**, no background threads, no reclamation, no CAS.
+    /// No manifest write of any kind, no background threads, no reclamation, no CAS.
     bool read_only_ = false;
     /// Set by `abandon_unflushed`; suppresses the destructor's best-effort flush.
     std::atomic<bool> abandoned_{false};

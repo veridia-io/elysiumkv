@@ -81,7 +81,7 @@ class ElysiumKVWindowTopologyTest {
     }
 
     /**
-     * <b>A windowed aggregation, end to end.</b> Counts are per window, so a store that lost an
+     * A windowed aggregation, end to end. Counts are per window, so a store that lost an
      * entry, returned one from the wrong window, or could not be materialized at all produces wrong
      * numbers rather than an error.
      */
@@ -170,7 +170,7 @@ class ElysiumKVWindowTopologyTest {
     }
 
     /**
-     * <b>A stream-stream join</b>, which is the operator that needs {@code retainDuplicates} and the
+     * A stream-stream join, which is the operator that needs {@code retainDuplicates} and the
      * one this store existed least for. Streams builds two window stores here, both ours.
      */
     @Test
@@ -222,7 +222,7 @@ class ElysiumKVWindowTopologyTest {
     }
 
     /**
-     * <b>IQv2 against a window store.</b> Without {@code query}, {@code KafkaStreams.query(...)}
+     * IQv2 against a window store. Without {@code query}, {@code KafkaStreams.query(...)}
      * reports every window query as unsupported and an outside caller cannot read this store at all.
      */
     @Test

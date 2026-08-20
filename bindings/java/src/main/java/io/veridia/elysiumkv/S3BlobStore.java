@@ -4,16 +4,9 @@ package io.veridia.elysiumkv;
  * The S3 implementation of the {@link BlobStore} seam (ARCHITECTURE.md "The ABI boundary") — what makes a cold
  * tier actually cold rather than another directory on the same machine.
  *
- * <p><b>Optional native component.</b> The library is built without the AWS SDK
- * by default: it is by far the heaviest dependency here and an embedder with no
- * remote tier should not pay for it. Construction then fails with a {@link
- * ConfigException} naming the missing build option. {@link
- * ElysiumKV#hasAwsSupport()} answers the question in advance.
- *
- * <p>Built through a builder rather than a nine-argument constructor: most of
- * those arguments are optional, and a positional call with four nulls in it is a
- * bug waiting for a rename. Credentials are set as a pair because the two are
- * meaningless apart.
+ * <p>Optional native component: the library is built without the AWS SDK by default, and
+ * construction then fails with a {@link ConfigException} naming the missing build option.
+ * {@link ElysiumKV#hasAwsSupport()} answers the question in advance.
  *
  * <pre>{@code
  * try (S3BlobStore cold = S3BlobStore.builder("my-bucket").prefix("cold").open()) {

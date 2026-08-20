@@ -2,14 +2,12 @@ package io.veridia.elysiumkv;
 
 /**
  * The S3 implementation of the {@link ManifestCatalog} seam (ARCHITECTURE.md "Ownership is one compare-and-set"). Generation
- * objects live under a prefix; the pointer is a small object whose <b>ETag is the
- * fencing token</b>, which is what makes the compare-and-swap a single
+ * objects live under a prefix; the pointer is a small object whose ETag is the
+ * fencing token, which is what makes the compare-and-swap a single
  * conditional PUT with no read-modify-write.
  *
- * <p><b>Commit latency lands on every flush and every compaction</b>, and S3 pays
- * roughly 50 ms for it against single-digit milliseconds for DynamoDB. If commit
- * latency matters more than having one fewer service, prefer {@link
- * DynamoManifestCatalog}; this exists so an S3-only deployment is possible at all.
+ * <p>Commit latency lands on every flush and every compaction: roughly 50 ms here against
+ * single-digit milliseconds for {@link DynamoManifestCatalog}.
  *
  * <p>Optional native component — see {@link ElysiumKV#hasAwsSupport()}.
  *

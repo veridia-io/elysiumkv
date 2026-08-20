@@ -14,7 +14,7 @@ namespace elysiumkv {
 
 /// Serves block-sized reads out of one large sequential read, refilling as the cursor advances.
 ///
-/// **For compaction inputs on a remote store.** A merge reads every block of every input exactly
+/// For compaction inputs on a remote store. A merge reads every block of every input exactly
 /// once, in order, and `SstReader` asks for them one at a time — which against object storage is
 /// one round trip per block. At the default 4 KiB block that is ~11,800 requests to read a 46 MiB
 /// file, and the cost is latency rather than bandwidth: measured on a production shadow, a single
@@ -31,7 +31,7 @@ public:
     /// prefetch after the last full window finds nothing and is thrown away. Compaction knows the
     /// size from the manifest, so it passes it and pays nothing.
     ///
-    /// **Charged for two windows, not one**, and for the instance's whole life rather than as the
+    /// Charged for two windows, not one, and for the instance's whole life rather than as the
     /// buffers come and go: the one being merged and the one being fetched ahead of it are both
     /// live, a compaction holds one of these per input, and the point of the charge is to bound the
     /// worst case rather than track the current one.
@@ -121,13 +121,13 @@ private:
 
     /// Fetches the window after this one while the caller is still merging the current one.
     ///
-    /// **The seam is not enough on its own.** Every `BlobStore` here completes its future
+    /// The seam is not enough on its own. Every `BlobStore` here completes its future
     /// synchronously, so a refill is a round trip the merge waits out with nothing else in flight —
     /// and a compaction refills once per window per input. The window removed the request *count*;
     /// this is what removes the latency, and it needs a thread because nothing below is
     /// asynchronous.
     ///
-    /// **Only once the reader is walking the file forward.** Opening an SST reads its footer and
+    /// Only once the reader is walking the file forward. Opening an SST reads its footer and
     /// index near the end and then starts at the beginning, so prefetching from the first fill
     /// would fetch a window nobody wants. A short window means the object ended, and there is
     /// nothing after it to want.
