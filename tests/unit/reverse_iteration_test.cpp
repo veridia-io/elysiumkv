@@ -138,7 +138,7 @@ TEST_F(ReverseIteration, DeletedKeysStayHiddenDescending) {
     EXPECT_EQ(std::count(observed.begin(), observed.end(), key_at(10)), 0);
 }
 
-/// <b>Bounds describe the same set in both directions.</b> Only delivery order changes, so the
+/// Bounds describe the same set in both directions. Only delivery order changes, so the
 /// lower bound stays inclusive and the upper stays exclusive — the reverse scan simply starts at
 /// the other end of that set.
 TEST_F(ReverseIteration, BoundsKeepTheirInclusivityDescending) {

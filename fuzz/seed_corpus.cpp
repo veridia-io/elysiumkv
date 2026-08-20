@@ -1,16 +1,14 @@
 /* Seeds the fuzzers, by encoding the structures rather than by shipping bytes.
  *
- * **The seeds have to come from the encoders, not from git.** These decoders reject almost
+ * The seeds have to come from the encoders, not from git. These decoders reject almost
  * everything before they reach anything interesting — a manifest record is CRC-checked framing
  * around a version-tagged body, so random mutation essentially never produces input that gets past
  * the first few bytes. Without valid structure to mutate *from*, the fuzzer spends its whole budget
  * rediscovering the frame.
  *
- * Committing that structure as blobs is the obvious alternative and it rots silently: the manifest
- * format has moved six times, and a seed encoding version five decodes to `Unsupported` on the
- * first byte that matters. It would still be a file in a directory, and the run would still be
- * green, and it would be exercising nothing. Generating at build time cannot drift, because it
- * fails to compile instead.
+ * Committing that structure as blobs rots silently: a seed encoding a superseded manifest version
+ * decodes to `Unsupported` on the first byte that matters, the run stays green, and it exercises
+ * nothing. Generating at build time cannot drift, because it fails to compile instead.
  *
  * `fuzz/corpus/` is therefore for *regression* inputs only — anything that once crashed — and those
  * are reviewed bytes with a reason to exist.
@@ -90,7 +88,7 @@ int main(int argc, char** argv) {
     auto built = writer.finish();
     if (!built) return 1;
 
-    // **Located exactly as a reader locates it**, rather than by slicing the width of whatever the
+    // Located exactly as a reader locates it, rather than by slicing the width of whatever the
     // newest version happened to be when this was written. That spelling — `kFooterLengthV2` — was
     // in three places, and adding v3 broke every one of them: two in the reader, and this, which
     // no preset but the fuzz job builds. Reading the trailer first is the sequence the format
@@ -113,7 +111,7 @@ int main(int argc, char** argv) {
     // rather than only in what it decodes to.
     emit(root + "/footer", "v" + std::to_string(footer->format_version), tail.data(), tail.size());
 
-    // **One seed per version the decoder still accepts.** The writer emits only the newest, so a
+    // One seed per version the decoder still accepts. The writer emits only the newest, so a
     // seed taken from a real file exercises one of three live branches — and the two it skips are
     // exactly the ones nothing else writes any more and therefore the ones most likely to rot.
     for (uint32_t version : {Footer::kFormatVersion1, Footer::kFormatVersion2}) {

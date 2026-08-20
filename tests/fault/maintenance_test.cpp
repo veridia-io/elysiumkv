@@ -1,22 +1,22 @@
 /* Maintenance scheduling: the coordinator that decides for itself what is due, instead of waiting
  * for a caller to say so.
  *
- * **The defect this exists for.** Three age-bounded behaviours in this engine shipped with a write
- * as their only trigger — the flush interval, age-driven migration between durable tiers, and the
- * L0 escape off a mismatched tier — and each failure was identical: the only thing that could have
- * noticed was the thing that had stopped happening. A store that goes quiet with a file on a
- * transient tier used to leave it there indefinitely, however the tiers were configured.
+ * Three age-bounded behaviours here would otherwise have a write as their only trigger — the flush
+ * interval, age-driven migration between durable tiers, and the L0 escape off a mismatched tier —
+ * and the failure is identical in each: the only thing that could notice is the thing that has
+ * stopped happening, so a store that goes quiet with a file on a transient tier keeps it there
+ * indefinitely.
  *
- * So the first case below is the whole point, and **its control is what distinguishes a fix from a
- * test that would have passed before the fix**. The control here is a maintenance interval long
- * enough that the coordinator cannot tick during the test, which is the engine as it was.
+ * Each case is therefore paired with a control: a maintenance interval long enough that the
+ * coordinator cannot tick during the test, which is what makes the assertion about maintenance
+ * rather than about a write.
  *
- * A note on how these tests wait. The coordinator ticks on *real* time while judging age by the
+ * The coordinator ticks on *real* time while judging age by the
  * injected clock, which is deliberate: a thread waiting 20 ms wakes regardless of what the
  * injected clock says, so a test advances the clock and then simply waits. No wake path exists
  * only for tests.
  *
- * **What is deliberately not asserted here: the exposure window as a number.** The design states it
+ * What is deliberately not asserted here: the exposure window as a number. The design states it
  * as `max_age + interval + queueing behind an in-flight compaction + the migration itself`, with the
  * queueing term derived from `max_compaction_bytes` over an assumed throughput. Asserting that as a
  * millisecond bound would be gating on wall-clock time, which CONTRIBUTING.md forbids for exactly
@@ -55,7 +55,7 @@ constexpr Duration kTick{20};
 
 /// How long any of these tests will wait for the coordinator to converge before failing.
 ///
-/// **Pure patience, so it is set generously.** Every positive case here waits for a *terminal* state
+/// Pure patience, so it is set generously. Every positive case here waits for a *terminal* state
 /// — a file has left a tier, a counter has advanced, a budget is met — so a longer bound cannot turn
 /// a failure into a pass; it can only stop a slow runner from reporting one spuriously. The negative
 /// cases pass their own short limits, and ctest's per-test timeout is the real backstop. The
@@ -117,7 +117,7 @@ protected:
 
     static constexpr size_t kTierBudget = 4u << 10;
 
-    /// Two durable tiers with a byte budget and **no age bound anywhere**, so capacity is the only
+    /// Two durable tiers with a byte budget and no age bound anywhere, so capacity is the only
     /// thing that can be out of place and no time transition can open the gate on its behalf.
     Options capacity_bound_options() {
         Options options = make_options(store_, Compression::None, 16u << 10);
@@ -130,7 +130,7 @@ protected:
         return options;
     }
 
-    /// Puts more than `kTierBudget` on tier 0, **below L0** — the migrator skips level 0, because a
+    /// Puts more than `kTierBudget` on tier 0, below L0 — the migrator skips level 0, because a
     /// fresh file number there would reorder positional recency, so an L0 file is not a candidate
     /// for capacity eviction at all.
     void fill_over_capacity() {
@@ -147,13 +147,13 @@ protected:
 
     /// Waits until nothing has invalidated the coordinator's epoch for several ticks.
     ///
-    /// **A control that takes the clock out of the gate needs this, and is racy without it.** The
+    /// A control that takes the clock out of the gate needs this, and is racy without it. The
     /// gate opens on *any* epoch change, and an executor that did work invalidates the epoch — so
     /// for a while after the last `put`, reconciles keep happening for reasons that have nothing to
     /// do with time. One of them would observe the advanced clock and do exactly the work the
     /// control asserts cannot happen. "No writes are arriving" is not the same as "quiescent".
     ///
-    /// **Says the store stopped changing, not that the coordinator noticed** — those come apart, and
+    /// Says the store stopped changing, not that the coordinator noticed — those come apart, and
     /// a caller that needs the second one has to ask for it separately. Not folded in here: a test
     /// that lengthens the interval so the coordinator cannot tick, and then drives `reconcile_for_test`
     /// itself, can never satisfy it, and waiting on it in this helper hung exactly that test for a
@@ -173,7 +173,7 @@ protected:
 
     /// Waits until the coordinator has *reconciled* the current epoch, so its gate is shut on state.
     ///
-    /// **The half a stable epoch does not cover, and only meaningful where the coordinator ticks.**
+    /// The half a stable epoch does not cover, and only meaningful where the coordinator ticks.
     /// Once the clock is out of the gate, the one remaining way to open it is
     /// `epoch != last_reconciled_epoch_` — so an epoch that has read the same for several ticks
     /// while the coordinator has not yet caught up leaves the gate armed, and its next tick opens it
@@ -189,7 +189,7 @@ protected:
     /// Settles the store, waits for the coordinator to catch up with it, and only then takes the
     /// clock out of the gate.
     ///
-    /// **One call, because the three steps are meaningless apart.** Once the clock is suppressed the
+    /// One call, because the three steps are meaningless apart. Once the clock is suppressed the
     /// only thing left that can open the gate is `epoch != last_reconciled_epoch_` — so suppressing
     /// while the coordinator is still behind leaves it armed on state, and its next tick does the
     /// very work the control says is impossible. Whether that happens depends on how busy the
@@ -211,7 +211,7 @@ protected:
 
 // --- the finding ---------------------------------------------------------------
 
-// **A quiet store rescues files off a transient tier.** Write, flush, advance the clock past
+// A quiet store rescues files off a transient tier. Write, flush, advance the clock past
 // `max_age`, then do *nothing at all*. Nothing but the coordinator can move the file.
 TEST_F(MaintenanceTest, AQuietStoreRescuesFilesOffATransientTier) {
     open(base(make_transient_options(store_, kMaxAge, kStallAge)));
@@ -271,14 +271,14 @@ TEST_F(MaintenanceTest, AQuietStoreMigratesBetweenDurableTiersOnAge) {
     EXPECT_TRUE(settle([&] { return files_on(0) == 0 && files_on(1) > 0; }));
 }
 
-/* **Rescue completes end to end with a compaction deliberately in flight.**
+/* Rescue completes end to end with a compaction deliberately in flight.
  *
  * The exposure window has four terms and the third — queueing behind an in-flight compaction — is
  * the largest, bounded only by `max_compaction_bytes` over throughput. The other rescue cases here
  * run on a quiet store, where that term is zero, so they would pass on a design where rescue shared
  * a worker with compaction and waited for it. This one puts a slow compaction in the way first.
  *
- * **What it asserts is that the term is survivable, not how large it is.** Asserting the window as a
+ * What it asserts is that the term is survivable, not how large it is. Asserting the window as a
  * number would be gating on wall-clock time, which CONTRIBUTING.md forbids, and the conversion from
  * a byte bound to a time bound rests on an assumption about the operator's storage rather than
  * anything the engine controls. So: the crossing happens while compaction is busy, and the file
@@ -325,7 +325,7 @@ TEST_F(MaintenanceTest, WorkStillRunsWithTheWakeNotificationSuppressed) {
 }
 
 // A predicate whose invalidating transitions were never wired into the epoch. The gate hides it,
-// and the **periodic bypass** is what finds it anyway — which is the bound the bypass exists to
+// and the periodic bypass is what finds it anyway — which is the bound the bypass exists to
 // provide, and the reason it is not optional.
 //
 // Capacity eviction is the right task for this: it is driven by bytes, not by time, so no
@@ -336,7 +336,7 @@ TEST_F(MaintenanceTest, AnUnInvalidatedPredicateStillRunsOnThePeriodicBypass) {
     // is unbounded: the gate can never open on state.
     engine().pin_maintenance_epoch_for_test(true);
     engine().suppress_maintenance_wakes_for_test(true);
-    // **Wait for the gate to be closed, rather than sleeping for a few ticks and assuming it is.**
+    // Wait for the gate to be closed, rather than sleeping for a few ticks and assuming it is.
     // Until the coordinator has caught up it will open the gate once more, and that single opening
     // is enough to drain the capacity this test claims only the bypass can drain — which would make
     // it pass while proving nothing.
@@ -406,7 +406,7 @@ TEST_F(MaintenanceTest, ObsoleteObjectsAreCollectedAfterAnIteratorClosesWithNoWa
 
 // --- the gate is cheap ---------------------------------------------------------
 
-// **An idle tick performs no version scan and allocates nothing.** This is what makes a
+// An idle tick performs no version scan and allocates nothing. This is what makes a
 // one-second tick affordable across dozens of partition stores in one process, and it is asserted
 // by allocation count rather than by wake count — a wake that scans is the failure being excluded.
 TEST_F(MaintenanceTest, AnIdleReconcileAllocatesNothing) {
@@ -461,7 +461,7 @@ TEST_F(MaintenanceTest, AForcedReconcileDoesTheWorkTheGateSkips) {
  * owner, one definition — the same predicate in two places is how a valve ends up engaged by one and
  * not the other.
  *
- * **Both directions pin the flag against what the clock says**, and that is the only construction
+ * Both directions pin the flag against what the clock says, and that is the only construction
  * that discriminates. Letting the flag become true *naturally* — advance past `stall_age` and wait —
  * proves nothing: a write path that computed the predicate itself would stall too, since the clock
  * agrees. It is also a race, because the rescue that the advance makes due is exactly what clears the
@@ -564,8 +564,8 @@ TEST_F(MaintenanceTest, ASingleLevelIsFineWhenEveryTierIsDurable) {
 // --- flush interval is one predicate among the rest ---------------------------
 
 // A quiet store that flushes on the interval also *migrates* what it flushed, rather than
-// accumulating it on the hot tier. The two used to be on separate machinery, which is how one of
-// two adjacent loops ends up with a bug the other does not have.
+// accumulating it on the hot tier: the two predicates share the coordinator, so neither can be
+// driven while the other is not.
 TEST_F(MaintenanceTest, AQuietStoreFlushesOnTheIntervalAndThenMigratesWhatItFlushed) {
     Options options = base(make_transient_options(store_, kMaxAge, kStallAge, 64u << 20));
     options.flush_interval = Duration(50);
@@ -587,7 +587,7 @@ TEST_F(MaintenanceTest, AQuietStoreFlushesOnTheIntervalAndThenMigratesWhatItFlus
 // --- the single-deleter constraint -------------------------------------------
 
 #ifdef ELYSIUMKV_PARANOID
-// Flush and a compaction overlapping is **legal and must stay legal** — flush only adds an L0
+// Flush and a compaction overlapping is legal and must stay legal — flush only adds an L0
 // file, so its edit cannot contend with a delete-set chosen from an older version snapshot. The
 // assertion is narrower than "one version-mutating task at a time", and getting that wrong would
 // produce an assertion that fires immediately. This case is that check.
@@ -606,7 +606,7 @@ TEST_F(MaintenanceTest, TheSingleDeleterAssertionDoesNotFireOnFlushOverlappingCo
     EXPECT_GT(db_->stats().compactions, 0u) << "no compaction ran, so nothing overlapped";
 }
 
-/* **The control**, and without it the assertion above is one nobody has ever seen fire —
+/* The control, and without it the assertion above is one nobody has ever seen fire —
  * CONTRIBUTING.md is explicit that such a check has not been tested.
  *
  * A second deleting worker cannot be created from outside: compaction, migration and eviction share
@@ -644,20 +644,18 @@ TEST_F(MaintenanceTest, ASecondDeletingTaskTripsTheAssertion) {
 
 // --- the invariant, rather than three more cases -----------------------------
 
-/* **Placement converges when idle.** Once every age bound has been crossed and maintenance has
+/* Placement converges when idle. Once every age bound has been crossed and maintenance has
  * settled, no file sits on a tier `placement()` does not select for it, no tier exceeds its
  * `max_bytes`, and no L0 file remains on a tier its age has outgrown.
  *
- * This is the third age-bounded behaviour in this engine whose only trigger turned out to be a
- * write. Three is a pattern, and the cases above still only cover the instances we happen to know
- * about; this is a check that catches the fourth without naming it, because the symptom is always
- * the same — a file left where it should no longer be, with nothing coming to move it.
+ * The cases above each name one age-bounded behaviour; this one catches an unnamed fourth, because
+ * the symptom is always the same — a file left where its tier bounds say it should not be, with
+ * nothing coming to move it.
  *
- * **It is a quiescence property, not a continuous invariant.** During normal operation it is false
- * by design: a file that has just aged past its bound is mismatched until maintenance runs, which
- * is exactly the window maintenance exists to close. So it belongs as an assertion after a settle,
- * in a test — not as a fifth `Invariant` enumerator, where it would fire constantly during healthy
- * operation.
+ * A quiescence property, not a continuous invariant: during normal operation it is false by design,
+ * since a file that has just aged past its bound is mismatched until maintenance runs. That is why
+ * it is an assertion after a settle rather than a fifth `Invariant` enumerator, which would fire
+ * constantly during healthy operation.
  *
  * Its controls are what give it teeth. Four constituents, four controls, below: a single control
  * that removed the whole timer would be satisfied by any partial implementation, and a partial fix
@@ -704,7 +702,7 @@ protected:
             if (!t.max_bytes.has_value()) continue;
             uint64_t bytes = 0;
             for (const FileMetadata& file : version->all_files()) {
-                // **L0 excluded, matching what capacity eviction can act on.** An L0 file cannot be
+                // L0 excluded, matching what capacity eviction can act on. An L0 file cannot be
                 // migrated — a fresh file number there would reorder positional recency — so
                 // counting it would make the invariant demand something the engine cannot do, and a
                 // permanently-failing check is worse than no check. L0's size is bounded by its own
@@ -732,8 +730,8 @@ protected:
         return *resolved_;
     }
 
-    /// Produces files across levels, including L0 files on the transient tier, and then **waits for
-    /// the write-driven work to drain**.
+    /// Produces files across levels, including L0 files on the transient tier, and then waits for
+    /// the write-driven work to drain.
     ///
     /// The wait is not cosmetic. Writes bump the maintenance epoch, and so does an executor that
     /// did work, so reconciles keep happening for a while after the last `put` — and a control that
@@ -769,7 +767,7 @@ TEST_F(ConvergenceTest, PlacementConvergesOnAStoreThatHasGoneQuiet) {
     EXPECT_TRUE(converged) << "placement did not converge: " << convergence_failure();
 }
 
-// Control 1 of four: **no timed reconcile at all.** This is the engine as it was, so the case
+// Control 1 of four: no timed reconcile at all. This is the engine as it was, so the case
 // above must fail here or it is proving nothing.
 TEST_F(ConvergenceTest, WithNoTimedReconcileItDoesNotConverge) {
     open(converging_options());
@@ -785,7 +783,7 @@ TEST_F(ConvergenceTest, WithNoTimedReconcileItDoesNotConverge) {
         << "without a trigger that is not a write, nothing can have moved";
 }
 
-// Control 2: **transient rescue drained, the L0 escape not.** An L0 file cannot be migrated — a
+// Control 2: transient rescue drained, the L0 escape not. An L0 file cannot be migrated — a
 // fresh file number would reorder L0's positional recency — so it leaves its tier by being
 // compacted into L1, on a code path that has nothing to do with the migrator. Draining one and not
 // the other is what a partial fix looks like, and it is the most likely way this regresses.
@@ -800,7 +798,7 @@ TEST_F(ConvergenceTest, DrainingMigrationsWithoutTheLevelZeroEscapeDoesNotConver
         << "an over-age L0 file left on the transient tier is exactly the symptom";
 }
 
-// Control 3: **the L0 escape drained, capacity eviction not.** Same argument in the other
+// Control 3: the L0 escape drained, capacity eviction not. Same argument in the other
 // direction — capacity is a byte comparison rather than an age one, so it is a third path.
 TEST_F(ConvergenceTest, DrainingEverythingExceptCapacityEvictionDoesNotConverge) {
     // A capacity bound with no age bound: nothing else can move these files, so suppressing
@@ -818,7 +816,7 @@ TEST_F(ConvergenceTest, DrainingEverythingExceptCapacityEvictionDoesNotConverge)
         << "a tier over max_bytes has not converged, whatever its files' placement says";
 }
 
-// Control 4: **transient rescue drained, durable-to-durable age migration not.** This is the
+// Control 4: transient rescue drained, durable-to-durable age migration not. This is the
 // constituent most likely to be quietly dropped, because it is explicitly the lowest priority and
 // documented as starvable — starving it wastes money rather than risking data. The invariant should
 // catch it, and this control is how that stops being an assumption.

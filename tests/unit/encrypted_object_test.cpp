@@ -1,7 +1,7 @@
 /* The engine's half of the encryption boundary: the mapping between the offsets a reader asks at
  * and the offsets the bytes live at.
  *
- * **This is where the bugs are.** The cryptography is a library call; the arithmetic is ours, it
+ * This is where the bugs are. The cryptography is a library call; the arithmetic is ours, it
  * runs on every read, and an off-by-one in it produces plausible-looking bytes rather than an
  * error. So the ranged-read case is checked exhaustively rather than at a few interesting offsets:
  * every start, every length, across every chunk boundary.
@@ -116,7 +116,7 @@ TEST_F(EncryptedObjectTest, AnEmptyObjectOccupiesNothing) {
     EXPECT_TRUE(read->empty());
 }
 
-/// **The exhaustive one.** Every offset and every length over an object spanning several chunks,
+/// The exhaustive one. Every offset and every length over an object spanning several chunks,
 /// including reads that begin and end mid-chunk and those that run past the end.
 TEST_F(EncryptedObjectTest, EveryRangedReadReturnsExactlyTheRightBytes) {
     const std::string plaintext = pattern(300);   // 5 chunks, last one short

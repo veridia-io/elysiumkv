@@ -5,7 +5,7 @@
  * what recovery does, and doing the same here is the only way to report the file list an operator
  * actually has rather than the one the snapshot alone describes.
  *
- * **It decodes nothing itself.** A tool that reimplements the wire format is a second definition
+ * It decodes nothing itself. A tool that reimplements the wire format is a second definition
  * of it, and the two drift the first time a field is added — which already happened once, where a
  * snapshot read of an *edit* succeeded and quietly left a byte over, because the layouts share a
  * head. This calls `decode_version_snapshot`, `decode_version_edit` and `Version::apply`, so a
@@ -48,7 +48,7 @@ std::string mib(uint64_t bytes) {
 /// whose every cell parses as a number is right-aligned, everything else is left. That keeps
 /// digits lined up for comparison without a new table needing its own rules.
 ///
-/// **Bold only on a terminal.** `tabulate` emits ANSI escapes unconditionally, and this output is
+/// Bold only on a terminal. `tabulate` emits ANSI escapes unconditionally, and this output is
 /// meant to be redirected — a `> report.txt` full of escape sequences is exactly the badly-shaped
 /// output a table library is supposed to prevent.
 void style(tabulate::Table& table) {

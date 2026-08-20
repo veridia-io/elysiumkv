@@ -107,7 +107,7 @@ class ElysiumKVWindowStoreTest {
     }
 
     /**
-     * <b>The case the layout is built around.</b> Entries are grouped by segment first, so a scan
+     * The case the layout is built around. Entries are grouped by segment first, so a scan
      * whose span crosses a boundary is several scans concatenated — and the concatenation is what
      * has to return them in time order.
      */
@@ -177,7 +177,7 @@ class ElysiumKVWindowStoreTest {
     }
 
     /**
-     * <b>Retention, which is the whole reason for the segment prefix.</b> Stream time advancing past
+     * Retention, which is the whole reason for the segment prefix. Stream time advancing past
      * the retention period must make old windows unreadable — and it happens by one truncation, not
      * by a delete per key.
      */
@@ -310,7 +310,7 @@ class ElysiumKVWindowStoreTest {
     }
 
     /**
-     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * Closing without an explicit flush must not lose the writes. The engine has no
      * write-ahead log, so a {@code close()} that does not flush discards everything still in the
      * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
      * closes, so no test that goes through a topology can see this; only closing the store directly

@@ -53,11 +53,10 @@ ResolvedLevels config(int max_files = 4, size_t l1_max_bytes = 4096, int level_c
     return *resolved;
 }
 
-/// **`max_compaction_bytes` bounds the primary input set, not only the expansion.** It used to be
-/// consulted only when deciding whether to widen a compaction back into its source level, so the
-/// set it was documented to bound was unbounded — and at L0 the transitive closure is usually the
-/// whole level. ARCHITECTURE.md turns that budget into the third term of the exposure window, so
-/// the arithmetic there was about a limit nothing enforced.
+/// `max_compaction_bytes` bounds the primary input set, not only the expansion back into the
+/// source level. At L0 the transitive closure is usually the whole level, so a budget consulted
+/// only on expansion bounds nothing — and ARCHITECTURE.md makes it the third term of the exposure
+/// window.
 TEST(PickerTest, AnOverlappingLevelsInputSetStaysInsideTheBudget) {
     // Five mutually overlapping L0 files of 1000 bytes each: the closure is all of them.
     std::vector<FileMetadata> files;
@@ -73,7 +72,7 @@ TEST(PickerTest, AnOverlappingLevelsInputSetStaysInsideTheBudget) {
     EXPECT_LT(compaction->inputs.size(), files.size());
 }
 
-/// **Oldest first, and the direction is forced.** Recency is `(level, file_number)`, so a file left
+/// Oldest first, and the direction is forced. Recency is `(level, file_number)`, so a file left
 /// at an overlapping level is newer than the output exactly when its number is larger. Trimming the
 /// newest keeps every survivor above the output; trimming the oldest would strand a stale file at
 /// L0 shadowing an output built from newer data, and reads would return the stale value.
@@ -108,7 +107,7 @@ TEST(PickerTest, ABudgetSmallerThanOneFileStillCompactsTheOldest) {
     EXPECT_EQ(compaction->inputs.front().file_number, 1u) << "the oldest, so recency survives";
 }
 
-/// **A trim must not reorder what it keeps.** The input vector is the merge's child list, and a tie
+/// A trim must not reorder what it keeps. The input vector is the merge's child list, and a tie
 /// on equal keys is resolved by lowest child index — which is the recency rule only while the
 /// children arrive in the level's own order, newest first at L0. Choosing what to keep by sorting
 /// the vector by file number inverted that, and the merge then took the oldest value for every
@@ -128,9 +127,9 @@ TEST(PickerTest, TrimmingAnOverlappingLevelLeavesTheLevelsOwnOrder) {
     EXPECT_EQ(compaction->inputs.back().file_number, 1u);
 }
 
-/// The one public helper in `LevelOptions`, and until now the only piece of public API with no
-/// caller anywhere — not in `src`, not in the tests, not in either binding. A shape an embedder is
-/// invited to use should at least be known to produce the shape it describes.
+/// The one public helper in `LevelOptions`, and the only piece of public API with no caller in the
+/// engine itself — a shape an embedder is invited to use has to be known to produce what it
+/// describes.
 TEST(PickerTest, TheGeometricLayoutIsWhatItDescribes) {
     const auto levels = LevelOptions::geometric(/*base=*/1024, /*multiplier=*/10, /*count=*/4);
     ASSERT_EQ(levels.size(), 4u);
@@ -142,7 +141,7 @@ TEST(PickerTest, TheGeometricLayoutIsWhatItDescribes) {
 
     EXPECT_EQ(levels.at(1).max_bytes, 1024u);
     EXPECT_EQ(levels.at(2).max_bytes, 10240u);
-    // **The last level carries no capacity**, because it absorbs everything: a bound there would be
+    // The last level carries no capacity, because it absorbs everything: a bound there would be
     // a limit on the store rather than a compaction trigger.
     EXPECT_FALSE(levels.at(3).max_bytes.has_value());
 }
@@ -196,8 +195,8 @@ TEST(PickerTest, TrivialMoveWhenNothingOverlaps) {
     EXPECT_TRUE(compaction->overlaps.empty());
 }
 
-// ARCHITECTURE.md "Compaction" — a move never changes a file's tier, so there is no store boundary to
-// consider — the restriction that used to live here is gone with the redesign.
+// ARCHITECTURE.md "Compaction" — a move never changes a file's tier, so there is no store boundary
+// to consider.
 TEST(PickerTest, TrivialMoveIsNotGatedOnStorage) {
     FileMetadata elsewhere = file(1, 1, "a", "b", 8192);
     elsewhere.store_id = "some-other-store";
@@ -264,7 +263,7 @@ TEST(PickerTest, TrivialMoveIsRefusedForTombstonesAtTheBottommost) {
     EXPECT_TRUE(allowed->trivial_move);
 }
 
-// ARCHITECTURE.md "Compaction" — **the dynamic bottommost condition.** Not the last configured level: a
+// ARCHITECTURE.md "Compaction" — the dynamic bottommost condition. Not the last configured level: a
 // store that never grows past L1 leaves the deeper levels empty forever, and a
 // static rule would never drop a tombstone.
 TEST(PickerTest, BottommostIsAboutTheKeyRangeNotTheLastLevel) {

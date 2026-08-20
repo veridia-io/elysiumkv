@@ -97,7 +97,7 @@ TEST(StaticEncryptionKeyManager, AWrongLengthEnvelopeIsCorruptNotConfig) {
         << "a length ours never has is a routing or damage problem, not a wrong master key";
 }
 
-/// **The remedy differs, so the status has to.** A file wrapped under a master key this process was
+/// The remedy differs, so the status has to. A file wrapped under a master key this process was
 /// not given is a configuration to fix; reporting it as damage would send an operator looking for a
 /// disk fault that is not there.
 TEST(StaticEncryptionKeyManager, AnotherMasterKeyIsConfigNotCorrupt) {

@@ -161,7 +161,7 @@ class ElysiumKVVersionedQueryTest {
     }
 
     /**
-     * <b>The interval selects versions that were <em>in force</em>, not versions written then.</b>
+     * The interval selects versions that were <em>in force</em>, not versions written then.
      * The version set at 1000 is still the answer at 2000, so a query from 2000 must include it even
      * though nothing was written in that window.
      */

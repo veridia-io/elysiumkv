@@ -9,8 +9,8 @@
 namespace elysiumkv::test {
 namespace {
 
-/// ARCHITECTURE.md "Fault injection" — fault cases run in the same synchronous mode, **with kill points
-/// expressed as positions in the op stream**, so they reproduce from a seed like
+/// ARCHITECTURE.md "Fault injection" — fault cases run in the same synchronous mode, with kill points
+/// expressed as positions in the op stream, so they reproduce from a seed like
 /// any other operation. A `Kill` op drops the process: everything since the last
 /// successful flush is lost (ARCHITECTURE.md "Positional recency"), everything before it must come back exactly,
 /// and the replayer checks the whole store against the oracle immediately after

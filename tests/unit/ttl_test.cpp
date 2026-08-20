@@ -88,7 +88,7 @@ TEST_F(Ttl, DataInsideTheLimitStays) {
     EXPECT_TRUE(db_->get(Slice::from(key_at(0))).has_value());
 }
 
-/* **Measured from the newest write, not the oldest.** A file spans whatever arrived between its
+/* Measured from the newest write, not the oldest. A file spans whatever arrived between its
  * memtable's creation and its seal, so keying on the oldest would drop a file that still holds data
  * well inside the limit — the failure being silent data loss rather than a stale read.
  */
@@ -105,7 +105,7 @@ TEST_F(Ttl, AFileIsJudgedByItsNewestWriteNotItsOldest) {
     EXPECT_TRUE(db_->get(Slice::from(key_at(1))).has_value());
 }
 
-/* **The soundness condition.** Dropping a file that shadows an older version of the same key does
+/* The soundness condition. Dropping a file that shadows an older version of the same key does
  * not remove the key — it *uncovers* the older version. That is a resurrection, and it would be far
  * worse than an expiry that runs late. So a file goes only once nothing older overlaps it.
  */

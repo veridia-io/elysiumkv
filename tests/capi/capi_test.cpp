@@ -152,8 +152,8 @@ TEST_F(CApiTest, VersionIsReported) {
     }
 }
 
-// ARCHITECTURE.md "The ABI boundary" — **pin accounting is a first-class invariant with a debug-build leak check
-// at close.** A leaked pin holds a block-cache entry forever.
+// ARCHITECTURE.md "The ABI boundary" — pin accounting is a first-class invariant with a debug-build leak check
+// at close. A leaked pin holds a block-cache entry forever.
 TEST_F(CApiTest, ClosingWithAPinOutstandingReportsTheLeak) {
     elysiumkv_db* db = open();
     ASSERT_NE(db, nullptr);
@@ -211,7 +211,7 @@ TEST_F(CApiTest, ACleanCloseReportsNothing) {
     EXPECT_EQ(elysiumkv_close(db), 0u);
 }
 
-// **A clean close attempts a flush**, because there is no write-ahead log and a memtable dropped on
+// A clean close attempts a flush, because there is no write-ahead log and a memtable dropped on
 // the way out is lost for no reason. The C ABI inherits this from the engine's destructor.
 TEST_F(CApiTest, CloseAttemptsAFlush) {
     elysiumkv_db* db = open();
@@ -520,7 +520,7 @@ TEST_F(CApiTest, AReadOnlyHandleRefusesEveryWriteAndStillReads) {
 /* Encryption reaching a binding: a key manager written in C, and the engine's own construction
  * keyed by it.
  *
- * **The assertion is on the stored bytes, not on the round trip.** A round trip passes against a
+ * The assertion is on the stored bytes, not on the round trip. A round trip passes against a
  * build that registered the provider and then encrypted nothing, which is exactly the failure a C
  * seam invites — the callbacks are reached, so it looks wired.
  */
@@ -595,7 +595,7 @@ TEST_F(CApiTest, AKeyManagerSuppliedThroughTheAbiEncryptsTheStore) {
     }
 }
 
-/// **A binding gets the reason, not just `ELYSIUMKV_CONFIG`.** The instance that knew which check
+/// A binding gets the reason, not just `ELYSIUMKV_CONFIG`. The instance that knew which check
 /// failed is destroyed by the time open returns, so the engine leaves the explanation where the ABI
 /// can pick it up. Without this an embedder sees "config" and has to bisect their options.
 TEST_F(CApiTest, AFailedOpenExplainsItself) {
@@ -687,13 +687,13 @@ TEST_F(CApiTest, TheBuiltInManagersRefuseUnusableConfiguration) {
 namespace {
 
 // A whole construction supplied through the ABI: the seam an embedder uses when the built-in one
-// will not do. **Nothing had ever run it** — the only call to
+// will not do. Nothing had ever run it — the only call to
 // `elysiumkv_options_add_encryption_provider` passed an empty vtable, which is refused before the
 // adapter is constructed, and there is no Java path to it. So every one of `create`, `open`,
 // `seal`, `open_chunk`, `chunk_bytes`, `overhead_bytes`, `object_id` and `destroy_cipher` was
 // dead on arrival, in a seam whose failure mode is a wrong byte rather than an error.
 //
-// Deliberately **not** length-preserving: a four-byte trailer per chunk is what exercises the
+// Deliberately not length-preserving: a four-byte trailer per chunk is what exercises the
 // engine's logical-to-physical mapping, which a zero-overhead cipher would leave untested.
 struct AbiCipher {
     uint64_t object_id = 0;
@@ -925,7 +925,7 @@ TEST_F(CApiTest, StatsBufferMatchesTheDocumentedLayout) {
     EXPECT_EQ(buffer[208], 0u) << "no watermark has been set on this store";
     for (size_t i = 209; i < 216; ++i) EXPECT_EQ(buffer[i], 0u) << "watermark padding at " << i;
 
-    // **The whole point of the self-describing header**: records are located by the declared
+    // The whole point of the self-describing header: records are located by the declared
     // sizes, so those sizes must account for the buffer exactly.
     EXPECT_EQ(needed, header_bytes + level_count * level_record_bytes +
                           tier_count * tier_record_bytes)
@@ -1468,12 +1468,10 @@ TEST_F(CApiTest, ABindingCanSupplyItsOwnBlobStore) {
     elysiumkv_blob_store_destroy(store);
 }
 
-// ARCHITECTURE.md "Dependencies and artifacts" — **the ABI's shape does not vary with the build.** The remote
-// constructors are declared and defined in every configuration, and
-// elysiumkv_features() is how a binding learns whether they will work. If they
-// vanished instead, a binding resolving symbols at load time would fail to load
-// rather than fail to find a feature, and its coverage test could no longer be a
-// set comparison.
+// ARCHITECTURE.md "Dependencies and artifacts" — the ABI's shape does not vary with the build. The
+// remote constructors are declared and defined in every configuration, and elysiumkv_features() is
+// how a binding learns whether they will work. Were they to vanish instead, a binding resolving
+// symbols at load time would fail to load rather than fail to find a feature.
 //
 // This test does not know which build it is in — ELYSIUMKV_WITH_AWS is private to
 // the library — so it asserts the two configurations are each *self-consistent*,

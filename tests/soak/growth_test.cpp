@@ -28,7 +28,7 @@ std::string key_at(int i) {
     return buf;
 }
 
-/// ARCHITECTURE.md "Benchmarks" — **bounded growth.** A steady-state workload over a bounded keyspace
+/// ARCHITECTURE.md "Benchmarks" — bounded growth. A steady-state workload over a bounded keyspace
 /// must plateau in resident memory. This is the one suite that deliberately runs
 /// in `BackgroundMode::Threaded`: the soak and the TSan runs are what the
 /// threaded path exists to exercise.
@@ -47,8 +47,8 @@ TEST(Soak, ResidentMemoryPlateausUnderSteadyState) {
     Options options = make_options(store, Compression::Lz4, 256u << 10);
     options.background = BackgroundMode::Threaded;
 
-    // ARCHITECTURE.md "A process-wide memory budget" — **the claim an embedder actually cares about is that a budget bounds resident
-    // memory, and this is the only suite that measures resident memory at all.** Until now
+    // ARCHITECTURE.md "A process-wide memory budget" — the claim an embedder actually cares about is that a budget bounds resident
+    // memory, and this is the only suite that measures resident memory at all. Until now
     // the budget's evidence was six short targeted tests: it was charged correctly and it
     // shed when asked. That it *holds a process down over time* was untested.
     //
@@ -57,7 +57,7 @@ TEST(Soak, ResidentMemoryPlateausUnderSteadyState) {
     auto budget = std::make_shared<MemoryBudget>(128u << 10);
     options.memory_budget = budget;
 
-    // **Sized to the budget, or this measures a mismatch rather than the budget.** A compaction
+    // Sized to the budget, or this measures a mismatch rather than the budget. A compaction
     // holds two windows per input and the charge is unconditional, so the default 2 MiB window puts
     // 4 MiB against a 128 KiB budget — thirty-two times the limit from one input, arriving and
     // leaving with a background compaction. That is what made this test flaky: resident memory did
@@ -124,7 +124,7 @@ TEST(Soak, ResidentMemoryPlateausUnderSteadyState) {
                                          "holding this run down";
     EXPECT_EQ(stats.memory_budget_total, 128u << 10);
 
-    // **Bounded, not merely non-growing.** `used()` may exceed the total transiently — an
+    // Bounded, not merely non-growing. `used()` may exceed the total transiently — an
     // arena charges for a write already accepted — but it must not run away, or the budget
     // is a counter rather than a limit. A few multiples of the total is the honest bound:
     // the overage is one memtable's worth of arena plus whatever the caches hold between

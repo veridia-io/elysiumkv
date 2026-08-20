@@ -430,7 +430,7 @@ class PartitionedStoreTest {
         }));
 
         // Neither hook fired: afterCommit is after the commit, and a container will not roll back a
-        // transaction it could not commit. **The store cannot detect this** — nothing called it — so
+        // transaction it could not commit. The store cannot detect this — nothing called it — so
         // this asserts the hazard rather than a behaviour, and it is the caller's to close.
         assertTrue(store.behind().isEmpty(), "nothing told the store anything, so nothing changed");
 

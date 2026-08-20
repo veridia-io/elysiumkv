@@ -31,7 +31,7 @@ Entries oracle_entries(const Oracle& oracle) {
     return entries;
 }
 
-/// **Names the first difference even when the counts differ.** Reporting only "returned
+/// Names the first difference even when the counts differ. Reporting only "returned
 /// 30, expected 31" costs an afternoon: the interesting question is always *which* key,
 /// because that identifies the file and the code path that lost it.
 std::string describe_mismatch(const Entries& observed, const Entries& expected) {
@@ -59,25 +59,18 @@ std::string describe_mismatch(const Entries& observed, const Entries& expected) 
            std::to_string(expected.size()) + ")";
 }
 
-/// ARCHITECTURE.md "Benchmarks" — the liveness guard, per operation. **Overridable, because a per-operation wall-clock
-/// bound is only meaningful when this process decides how fast it runs.**
+/// ARCHITECTURE.md "Benchmarks" — the liveness guard, per operation. Overridable, because a per-operation wall-clock
+/// bound is only meaningful when this process decides how fast it runs.
 ///
-/// Under `ctest --parallel` it does not: an operation that takes a minute alone takes five in
-/// company, and every abort that produced was a false alarm. Three attempts at tuning the
-/// number taught that it cannot converge — 60 s, 300 s and 600 s each aborted a different set,
-/// none of which had hung — and the eventual answer was to stop running the long suite in
-/// parallel at all, which turned out to be faster as well. The override remains for anyone who
-/// does load the machine deliberately.
+/// Under `ctest --parallel` it does not: a dozen replay processes, each with its own flush and
+/// compaction threads, oversubscribe the machine, and one operation that triggers a compaction can
+/// genuinely take minutes. No value of this bound converges there — 60 s, 300 s and 600 s each
+/// abort a different set of configurations, none of them hung — so the long suite is not run in
+/// parallel and the override is for anyone who loads the machine deliberately.
 ///
-/// It exists to turn a hang into a located failure, and a hang is infinite — so the only thing
-/// a shorter timeout buys is a faster report, while a longer one buys immunity to a slow
-/// operation being mistaken for a stopped one. Sixty seconds was safe when the suite ran one
-/// test at a time; under `ctest --parallel` it is not, because a dozen replay processes, each
-/// with its own flush and compaction threads, oversubscribe the machine and one operation that
-/// triggers a compaction can genuinely take minutes. Seven configurations aborted here the
-/// first time the nightly was run in parallel, none of them hung.
-///
-/// The ctest per-test timeout is the outer backstop, and is larger still.
+/// The bound turns a hang into a located failure. A hang is infinite, so a shorter value buys only
+/// a faster report while a longer one buys immunity to a slow operation being mistaken for a
+/// stopped one. The ctest per-test timeout is the outer backstop, and is larger still.
 std::chrono::seconds watchdog_timeout() {
     const char* value = std::getenv("ELYSIUMKV_WATCHDOG_SECONDS");
     const int seconds = value == nullptr ? 300 : std::atoi(value);
@@ -202,7 +195,7 @@ public:
                                "tested nothing: lower budget_bytes or raise the write volume"};
         }
 
-        // **The check this list was missing.** `TinyCompactionBudget` carried a budget sized
+        // The check this list was missing. `TinyCompactionBudget` carried a budget sized
         // against its memtable rather than against the files it produces, so the closure never
         // exceeded it and the trim never ran once — for months, while the config sat here looking
         // like coverage of exactly the path that turned out to have a reordering bug in it.
@@ -213,7 +206,7 @@ public:
                                "configuration tested nothing: lower it, or raise the write volume "
                                "until an L0 closure exceeds it"};
         }
-        // **A tiered configuration that never moves a file tests placement, not migration.** The
+        // A tiered configuration that never moves a file tests placement, not migration. The
         // migrator copies an object between stores byte for byte and *renumbers* it, under reads —
         // which is exactly the shape an oracle catches and a unit test has to think to check. This
         // suite ran with `migrations == 0` in every configuration, including the one named for it,
@@ -224,7 +217,7 @@ public:
                                "tested nothing: lower tier0_max_bytes, or raise the write volume "
                                "until the hot tier exceeds it"};
         }
-        // **A cache that never misses tests half of a cache.** `cache_on_write` populates on every
+        // A cache that never misses tests half of a cache. `cache_on_write` populates on every
         // write, so a layer sized above the working set serves everything and the refill path —
         // walk outward, fetch, fill on the way back, and slice the fetched chunk back to what was
         // asked for — never runs. That path is also the only place `cache_fetch_granularity` has
@@ -265,7 +258,7 @@ private:
         db_.reset();
     }
 
-    /// A kill, as distinct from a close. **The two stopped being the same operation** once
+    /// A kill, as distinct from a close. The two stopped being the same operation once
     /// destruction began attempting a flush: a clean close now saves the memtable, so a kill has to
     /// say that it does not want that, or `Kind::Kill` would preserve exactly the writes the oracle
     /// is about to declare lost.
@@ -311,7 +304,7 @@ private:
                 WriteBatch batch;
                 bool any_below = false;
                 for (const auto& [kind, key, value] : op.batch) {
-                    // **Only a put or a remove under the floor refuses the batch.** A range
+                    // Only a put or a remove under the floor refuses the batch. A range
                     // reaching below it is clamped and applies, so counting it here would make the
                     // replay expect a refusal the engine is right not to give.
                     if (kind != DiffOp::Kind::DeleteRange && below_floor(key)) any_below = true;
@@ -375,7 +368,7 @@ private:
                 // refusing it, and the oracle has already erased everything down there, so the
                 // clamp needs no counterpart here.
                 oracle_.delete_range(op.key, op.upper);
-                // **Not applied to `flushed_`**, unlike a truncation. A truncation is a manifest
+                // Not applied to `flushed_`, unlike a truncation. A truncation is a manifest
                 // edit and durable when it returns; this is a record in the memtable, so a kill
                 // before the next flush loses it and every key it covered comes back.
                 return std::nullopt;
@@ -470,7 +463,7 @@ private:
         return std::nullopt;
     }
 
-    /// **The entry count is an upper bound on distinct live keys, never an estimate of them.**
+    /// The entry count is an upper bound on distinct live keys, never an estimate of them.
     ///
     /// Every distinct live key occupies at least one record, so `records >= live keys` holds for
     /// every workload — and the oracle knows exactly how many live keys there are. Checked here

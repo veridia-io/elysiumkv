@@ -79,7 +79,7 @@ protected:
     std::unique_ptr<DB> db_;
 };
 
-/// **A trimmed L0 closure must resolve its duplicates newest-first.** `trim_to_budget` chooses
+/// A trimmed L0 closure must resolve its duplicates newest-first. `trim_to_budget` chooses
 /// which files to keep by age, and choosing them by sorting the input vector left that vector in
 /// ascending file-number order — the reverse of the order the merge reads recency from. Every key
 /// duplicated inside the trimmed set then resolved to its *oldest* copy.
@@ -224,7 +224,7 @@ TEST_F(CompactionTest, TombstonesAreDroppedWhereTheyAreBottommost) {
     EXPECT_EQ(engine().check_invariants(), Status::Ok);
 }
 
-// ARCHITECTURE.md "Compaction" — **the dynamic condition, end to end.** Deeper levels are configured but
+// ARCHITECTURE.md "Compaction" — the dynamic condition, end to end. Deeper levels are configured but
 // will never be reached by a store this small; a static last-level rule would
 // accumulate deletions forever.
 TEST_F(CompactionTest, ASmallStoreStillReclaimsItsDeletions) {
@@ -284,7 +284,7 @@ TEST_F(CompactionTest, TrivialMoveRepointsTheSameObject) {
     expect_reads(1000, 1050, "v1");
 }
 
-/// **A budget that trims an L0 compaction must not reorder recency.** Recency is
+/// A budget that trims an L0 compaction must not reorder recency. Recency is
 /// `(level, file_number)`, so a file left at L0 is newer than the output exactly when its number is
 /// larger. Trimming the newest keeps every survivor above the output; trimming the *oldest* strands
 /// a stale file at L0 shadowing an output built from newer data — and a read then returns the value
@@ -324,7 +324,7 @@ TEST_F(CompactionTest, TrimmingAnOversizedL0CompactionKeepsTheNewestValues) {
     EXPECT_EQ(engine().check_invariants(), Status::Ok);
 }
 
-/// **The counter exists so a configuration can prove it reaches the trim at all.** A budget that
+/// The counter exists so a configuration can prove it reaches the trim at all. A budget that
 /// never bites and one that bites constantly are indistinguishable afterwards — the compaction
 /// looks the same either way — which is how a differential config sat in the suite for months
 /// claiming to cover this path without once entering it.
@@ -364,7 +364,7 @@ TEST_F(CompactionTest, TrimmedCompactionsAreCounted) {
 }
 
 TEST_F(CompactionTest, CompactionOutputIsPlacedByAgeNotByLevel) {
-    // **An injected clock, because the real one made this intermittent.** The bound below is a
+    // An injected clock, because the real one made this intermittent. The bound below is a
     // millisecond, and whether the data had aged past it by the time the compaction placed its
     // output depended on how loaded the machine was — it failed roughly one run in three under a
     // parallel suite with builds running beside it, and never in isolation. Advancing the clock
@@ -607,7 +607,7 @@ private:
 
 }  // namespace
 
-/* **The neuter is the old code**: point `compaction_reader_for` at the store instead of a
+/* The neuter is the old code: point `compaction_reader_for` at the store instead of a
  * `WindowedBlobStore` and this fails, because `SstReader` then asks for one block at a time. At a
  * 4 KiB block that is one request per 4 KiB of input; with a 2 MiB window it is one per 2 MiB. The
  * assertion is deliberately loose — it pins the order of magnitude, not an exact count, because

@@ -35,12 +35,12 @@ import org.openjdk.jmh.runner.options.OptionsBuilder;
  * ARCHITECTURE.md "Benchmarks" — the two binding numbers.
  *
  * <ul>
- *   <li><b>Point-lookup crossing cost</b>, against {@code BM_PointLookupHot} from
+ *   <li>Point-lookup crossing cost, against {@code BM_PointLookupHot} from
  *       the C++ suite. "If the <i>value</i> path shows a copy, the pin protocol
  *       is not doing its job" — {@link #getPinned} versus {@link #getCopy} is
  *       exactly that comparison, and {@code ZeroCopyTest} already asserts the
  *       allocation half of it.
- *   <li><b>Scan crossing cost</b>, per entry. This is the number that decides
+ *   <li>Scan crossing cost, per entry. This is the number that decides
  *       whether {@code elysiumkv_iter_next_batch} (ARCHITECTURE.md "The ABI boundary") earns its ABI surface, and
  *       it is deliberately measured before the batching exists rather than after.
  * </ul>

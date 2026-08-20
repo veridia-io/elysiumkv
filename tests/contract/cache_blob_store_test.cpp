@@ -1,5 +1,5 @@
-// ARCHITECTURE.md "Caches chain" — the cache decorators, run through **the same contract suite as every other
-// store**. That is the point of them being `BlobStore`s: the engine never learns they
+// ARCHITECTURE.md "Caches chain" — the cache decorators, run through the same contract suite as every other
+// store. That is the point of them being `BlobStore`s: the engine never learns they
 // exist, so nothing about the seam may change when one is in the chain.
 //
 // The contract is also the sharpest test a cache can be given. Half its cases are
@@ -276,7 +276,7 @@ TEST_F(CacheTest, EvictionIsLeastRecentlyUsedAndBounded) {
     }
     EXPECT_LE(cache.cached_bytes(), 2500u) << "the bound is a bound";
 
-    // **The survivor is checked first, and it has to be.** Reading the evicted
+    // The survivor is checked first, and it has to be. Reading the evicted
     // object repopulates it, which evicts something else — so asking about object 2
     // before object 1 destroys the evidence about object 1. The first draft of this
     // test did exactly that and blamed the cache.
@@ -417,7 +417,7 @@ TEST_F(CacheTest, LosingCachedBytesCostsLatencyAndNothingElse) {
     EXPECT_EQ(as_string(*after), bytes);
 }
 
-/// **The whole point, end to end: the engine never learns any of this exists.**
+/// The whole point, end to end: the engine never learns any of this exists.
 /// ARCHITECTURE.md "Caches chain" says `Version`, compaction and the manifest are unchanged by a cache in the
 /// chain, and the only way to believe that is to run a database over one.
 TEST_F(CacheTest, ADatabaseRunsOverACachedTierAndTheCacheIsUsed) {

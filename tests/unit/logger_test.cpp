@@ -236,7 +236,7 @@ TEST(LoggerTest, ASinkMayReadTheStoreItIsLoggingAbout) {
     put_until_flush(**db, 400);
     ASSERT_EQ((*db)->flush(), Status::Ok);
 
-    // **`flush()` returning is not the line having been delivered**, and the gap is the very thing
+    // `flush()` returning is not the line having been delivered, and the gap is the very thing
     // this test exists to protect: the emit sites leave the critical section *before* calling the
     // sink, so a background flush that has already cleared `imm_` lets `flush()` return with its
     // log line still unsent. Asserting immediately reads that as "nothing was ever emitted", which

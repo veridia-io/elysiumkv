@@ -29,8 +29,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <p>The invariant checked after <em>every</em> step is the component's whole contract restated as
  * something mechanically checkable:
  *
- * <blockquote><b>A partition that is not behind holds exactly what replaying its entire log
- * produces.</b></blockquote>
+ * <blockquote>A partition that is not behind holds exactly what replaying its entire log
+ * produces.</blockquote>
  *
  * <p>That covers both halves at once. If a commit applied something the log does not have, the store
  * is ahead and the comparison fails. If a commit failed to apply something the log does have and the

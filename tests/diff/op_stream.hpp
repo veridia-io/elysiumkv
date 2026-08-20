@@ -8,7 +8,7 @@
 
 namespace elysiumkv::test {
 
-/// ARCHITECTURE.md "The differential oracle" — the op stream is a **flat list**, deliberately. Shrinking is
+/// ARCHITECTURE.md "The differential oracle" — the op stream is a flat list, deliberately. Shrinking is
 /// straightforward while it is one, and awkward once it has structure, which is
 /// why the shrinker exists from the start rather than being added later.
 struct DiffOp {
@@ -23,7 +23,7 @@ struct DiffOp {
         /// Drops every key below `key`. Durable the moment it returns, so a kill does not undo
         /// it — which is why the replay applies it to the post-crash oracle as well.
         TruncateBelow,
-        /// Deletes `[key, upper)`. **Unlike a truncation this is not durable when it returns**: it
+        /// Deletes `[key, upper)`. Unlike a truncation this is not durable when it returns: it
         /// is a record in the memtable, so a kill before the next flush loses it and the keys come
         /// back. The replay therefore applies it to the live oracle and *not* to the post-crash
         /// one, which is the distinction between the two operations stated as a test.
@@ -63,7 +63,7 @@ struct DiffOp {
     std::string upper;  ///< ScanRange only
     /// Batch only. `kind` is `Kind::Put`, `Kind::Remove` or `Kind::DeleteRange`; for the last the
     /// pair is the bounds. A kind rather than the `is_delete` flag it replaces, because a range is
-    /// a third thing and the whole point of batching it is that **order within the batch decides**
+    /// a third thing and the whole point of batching it is that order within the batch decides
     /// what survives — which only a stream that can express all three ever asks.
     std::vector<std::tuple<Kind, std::string, std::string>> batch;
 

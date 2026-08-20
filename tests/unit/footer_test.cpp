@@ -64,7 +64,7 @@ TEST(Footer, RejectsABadMagic) {
     EXPECT_EQ(Footer::footer_length_from_trailer(Slice::from(encoded)).error(), Status::Corrupt);
 }
 
-// **`Unsupported`, not `Corrupt`.** The magic is eight bytes and is checked first, so reaching an
+// `Unsupported`, not `Corrupt`. The magic is eight bytes and is checked first, so reaching an
 // unknown version means the file is intact and written by a newer build. Reporting damage there
 // sends an operator to a restore they do not need; the remedy is a different binary.
 TEST(Footer, AnUnknownFormatVersionIsUnsupportedNotCorrupt) {
@@ -77,8 +77,8 @@ TEST(Footer, AnUnknownFormatVersionIsUnsupportedNotCorrupt) {
               Status::Unsupported);
 }
 
-// The CRC is the point of v3: damage in the footer used to produce plausible handles and fail at
-// some block that was never the problem.
+// Without the v3 CRC, damage in the footer produces plausible handles and fails at some block
+// that was never the problem.
 TEST(Footer, ADamagedFooterBodyIsCaughtByItsChecksum) {
     Footer footer = sample_footer();
     footer.format_version = Footer::kFormatVersion3;

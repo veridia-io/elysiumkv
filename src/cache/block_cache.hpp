@@ -30,12 +30,10 @@ public:
     /// bytes this process is holding purely as an optimisation.
     virtual size_t evict_at_least(size_t bytes) = 0;
 
-    /// ARCHITECTURE.md "Statistics are a buffer, not a struct" — hit and miss counts, on the interface rather than on one
-    /// implementation. They were previously readable only from the concrete
-    /// sharded LRU, and only when the engine had constructed it itself, so any
-    /// embedder that supplied a cache — every binding does, through the C ABI —
-    /// saw both fields as a permanent zero. A statistic that silently reads zero
-    /// is worse than one that is absent: it answers the question wrongly.
+    /// ARCHITECTURE.md "Statistics are a buffer, not a struct" — hit and miss counts, on the
+    /// interface rather than on one implementation: an embedder that supplies its own cache, as
+    /// every binding does through the C ABI, would otherwise read both fields as a permanent zero,
+    /// which answers the question wrongly rather than not answering it.
     ///
     /// A decorating cache (ARCHITECTURE.md "Caches chain") reports its own layer; the chain is not summed
     /// here, because "the hit rate" of a chain is not a single number.

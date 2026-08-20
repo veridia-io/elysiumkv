@@ -94,7 +94,7 @@ TEST(Memtable, DeleteReplacesAValueWithATombstone) {
 
 // --- range deletes -------------------------------------------------------------
 
-/* **A range delete does two things, and the second is the interesting one.**
+/* A range delete does two things, and the second is the interesting one.
  *
  * It records the range, so the SST this memtable flushes into shadows every older file. And it
  * turns the keys the memtable *already holds* into point deletes on the spot — because a range
@@ -117,7 +117,7 @@ TEST(Memtable, DeleteRangeTurnsTheKeysItAlreadyHoldsIntoTombstones) {
     EXPECT_EQ(table.num_tombstones(), 4u);
 }
 
-/* **The ordering-free file format rests on this case.** A write landing after a range delete must
+/* The ordering-free file format rests on this case. A write landing after a range delete must
  * survive it, and the file that carries both cannot say which came first — so the memtable, which
  * does know, resolves it at call time. The later put simply overwrites the point delete.
  */

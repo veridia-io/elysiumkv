@@ -126,7 +126,7 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>A write older than the retention is refused, not stored.</b> There is nowhere to put it
+     * A write older than the retention is refused, not stored. There is nowhere to put it
      * that a read could reach, and the API has a return code that says so — a silent drop would be
      * indistinguishable from a write that landed.
      */
@@ -142,7 +142,7 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>The current value outlives the history retention.</b> A key written once and never touched
+     * The current value outlives the history retention. A key written once and never touched
      * again is still readable however far stream time has advanced — which is why the two live in
      * separate keyspaces and only one of them is expired.
      */
@@ -200,7 +200,7 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>An {@code asOf} far in the future must answer, not hang.</b> Both history scans walk one
+     * An {@code asOf} far in the future must answer, not hang. Both history scans walk one
      * segment at a time, so an unclamped bound is not a slow query: {@link Long#MAX_VALUE} names a
      * segment around 10^13 and the loop would open an iterator for each. This is the same defect
      * the window store had, and it fails as a timeout rather than an assertion.
@@ -223,7 +223,7 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>A key must not see the history of a key that extends it.</b> User keys are
+     * A key must not see the history of a key that extends it. User keys are
      * variable-length, so a history scan bounded by {@code key ‖ ts} over-selects: a longer key's
      * extra bytes occupy the positions the shorter key's timestamp does, and if they are small
      * enough to look like a timestamp in range, its entries land inside the scan.
@@ -268,8 +268,8 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>Real timestamps are epoch milliseconds, which is where a floor of zero stops being
-     * harmless.</b> A history miss walks segments downwards, so a floor at 1970 means several
+     * Real timestamps are epoch milliseconds, which is where a floor of zero stops being
+     * harmless. A history miss walks segments downwards, so a floor at 1970 means several
      * million iterator opens for a lookup that should touch two or three. The retention floor
      * bounds it; a regression here shows up as this test timing out rather than failing.
      */
@@ -295,7 +295,7 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>A reopened store remembers stream time.</b> Retention is measured from it and so are both
+     * A reopened store remembers stream time. Retention is measured from it and so are both
      * scan clamps, so a store that came back at zero would expire by a clock that restarted and
      * would look for history below segment zero — reporting an empty store that is not empty.
      */
@@ -319,7 +319,7 @@ class ElysiumKVVersionedStoreTest {
     }
 
     /**
-     * <b>Closing without an explicit flush must not lose the writes.</b> The engine has no
+     * Closing without an explicit flush must not lose the writes. The engine has no
      * write-ahead log, so a {@code close()} that does not flush discards everything still in the
      * memtable — silently, which is the part that makes it dangerous. Streams flushes before it
      * closes, so no test that goes through a topology can see this; only closing the store directly

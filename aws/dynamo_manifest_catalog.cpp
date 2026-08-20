@@ -444,7 +444,7 @@ struct DynamoManifestCatalog::Impl {
         const Status first = put_chunked(address, bytes);
         if (first != Status::Config) return first;
 
-        // **Residue means *incomplete*.** A complete set at this address is a real edit, and
+        // Residue means *incomplete*. A complete set at this address is a real edit, and
         // overwriting it would break the write-once contract the whole ownership protocol rests on
         // — `next_seq_` is monotonic, so this instance reaching an address it already filled is a
         // programming error and must stay one. Only a set that was never finished can be cleared.
@@ -690,7 +690,7 @@ Result<std::optional<ManifestCatalog::Entry>> DynamoManifestCatalog::compare_and
 }
 
 std::future<Status> DynamoManifestCatalog::put_snapshot(uint64_t generation, Slice bytes) {
-    // **Write-once is a contract every catalog keeps, so a *complete* snapshot still refuses.**
+    // Write-once is a contract every catalog keeps, so a *complete* snapshot still refuses.
     // The attempt in the address exists to make a retry over an unfinished one possible, not to
     // make a generation's snapshot rewritable — `ManifestCatalogContract.ObjectsAreWriteOnce`
     // holds the disk, S3 and DynamoDB implementations to the same answer, and one of them quietly

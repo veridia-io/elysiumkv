@@ -46,7 +46,7 @@ TEST(Version, TheTruncationPointOnlyEverMovesForward) {
             << "an edit that says nothing about truncation leaves it where it was";
 }
 
-/* **A file a newer range tombstone covers whole can be unlinked without being read** — one manifest
+/* A file a newer range tombstone covers whole can be unlinked without being read — one manifest
  * edit, no I/O. It is `files_entirely_truncated` generalised from a floor to a range, and it is what
  * makes evicting a tenant cheap rather than merely expressible: otherwise the bytes come back only
  * when some later compaction happens to rewrite them, which for a bottom-level file may be never.
@@ -112,7 +112,7 @@ TEST(Version, AFileWithItsOwnRangesIsNeverReclaimedThisWay) {
     EXPECT_TRUE(version.range_drop_candidates().empty());
 }
 
-/* **A hull of several ranges shortlists but does not decide.** The manifest records the span of a
+/* A hull of several ranges shortlists but does not decide. The manifest records the span of a
  * file's ranges, which for two is a bounding interval with a gap in it — and a hull can show a file
  * is *not* covered, never that it is. So the candidate comes back marked inexact, for a caller with
  * store access to settle by reading the block; a `Version` is a data structure and does no I/O.
@@ -150,7 +150,7 @@ TEST(Version, AFileWhoseNewestWriteHasExpiredIsDropped) {
     EXPECT_TRUE(version.files_expired_before(99).empty()) << "not yet";
 }
 
-/* **The soundness condition, and the reason this is not simply "drop what is old".**
+/* The soundness condition, and the reason this is not simply "drop what is old".
  *
  * A file at a deeper level can hold data *newer* than a file above it — a compaction output takes
  * the max over its inputs, so a deep file that absorbed recent keys carries a recent stamp while an
@@ -179,7 +179,7 @@ TEST(Version, AnOlderLevelZeroSiblingAlsoBlocksTheDrop) {
     EXPECT_TRUE(version.files_expired_before(150).empty());
 }
 
-/* **The boundaries, because the answer is now found by binary search rather than a scan.**
+/* The boundaries, because the answer is now found by binary search rather than a scan.
  *
  * A file's span is closed at both ends, so a deeper file ending exactly where the candidate begins
  * *does* overlap it. That is the case a half-open search gets wrong, and it gets it wrong silently:
@@ -318,14 +318,14 @@ TEST(VersionEdit, RoundTrips) {
 
 /* The encryption fields are reserved and written empty (`FORMAT.md` §6), but reserved is not the
  * same as absent: they occupy positions, and everything after them
- * is found by reading through. So the round trip is asserted with them **populated**, which is what
+ * is found by reading through. So the round trip is asserted with them populated, which is what
  * the phase that fills them will do — and if that phase forgets to encode or decode one, the fields
  * after it decode as garbage rather than the record failing outright.
  */
 TEST(VersionEdit, TheReservedEncryptionFieldsRoundTripWhenPopulated) {
     FileMetadata carrying = file(1, 11, "a", "z");
     carrying.encryption_provider = "kms-gcm-2026";
-    // **The length comes from the literal, not from counting it by hand.** The hand-written 15 that
+    // The length comes from the literal, not from counting it by hand. The hand-written 15 that
     // was here is 13 bytes of literal, so the string constructor read past the end of it — caught by
     // gcc's -Warray-bounds, and invisible to a round-trip test that would happily carry the extra
     // bytes both ways. `sv` keeps the embedded nulls and cannot disagree with what is written.

@@ -33,13 +33,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * The configuration production will actually run, end to end: an <b>ephemeral local tier over S3</b>
- * with the manifest in DynamoDB, driven through {@link PartitionedStore} against a <b>real Kafka
- * transaction</b>.
+ * The configuration production will actually run, end to end: an ephemeral local tier over S3
+ * with the manifest in DynamoDB, driven through {@link PartitionedStore} against a real Kafka
+ * transaction.
  *
  * <p>Every piece of this is already tested somewhere. The durability suite wipes a transient tier
  * but drives it from {@code InMemoryLog}; the Kafka suite uses a real broker but a single durable
- * tier on disk. Neither poses the case where <b>two independent recovery mechanisms meet</b>:
+ * tier on disk. Neither poses the case where two independent recovery mechanisms meet:
  *
  * <ol>
  *   <li>the <em>engine</em> discards files whose transient store did not come back, and lowers the

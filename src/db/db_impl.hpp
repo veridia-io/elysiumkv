@@ -360,9 +360,8 @@ private:
     bool compact_l0_file_off_its_tier(Status& status);
     Status write_compaction_outputs(const Compaction& compaction,
                                     std::vector<FileMetadata>& outputs);
-    /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. It no longer
-    /// depends on the file's size, so it no longer has to be evaluated after the bytes exist; the
-    /// call sites simply have not been moved earlier, and nothing requires them to be.
+    /// ARCHITECTURE.md "A tier is not a level" — where a file belongs, from its age alone. Nothing
+    /// here depends on the file's size, so a call site need not wait until the bytes exist.
     /// `flush_interval` with this memtable's share of `flush_interval_jitter` folded in.
     uint64_t flush_interval_for(uint64_t created_ms) const;
     /// `file_number` is 0 for output that has not been written yet, which takes no `age_jitter`.

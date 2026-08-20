@@ -8,8 +8,8 @@
 
 namespace elysiumkv::test {
 
-/// ARCHITECTURE.md "The differential oracle" — **`std::map<std::string, std::string>` under bytewise comparison is
-/// the complete specification of observable behaviour.** With no sequence
+/// ARCHITECTURE.md "The differential oracle" — `std::map<std::string, std::string>` under bytewise comparison is
+/// the complete specification of observable behaviour. With no sequence
 /// numbers, snapshots, MVCC or column families, there is nothing else to model,
 /// so this is a thin wrapper rather than a second storage engine.
 class Oracle {

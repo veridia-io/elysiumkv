@@ -125,7 +125,7 @@ TEST_F(MigrationTest, CompactLevelFinishesACodecChange) {
         << "compact_level has a completion condition; it is not a periodic rewrite";
 }
 
-// ARCHITECTURE.md "Inside an SST" — **cold key ranges may never be swept.** This documents the limit rather
+// ARCHITECTURE.md "Inside an SST" — cold key ranges may never be swept. This documents the limit rather
 // than asserting a bug: correctness is unaffected, completion is what is lost.
 TEST_F(MigrationTest, ColdRangesAreNotSweptByOrdinaryCompaction) {
     open(settled_options(Compression::None));

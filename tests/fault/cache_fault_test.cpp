@@ -1,4 +1,4 @@
-// ARCHITECTURE.md "Immutable named objects", ARCHITECTURE.md "Caches chain" — **the caches under injected failure**, which is the one set of claims about
+// ARCHITECTURE.md "Immutable named objects", ARCHITECTURE.md "Caches chain" — the caches under injected failure, which is the one set of claims about
 // them the differential oracle cannot check: that suite demands exact results, and an
 // injected `Io` makes a read fail legitimately.
 //
@@ -58,7 +58,7 @@ protected:
     std::shared_ptr<MemoryCacheBlobStore> memory_;
 };
 
-/// **The one that would be catastrophic.** A miss that reaches an unreachable store must
+/// The one that would be catastrophic. A miss that reaches an unreachable store must
 /// report `Io`, never `NotFound`: absence is what the discard path acts on, and a cache
 /// converting one into the other would let a transient outage look like a wiped store.
 TEST_F(CacheFaultTest, AMissAgainstAnUnreachableStoreIsIoNeverNotFound) {
@@ -146,12 +146,12 @@ TEST_F(CacheFaultTest, AFailedPutCachesNothing) {
 /// A whole database over the chain, with the store below failing and recovering. ARCHITECTURE.md "A tier is not a level" — a
 /// store that cannot answer is not a store that lost data — and a cache in the way must
 /// not change that verdict either way.
-/// **A rotted cache is not a corrupt store.** Only the block layer runs the checksum, so a cached
+/// A rotted cache is not a corrupt store. Only the block layer runs the checksum, so a cached
 /// copy that was truncated or flipped surfaced as `Status::Corrupt` for the *store* while the
 /// authoritative object was untouched — which sends an operator to a restore for a healthy store,
 /// and breaks the promise the cache design rests on: a cache may be absent, never wrong.
 ///
-/// **A test double rather than `DiskCacheBlobStore`**, deliberately. That one is checked by
+/// A test double rather than `DiskCacheBlobStore`, deliberately. That one is checked by
 /// `verify_cache_hit`, which re-fetches every hit and aborts on a mismatch — so under the debug and
 /// sanitizer presets it catches the rot itself and this path is never reached. It is compiled out
 /// in release, which is precisely where the repair below is the only thing standing between a bad

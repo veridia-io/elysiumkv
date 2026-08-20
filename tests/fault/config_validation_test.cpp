@@ -13,7 +13,7 @@
 namespace elysiumkv::test {
 namespace {
 
-/// ARCHITECTURE.md "Fault injection" — configuration validation, **all rejected at open**. Every one of
+/// ARCHITECTURE.md "Fault injection" — configuration validation, all rejected at open. Every one of
 /// these describes a store that would be silently wrong later, so the check
 /// belongs at the door.
 class ConfigValidationTest : public ::testing::Test {
@@ -40,8 +40,8 @@ TEST_F(ConfigValidationTest, NoTiersAtAllIsRejected) {
     EXPECT_EQ(open_error(options), Status::Config);
 }
 
-// The last tier catches everything, so it can bound nothing that would send a file past it. Age is
-// now the only such bound — the per-file size bound that used to be checked here is gone.
+// The last tier catches everything, so it can bound nothing that would send a file past it, and
+// age is the only such bound.
 TEST_F(ConfigValidationTest, TheLastTierMayNotBoundAge) {
     Options aged = base();
     aged.tiers.back().max_age = Duration(60'000);
@@ -217,7 +217,7 @@ TEST_F(ConfigValidationTest, AWindowThatWouldOverflowItsOwnBudgetChargeIsRejecte
     EXPECT_EQ(open_error(options), Status::Config);
 }
 
-// **A window wider than the whole compaction budget is not an error.** A store with a small
+// A window wider than the whole compaction budget is not an error. A store with a small
 // compaction budget is a real configuration — the differential suite runs one — and a window that
 // covers a whole input reads it in a single request, which is the best case.
 TEST_F(ConfigValidationTest, AWindowWiderThanTheCompactionBudgetIsAccepted) {
@@ -263,7 +263,7 @@ TEST_F(ConfigValidationTest, GuardedOpenAcceptsAnAllDurableConfiguration) {
         << "several tiers are fine; it is transience the guard is about";
 }
 
-/// **`Status::Config` names one bucket with a dozen causes in it**, and an operator holding only
+/// `Status::Config` names one bucket with a dozen causes in it, and an operator holding only
 /// the status has to bisect the options struct. Each rejection therefore leaves a message behind,
 /// and this pins that they are distinguishable rather than a single generic sentence.
 ///

@@ -89,7 +89,7 @@ std::future<GetResult> FaultInjectingBlobStore::get(std::string_view name, uint6
         if (const Rule* rule = match(Op::Get, name)) injected = rule->status;
     }
 
-    // **One result and one return.** Returning the injected failure from its own statement leaves
+    // One result and one return. Returning the injected failure from its own statement leaves
     // gcc 13 looking at a move of an `expected` whose value arm it can prove was never written, and
     // `-Wmaybe-uninitialized` fails the build over reading it. An injected failure still skips the
     // latency: a store that rejected the call never made the round trip.

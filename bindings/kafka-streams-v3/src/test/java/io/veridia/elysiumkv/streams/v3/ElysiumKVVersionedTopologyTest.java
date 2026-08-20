@@ -70,7 +70,7 @@ class ElysiumKVVersionedTopologyTest {
     }
 
     /**
-     * <b>A late order is priced at the time it happened.</b> Both prices are in the table before the
+     * A late order is priced at the time it happened. Both prices are in the table before the
      * order is processed, so a non-versioned table would answer with the newer one.
      */
     @Test

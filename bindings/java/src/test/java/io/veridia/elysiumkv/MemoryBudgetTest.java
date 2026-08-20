@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * ARCHITECTURE.md "A process-wide memory budget" — the budget is <b>per process</b>, and the case it exists for is several
+ * ARCHITECTURE.md "A process-wide memory budget" — the budget is per process, and the case it exists for is several
  * instances in one JVM. That is the case this checks: two databases, one budget, and the
  * charge visible from Java.
  *

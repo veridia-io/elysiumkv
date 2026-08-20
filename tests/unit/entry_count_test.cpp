@@ -12,13 +12,11 @@
  *
  * The slack is superseded versions not yet merged, and it closes under compaction.
  *
- * **The subtraction was nearly left out**, on the theory that a tombstone shadowing nothing would
- * "subtract a key that was never counted" and push the answer below the truth. That is wrong — the
- * tombstone counts *itself* among the records, so removing it can only cancel its own contribution.
- * `TheSubtractionIsAlsoAnUpperBoundAndATighterOne` is where that argument is pinned, because it is a
- * mistake that reads as plausible.
+ * A tombstone shadowing nothing does not push the answer below the truth, though the argument that
+ * it would reads as plausible: the tombstone counts *itself* among the records, so removing it can
+ * only cancel its own contribution. `TheSubtractionIsAlsoAnUpperBoundAndATighterOne` pins that.
  *
- * **The counts themselves are exact.** `num_entries` and `num_tombstones` are written by the SST
+ * The counts themselves are exact. `num_entries` and `num_tombstones` are written by the SST
  * builder as it appends, so nothing here is sampled. The approximation is entirely in the cross-file
  * dimension.
  */
@@ -50,7 +48,7 @@ protected:
         // the test asks — otherwise "before compaction" is not a state the test controls.
         Options options = make_options(store_, Compression::None, 4u << 20);
         options.background = BackgroundMode::Inline;
-        // **Inline mode compacts after every flush**, so L0's default capacity of four files would
+        // Inline mode compacts after every flush, so L0's default capacity of four files would
         // merge the rounds as they were written and there would be no un-merged state to observe.
         // Raising it is what makes "before compaction" reachable.
         options.levels.at(0).max_files = 1000;
@@ -116,7 +114,7 @@ TEST_F(EntryCountTest, DistinctPutsAreCountedOnceEachBeforeAndAfterAFlush) {
     EXPECT_EQ(stats().levels[0].entries, 200u);
 }
 
-// **The case that makes "upper bound" mean something.** Without it, an implementation that somehow
+// The case that makes "upper bound" mean something. Without it, an implementation that somehow
 // reported distinct keys would pass everything else and the framing would be untested prose.
 TEST_F(EntryCountTest, SupersededVersionsAreCountedUntilCompactionMergesThem) {
     open_db();
@@ -164,7 +162,7 @@ TEST_F(EntryCountTest, ATombstoneIsARecordUntilItIsDropped) {
     EXPECT_EQ(tombstone_count(), 0u);
 }
 
-/* **The claim that nearly went in backwards.**
+/* The claim that nearly went in backwards.
  *
  * `entries - tombstones` was very nearly rejected on the grounds that it is "neither an upper nor a
  * lower bound", with the argument that a tombstone shadowing nothing subtracts a key that was never

@@ -1,5 +1,5 @@
-// ARCHITECTURE.md "Contract suites" — **the remote implementations run the same contract suites as the local
-// ones, unchanged.** `blob_store_contract.hpp` said "step 11 instantiates it for S3
+// ARCHITECTURE.md "Contract suites" — the remote implementations run the same contract suites as the local
+// ones, unchanged. `blob_store_contract.hpp` said "step 11 instantiates it for S3
 // without editing a case"; this is that, and it is the only place the remote code
 // runs under ASan, UBSan and TSan.
 //
@@ -35,7 +35,7 @@ constexpr const char* kTable = "elysiumkv-manifest";
 
 /// Every case needs a *fresh* namespace, because these stores are write-once and a
 /// second test reusing an address would fail on the address rather than on what it
-/// is testing. But repeated `create()` calls **within one case** must address the
+/// is testing. But repeated `create()` calls within one case must address the
 /// same store, or the catalog contract's racing case would race two unrelated
 /// stores and never contend.
 ///

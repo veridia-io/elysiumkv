@@ -65,15 +65,14 @@ protected:
 };
 
 
-/// **Opening a reader costs one round trip.** It used to cost three: the footer, then the index,
-/// then the bloom filter. The filter went first — only `get` consults it, and a compaction opens a
-/// reader per input, so an eager load moved about 1.25 MB per million entries and threw it away.
-/// Then the footer and the index collapsed into one speculative tail read, which the file layout
-/// allows because they are adjacent at the end (FORMAT.md §5).
+/// Opening a reader must cost one round trip: the footer and the index are adjacent at the end
+/// (FORMAT.md §5) and are taken in one speculative tail read, and the bloom filter is loaded
+/// lazily because only `get` consults it while a compaction opens a reader per input — an eager
+/// load moves about 1.25 MB per million entries and throws it away.
 ///
-/// The count is the assertion rather than a timing, because it is the thing that is true on every
-/// machine: against a remote store each of those was a round trip, and `reader_cache_bytes` was
-/// documented as generous *because* evicting a reader cost three of them.
+/// Asserted as a count rather than a timing, since that is what holds on every machine. Against a
+/// remote store each extra read is a round trip, and `reader_cache_bytes` is sized generously
+/// because a reader eviction pays them again.
 TEST(SstFilterTest, OpeningAReaderCostsOneRoundTrip) {
     TempDir dir;
     auto disk = std::make_shared<DiskBlobStore>(dir.path());
@@ -103,9 +102,9 @@ TEST(SstFilterTest, OpeningAReaderCostsOneRoundTrip) {
 }
 
 
-/// **The tombstone list is decoded once per reader.** It is asked for once per carrying file per
-/// iterator construction and once per input per compaction, and each call used to fetch the block
-/// and rebuild two strings per tombstone. A file is immutable, so its tombstones are too.
+/// The tombstone list is decoded once per reader: it is asked for once per carrying file per
+/// iterator construction and once per input per compaction, and decoding per call fetches the block
+/// and rebuilds two strings per tombstone. A file is immutable, so its tombstones are too.
 TEST(SstFilterTest, TheRangeTombstoneListIsDecodedOnce) {
     TempDir dir;
     auto disk = std::make_shared<DiskBlobStore>(dir.path());
@@ -294,7 +293,7 @@ TEST_P(SstTest, PinnedValuesOutliveTheirReader) {
 
 /* A range tombstone rides in its own block and is addressed by seek, not by scanning.
  *
- * **The file's own entries are deliberately unaffected by its own tombstone.** That rule is what
+ * The file's own entries are deliberately unaffected by its own tombstone. That rule is what
  * makes range deletes implementable without sequence numbers: within one file there is no ordering
  * to appeal to, so a tombstone shadows everything strictly older in `(level, file_number)` order
  * and nothing beside it. `range_deletes` answers only the shadowing question; the caller asks it
@@ -356,7 +355,7 @@ TEST_P(SstTest, SeveralRangeTombstonesAreEachAddressable) {
     EXPECT_EQ((*listed)[2].upper, "z");
 }
 
-/* **A file with no range tombstones stays format v1.** The version is per file precisely so that
+/* A file with no range tombstones stays format v1. The version is per file precisely so that
  * adding this feature does not reformat a keyspace nobody deleted from — and so that a reader that
  * predates range tombstones keeps reading those files, while refusing exactly the ones whose keys
  * it would otherwise report as present.

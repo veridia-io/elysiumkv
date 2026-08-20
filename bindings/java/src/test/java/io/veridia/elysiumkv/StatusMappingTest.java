@@ -12,8 +12,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * ARCHITECTURE.md "The ABI boundary" — the first rule, from the Java side: <b>the ABI must never invite a binding to
- * reinterpret a failure as absence.</b> Absence is {@code null}; everything else
+ * ARCHITECTURE.md "The ABI boundary" — the first rule, from the Java side: the ABI must never invite a binding to
+ * reinterpret a failure as absence. Absence is {@code null}; everything else
  * throws, and the type says whether retrying is meaningful.
  */
 @ExtendWith(PinLeakExtension.class)

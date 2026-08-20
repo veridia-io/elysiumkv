@@ -74,7 +74,7 @@ TEST_P(BlobStoreContract, PutAtAnExistingNameNeverOverwrites) {
 TEST_P(BlobStoreContract, RemoveIsIdempotentAndMakesTheObjectAbsent) {
     ASSERT_EQ(put("000000000001.sst", "x"), Status::Ok);
 
-    // **Read before removing.** A store that holds an open descriptor keeps reading an unlinked
+    // Read before removing. A store that holds an open descriptor keeps reading an unlinked
     // inode perfectly well, so a removed object stays readable unless the remove drops it — and
     // the removal is only observable through a store that had already been asked for the object.
     ASSERT_TRUE(get("000000000001.sst").has_value());

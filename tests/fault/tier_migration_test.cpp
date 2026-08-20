@@ -82,12 +82,8 @@ protected:
 // Open lists every store, and against object storage each listing is a round trip. Paying them one
 // after another makes opening a two-tier instance twice as slow as it needs to be — and the futures
 // do not fix it, because every store here completes them synchronously.
-/// **Counted, not timed.** This used to measure `open` and assert it finished inside two
-/// latencies. That holds on an idle machine and fails on a loaded one under a sanitizer, and the
-/// bound cannot be widened to fix it: serial *is* two latencies, so any bound loose enough to
-/// absorb the noise also admits the behaviour being ruled out. Two listings in flight at the same
-/// instant is the property itself, it is discrete, and load makes the overlap more likely rather
-/// than less — so the test now fails only for the reason it is named after.
+/// Counted, not timed: two listings in flight at the same instant is the property itself, and it
+/// survives a loaded machine where a timing bound cannot. See `peak_concurrent_lists`.
 TEST_F(TierMigrationTest, TheStoresAreListedConcurrentlyAtOpen) {
     // Long enough that two concurrent listings certainly overlap, short enough to pay for once.
     constexpr auto kListLatency = std::chrono::milliseconds(100);
@@ -215,7 +211,7 @@ TEST_F(TierMigrationTest, AnL0FileLeavesATransientTierByCompactionNotMigration) 
     }
 }
 
-// ARCHITECTURE.md "Migration between tiers" and ARCHITECTURE.md "The manifest is snapshots plus edits" — migration is a byte copy under a **fresh file number**. A
+// ARCHITECTURE.md "Migration between tiers" and ARCHITECTURE.md "The manifest is snapshots plus edits" — migration is a byte copy under a fresh file number. A
 // number is never reused, so the old object is unambiguously obsolete and every
 // component keyed on the number alone stays correct.
 TEST_F(TierMigrationTest, MigrationCopiesBytesUnderAFreshFileNumber) {
@@ -256,7 +252,7 @@ TEST_F(TierMigrationTest, MigrationCopiesBytesUnderAFreshFileNumber) {
     EXPECT_TRUE(hot->empty()) << "durable edit first, delete second — and the delete happened";
 }
 
-// ARCHITECTURE.md "Migration between tiers" — **placement is monotone.** A file only ever moves colder. A violation
+// ARCHITECTURE.md "Migration between tiers" — placement is monotone. A file only ever moves colder. A violation
 // means files oscillate between stores and pay a copy each way.
 TEST_F(TierMigrationTest, PlacementIsMonotoneOverALongRun) {
     open(make_tiered_options(store_, Duration(20'000)));
@@ -390,14 +386,14 @@ TEST_F(TierMigrationTest, TheStallValveFiresPastATierStallAge) {
     options.background = BackgroundMode::Threaded;
     options.block_on_stall = false;
     options.clock = [this] { return now_.load(std::memory_order_relaxed); };
-    // **The valve now engages on a coordinator tick, not on the writing thread.** One evaluator:
+    // The valve now engages on a coordinator tick, not on the writing thread. One evaluator:
     // the maintenance loop owns the `stall_age` predicate and publishes the answer, so the write
     // path cannot compute a different one. The cost is that engaging lags by up to one interval,
     // which is the `+ interval` term the exposure window already carries — so the test waits for
     // it rather than assuming the very next `put` sees it.
     options.maintenance_interval = Duration(20);
 
-    // **Migration must be unable to keep up, not merely slow.** A slow cold store was the first
+    // Migration must be unable to keep up, not merely slow. A slow cold store was the first
     // shape here and it makes the stalled state a *window*: the rescue the age crossing makes due is
     // exactly what clears the flag again, so the test was racing the thing it had slowed down, and it
     // lost that race on a CI runner while passing locally. An unreachable cold store is the honest
@@ -547,7 +543,7 @@ TEST_F(TierMigrationTest, AKillBetweenTheEditAndTheDeleteLeavesACollectableOrpha
         EXPECT_TRUE(db_->get(Slice::from(key_at(i))).has_value()) << i;
     }
 
-    // **While this process lives the object is not an orphan**, it is a *pending deletion* whose
+    // While this process lives the object is not an orphan, it is a *pending deletion* whose
     // delete failed — it has an exact unreferenced-since time and `obsolete_retention` of its own,
     // and the sweep deliberately leaves it alone rather than double-counting it.
     ASSERT_EQ(engine().sweep_orphans_for_test(), Status::Ok);
@@ -578,7 +574,7 @@ TEST_F(TierMigrationTest, AKillBetweenTheEditAndTheDeleteLeavesACollectableOrpha
 }
 
 // ARCHITECTURE.md "Fault injection" — compaction output old enough to exceed the hot tier's `max_age` is
-// written **directly** to the colder store. Asserting only on where it ends up
+// written directly to the colder store. Asserting only on where it ends up
 // would also pass for an implementation that writes it hot and migrates it out
 // a moment later, which pays a write to fast storage and a copy for every deep
 // compaction — so assert that no migration happened at all.
@@ -639,8 +635,8 @@ TEST_F(TierMigrationTest, ADurableToDurableMigrationMayBeStarved) {
     }
 }
 
-// ARCHITECTURE.md "Compaction" — **the divergence between the two axes, which is the whole reason they
-// are separate.** A dormant key range generates no score pressure, so its file
+// ARCHITECTURE.md "Compaction" — the divergence between the two axes, which is the whole reason they
+// are separate. A dormant key range generates no score pressure, so its file
 // lingers at a shallow level and ages there until it belongs on cold storage;
 // a range receiving fresh writes has young files at the same level. One level,
 // two tiers, at the same time. Level-derived placement would have pinned the
@@ -701,23 +697,19 @@ TEST_F(TierMigrationTest, OneLevelSpansTwoTiersWhenPartOfTheKeyspaceGoesQuiet) {
     }
 }
 
-// `SizePlacesAFileJustAsAgeDoes` lived here and is **deliberately deleted rather than inverted.**
-// It asserted that a large, brand-new file was placed on a cold tier at birth — which was the whole
-// problem with `Tier::max_file_bytes`: placement has to be monotone in age, and a file arriving cold
-// on the day it was written is the opposite of that. There is no replacement assertion, because
-// there is no longer a second input to placement to assert anything about. Keeping the test with its
-// expectations flipped would have implied the behaviour still had a size dimension.
+// Placement has a single input: age. There is deliberately no size dimension to assert — a large,
+// brand-new file arriving cold on the day it was written is what monotonicity in age rules out.
 
-// ARCHITECTURE.md "Positional recency", ARCHITECTURE.md "Migration between tiers" — **an L0 file that leaves its tier must be the oldest one positionally.**
+// ARCHITECTURE.md "Positional recency", ARCHITECTURE.md "Migration between tiers" — an L0 file that leaves its tier must be the oldest one positionally.
 //
-// L0 recency is resolved by file number, and L0 always shadows L1, so pushing a *newer*
-// L0 file down leaves older L0 files above it and reverts a committed write. The old
-// code chose by `min_write_time_ms`, which is a memtable's creation time — so two
-// flushes in the same clock tick tie, and among ties the loop kept the first it saw,
-// which is the newest file because `files_at(0)` runs newest-first.
+// L0 recency is resolved by file number, and L0 always shadows L1, so pushing a *newer* L0 file
+// down leaves older L0 files above it and reverts a committed write. Choosing by
+// `min_write_time_ms` cannot do this: it is a memtable's creation time, so two flushes in the same
+// clock tick tie, and among ties the newest file comes first because `files_at(0)` runs
+// newest-first.
 //
-// A fixed clock is what makes this deterministic: it is exactly the tie the differential
-// suite hit by accident with a 64 KiB memtable, where several flushes land in one tick.
+// A fixed clock makes the tie deterministic; with a 64 KiB memtable it also arises by accident,
+// which is how the differential suite hit it.
 TEST_F(TierMigrationTest, AnL0FileLeavesItsTierOldestFirstEvenWhenWriteTimesTie) {
     Options options = make_tiered_options(store_, Duration(50));
     options.memtable_bytes = 1u << 10;  // flush on nearly every write

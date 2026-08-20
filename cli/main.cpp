@@ -21,7 +21,7 @@ int main(int argc, char** argv) {
     // A bare invocation should teach rather than fail silently.
     app.require_subcommand(1);
 
-    // **fallthrough** is what lets a global be written where it reads naturally: an operator types
+    // fallthrough is what lets a global be written where it reads naturally: an operator types
     // `elysiumkv manifest --json`, not `elysiumkv --json manifest`, and without this the subcommand
     // would reject a flag it does not define. Both orders now work.
     app.fallthrough();

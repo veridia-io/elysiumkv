@@ -132,7 +132,7 @@ class ElysiumKVTopologyTest {
     }
 
     /**
-     * Phase 1's central claim is that <b>Streams' fault tolerance is unchanged</b>: the changelog is
+     * Phase 1's central claim is that Streams' fault tolerance is unchanged: the changelog is
      * still written, so the store is still restorable by the ordinary mechanism. If the adapter had
      * quietly marked itself non-persistent or non-logged, everything else here would still pass and
      * a pod loss would lose the state.
@@ -213,7 +213,7 @@ class ElysiumKVTopologyTest {
     }
 
     /**
-     * <b>The store reports how far it has advanced through its input topic.</b> {@code
+     * The store reports how far it has advanced through its input topic. {@code
      * getPosition()} is not optional decoration: its default implementation throws, and Streams'
      * caching layer calls it on every commit — so a store that leaves it alone cannot be
      * materialized at all. It fails at the first commit rather than at construction, which is why
@@ -244,7 +244,7 @@ class ElysiumKVTopologyTest {
     }
 
     /**
-     * <b>State survives the task being torn down and rebuilt on the same directory</b>, which is
+     * State survives the task being torn down and rebuilt on the same directory, which is
      * what a persistent store is for. The second driver reads what the first wrote from disk rather
      * than from memory — nothing else in this suite proves the on-disk format can be reopened.
      *

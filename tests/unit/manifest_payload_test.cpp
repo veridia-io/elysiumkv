@@ -103,7 +103,7 @@ TEST(ManifestPayload, AnEmptyPayloadRoundTrips) {
     EXPECT_TRUE(opened->empty());
 }
 
-/// **The property the AAD exists for.** A manifest payload means nothing without its address — an
+/// The property the AAD exists for. A manifest payload means nothing without its address — an
 /// edit replayed at another sequence applies the wrong change — and there is no file number inside
 /// the bytes to catch it the way there is for an SST.
 TEST(ManifestPayload, APayloadCannotBeMovedToAnotherAddress) {
@@ -138,7 +138,7 @@ TEST(ManifestPayload, EveryDamagedByteIsRefused) {
     }
 }
 
-/// **Truncation is detectable rather than ambiguous**, which is what lets replay treat a short
+/// Truncation is detectable rather than ambiguous, which is what lets replay treat a short
 /// payload as the torn write it is without that decision also swallowing a wrong key.
 TEST(ManifestPayload, ATruncatedPayloadIsCorrupt) {
     const ProviderRegistry registry = encrypted();
@@ -160,7 +160,7 @@ TEST(ManifestPayload, ATruncatedPayloadIsCorrupt) {
               Status::Corrupt);
 }
 
-/// **`Config`, not `Corrupt`, and the difference is load-bearing.** Replay treats `Corrupt` as an
+/// `Config`, not `Corrupt`, and the difference is load-bearing. Replay treats `Corrupt` as an
 /// unacknowledged edit and stops; if an unregistered provider looked the same, a store opened with
 /// the wrong configuration would come up quietly on a truncated history.
 TEST(ManifestPayload, AnUnregisteredProviderIsConfigAndSaysWhich) {

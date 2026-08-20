@@ -3,7 +3,7 @@
  * Most of it already worked: a clean open writes nothing, objects are immutable and write-once so a
  * cached block can never become wrong, and a reader performs no compare-and-set so it is outside the
  * ownership protocol entirely. What did not work is that the writer's collector decides an object is
- * collectible when no live `Version` **in its own process** references it — a reader elsewhere is
+ * collectible when no live `Version` in its own process references it — a reader elsewhere is
  * invisible to it. `Options::obsolete_retention` is the whole fix, and the third case below is the
  * one that would fail without it.
  *
@@ -112,7 +112,7 @@ protected:
 
 // --- a reader touches nothing -------------------------------------------------
 
-// **The property the whole design rests on.** If a reader writes anything, it can fail to write, be
+// The property the whole design rests on. If a reader writes anything, it can fail to write, be
 // fenced, or corrupt — and none of the reasoning above survives.
 TEST_F(ReadOnlyTest, AReaderWritesNothingAndDeletesNothing) {
     Options options = writer_options();
@@ -162,7 +162,7 @@ TEST_F(ReadOnlyTest, AReaderSeesASnapshotUntilItRefreshes) {
     write(*writer, 1000, 50, "later");
     ASSERT_EQ(writer->flush(), Status::Ok);
 
-    // **The half that would be missing from an auto-refreshing implementation.** Without it, a
+    // The half that would be missing from an auto-refreshing implementation. Without it, a
     // reader that re-read on every `get` would pass the second half and prove nothing.
     EXPECT_EQ(reader->get_copy(Slice::from(key_at(1000))).error(), Status::NotFound)
         << "a reader holds a snapshot, not a subscription";
@@ -205,7 +205,7 @@ TEST_F(ReadOnlyTest, AnIteratorSurvivesARefreshUnderneathIt) {
 
 // --- the hazard ----------------------------------------------------------------
 
-// **The case the retention window exists for**, and the one that fails without it: the writer
+// The case the retention window exists for, and the one that fails without it: the writer
 // compacts, its inputs become locally unreferenced, and it deletes objects the reader is reading.
 TEST_F(ReadOnlyTest, ARetentionWindowKeepsAReadersFilesAliveAcrossACompaction) {
     Options options = writer_options();
@@ -329,7 +329,7 @@ TEST_F(ReadOnlyTest, AnOrphanIsCollectedOnceItHasBeenUnreferencedForTheWholeWind
         << "continuously unreferenced for the whole window, so it goes";
 }
 
-// **The bug `reclaim_orphans_at_open` had.** An object whose edit committed between the manifest
+// The bug `reclaim_orphans_at_open` had. An object whose edit committed between the manifest
 // read and the store listing looked unreferenced and was deleted. Re-reading the manifest each pass
 // is what removes it from the candidate set instead.
 TEST_F(ReadOnlyTest, AFileThatBecomesReferencedIsNotSwept) {
@@ -380,7 +380,7 @@ TEST_F(ReadOnlyTest, ASweepThatCannotListCollectsNothing) {
 
 // --- staleness is not corruption ----------------------------------------------
 
-/* **The discriminator, and the direction that must never be wrong.**
+/* The discriminator, and the direction that must never be wrong.
  *
  * A reader past the retention window finds an object gone. So does a reader on a store that has
  * genuinely lost data. Reporting the first as `Corrupt` sends an operator to a restore for a
@@ -464,7 +464,7 @@ TEST_F(ReadOnlyTest, AMissingObjectTheManifestStillReferencesIsNotStale) {
 
 // --- the reader is outside the ownership protocol ------------------------------
 
-// **The claim the whole design rests on.** A reader performs no compare-and-set, so it cannot take
+// The claim the whole design rests on. A reader performs no compare-and-set, so it cannot take
 // ownership from a writer however many of them come and go.
 TEST_F(ReadOnlyTest, ReadersNeverFenceTheWriter) {
     Options options = writer_options();
@@ -551,7 +551,7 @@ TEST_F(ReadOnlyTest, AReaderRefusesAStoreWhoseTransientTierLostFiles) {
 
 // --- the two windows do not undercut each other -------------------------------
 
-/* **The interaction the two-knob split introduced.** An obsolete object is, to the sweep,
+/* The interaction the two-knob split introduced. An obsolete object is, to the sweep,
  * indistinguishable from an orphan: the edit that removed it is committed, so the current manifest
  * does not reference it, which is the sweep's own test. What keeps the sweep off it is the
  * pending-deletion queue — those objects have an exact unreferenced-since time and a window of their
@@ -617,7 +617,7 @@ TEST_F(ReadOnlyTest, TheSweepReportsFencedWhenAnotherWriterHasMovedThePointer) {
 
 // --- the strongest property available --------------------------------------
 
-/* **Every state a reader observes is one the writer actually published.**
+/* Every state a reader observes is one the writer actually published.
  *
  * Note what this is *not*: "the reader matches the oracle". It legitimately lags — that is the whole
  * point of `refresh()` being explicit — so equality with the current oracle would be the wrong

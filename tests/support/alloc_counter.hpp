@@ -6,7 +6,7 @@
 
 namespace elysiumkv::test {
 
-/// ARCHITECTURE.md "Benchmarks" — **allocations per operation**, counted via an instrumented allocator.
+/// ARCHITECTURE.md "Benchmarks" — allocations per operation, counted via an instrumented allocator.
 /// "The single most useful number for catching correct-but-slow code early, and
 /// it is a hard assertion rather than a trend line."
 ///
