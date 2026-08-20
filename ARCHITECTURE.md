@@ -10,8 +10,8 @@ An embedded LSM key–value store with a stable C ABI and a Java binding. A memt
 flushes to level 0, and leveled compaction moves data downward. One writer per store.
 
 The distinguishing feature is that **storage location is a separate axis from LSM structure**: the
-same engine addresses a local disk and an object store, and a file's home is decided by its age and
-size rather than by which level it happens to live in. That is what makes a local-disk deployment
+same engine addresses a local disk and an object store, and a file's home is decided by its age
+rather than by which level it happens to live in. That is what makes a local-disk deployment
 and a "hot locally, cold in S3" deployment the same engine with different configuration.
 
 ## How it works
@@ -84,7 +84,9 @@ number counter past it rather than deleting it.
 
 ### Inside an SST
 
-A file is sorted key–value blocks, then a bloom filter, an index block, and the footer.
+A file is sorted key–value blocks, then a bloom filter, an index block, and the footer. This section
+is the reasoning; [FORMAT.md](FORMAT.md) is the byte layout, and is normative where the two could be
+read as disagreeing.
 
 Blocks use restart points with prefix compression between them, and carry a checksum each. Restart
 points bound how far a seek has to scan; the per-block checksum means corruption is detected at the
@@ -378,8 +380,9 @@ late rather than never. A task nobody wrote a predicate for is not covered by an
 **One coordinator, two executors.** The coordinator dispatches and never performs long-running work,
 so its next evaluation is not blocked by what it dispatched. Flush has its own thread because one
 immutable memtable is allowed in flight, so sharing a worker with compaction would stall writes for
-the length of a compaction. Everything that *deletes* — compaction, migration, capacity eviction —
-shares the other, and that is load-bearing rather than incidental: `VersionSet::apply` does not
+the length of a compaction. Everything else shares the other — compaction, migration, capacity eviction, the reclamation of
+files a truncation or a TTL emptied, and re-encryption — and that sharing is load-bearing rather
+than incidental: `VersionSet::apply` does not
 validate that the files an edit removes are still live, so two deleting tasks picking from the same
 version snapshot could both commit. Flush is exempt because it only adds. A second deleting worker
 needs file-level exclusion or optimistic validation *first*; an assertion under
@@ -467,16 +470,13 @@ Recovery reads the pointer, replays edits, and reconciles against what the store
 residue — an object written by a flush that died before its manifest edit was durable — is handled
 by **stepping the file-number counter over everything already present**, not by deleting it.
 
-Deleting was the original design and it was wrong. Open takes no lock and performs no CAS, so an
-unreferenced object is indistinguishable from a concurrent writer's in-flight file, or from one whose
-edit became durable between the moment the manifest was read and the moment the store was listed. A
-rolling deploy with two pods briefly overlapping on one bucket would silently destroy committed
-data.
-
-So reclamation is **not** something open does, and there is no flag to make it one. That was the
-original shape and the defect was never the default — it was that a *single instantaneous*
-observation cannot support the conclusion. An object unreferenced at the moment we happen to look is
-indistinguishable from a concurrent writer's file whose edit committed a moment ago.
+Deleting was the original design and it was wrong, and the defect was not the default it ran under:
+a *single instantaneous* observation cannot support the conclusion. Open takes no lock and performs
+no CAS, so an object unreferenced at the moment we happen to look is indistinguishable from a
+concurrent writer's in-flight file, or from one whose edit became durable between the moment the
+manifest was read and the moment the store was listed. A rolling deploy with two pods briefly
+overlapping on one bucket would silently destroy committed data. So reclamation is **not** something
+open does, and there is no flag to make it one.
 
 A *sustained* observation can support it, and that is what the sweep does: an object is deletable
 once it has been continuously unreferenced for `orphan_retention`, checked against a **freshly
@@ -680,6 +680,30 @@ transient-loss-survivable frontier, which advances as data settles onto durable 
 `recovered_watermark()` describes the state recovered at open and never moves. Sharing one name would
 silently change the getter's meaning after the first write.
 
+### Staging is how a local write and a log commit agree
+
+This one lives in the Java binding — `io.veridia.elysiumkv.partitioned` — rather than in the engine,
+but the decision belongs here because the engine is shaped to make it possible.
+
+A local write and a commit to someone else's log cannot be made atomic, and the store is downstream:
+the log is the authority, and local state is a materialisation of it. So writes are **staged** rather
+than applied, and land only once the commit is known to have succeeded. What the engine supplies is
+the part that cannot be bolted on: the watermark rides in the same memtable as the writes it covers,
+so one flush makes both durable and a crash cannot leave a watermark ahead of the state it claims.
+
+**The interesting case is the one where the outcome is unknown**, which is not rare — it is what a
+timeout on a commit means. Applying then would risk state ahead of the log; discarding and
+continuing would risk serving a fold a value the log has already superseded. So the partition is
+marked *behind*: nothing is applied, the watermark does not move, and reads and writes are refused
+until a replay catches it up. A watermark that never moved is what makes that recoverable rather
+than a rebuild.
+
+**Failure types say what the caller may do, not what happened.** Classifying a producer-fencing
+error as "definitely not committed" is true and useless — the caller would then abort a transaction
+whose only legal next step is closing, and the abort throws the same error back. A correct belief
+that licenses an illegal action is a worse contract than no contract, so each outcome names the
+action it permits.
+
 ### Statistics are a buffer, not a struct
 
 Statistics cross the ABI as an encoded buffer with self-describing record sizes, not as a struct. A
@@ -847,9 +871,17 @@ The two are different things: the baseline selects port *versions*, the checkout
 *scripts* that do the building. Letting the second float means a build that worked yesterday breaks
 today for reasons that live outside this repository — which has happened here.
 
+**The library's own dependencies are three: zstd, lz4 and OpenSSL.** Everything else arrives through
+a vcpkg feature — GoogleTest for the suites, Google Benchmark for the ratchet, the AWS SDK for the
+remote implementations, CLI11 and its companions for the tool — so a build with those off links none
+of them. That is what keeps the AWS SDK, by far the heaviest, out of a deployment with no remote
+tier, and it is why the remote seams report a configuration error rather than vanishing as symbols
+(*The ABI boundary*).
+
 Two library artifacts come out of the same position-independent objects. A static archive exports the
 C++ API, safe only under one toolchain, which static linking already implies. A shared library exports
-the C ABI and nothing else (*The ABI boundary*).
+the C ABI and nothing else (*The ABI boundary*). The JNI glue is a third shared object, and the
+operator tool a fourth — both consumers of the C ABI rather than parts of it.
 
 Build order is engine, then bindings, and the C ABI's smoke test is compiled **as C** — the only way
 the C99 claim about the public header is tested rather than asserted.

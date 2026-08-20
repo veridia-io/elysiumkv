@@ -9,10 +9,8 @@ storage, and the store keeps working while it happens. Everything else — level
 compaction, bloom filters, a block cache, prefix scans — is there to make that
 useful rather than to be novel.
 
-> **Status: early.** The engine, the C ABI and the Java binding are
-> complete and heavily tested, but nothing has run in production. The API is not
-> stable, and there has been no security review. Treat it as something to read,
-> build on and break — not yet as something to store your data in.
+> Used in production, and under active development. Releases are versioned; a break in the C
+> ABI or an on-disk format is named in the release notes.
 
 ---
 
@@ -24,11 +22,13 @@ useful rather than to be novel.
 - [Encryption at rest](#encryption-at-rest)
 - [Quick start (C++)](#quick-start-c)
 - [Quick start (Java)](#quick-start-java)
+- [Partitioned stores](#partitioned-stores)
 - [Memory](#memory)
 - [Concurrency](#concurrency)
 - [Reading: which path to use](#reading-which-path-to-use)
 - [Limits](#limits)
 - [Building](#building)
+- [Operator CLI](#operator-cli)
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
 - [What is not implemented](#what-is-not-implemented)
@@ -61,6 +61,10 @@ useful rather than to be novel.
   of a keyspace is the case that needs it. Unlike a truncation the range stays
   writable afterwards, and a later write wins. A file the range covers entirely
   is unlinked whole; the rest comes back as the covered files are rewritten.
+- **Time-based expiry**: set `ttl` and a file whose newest write has outlived it is
+  dropped whole on a maintenance pass, unread — but only when no older file still
+  holds keys in its range, since recency here is positional and dropping out of order
+  would resurrect a superseded value.
 - **Prefix truncation**: `truncate_below(key)` drops everything under a key by
   moving one value in the manifest, rather than writing a tombstone per key. A
   file entirely below the point is unlinked whole — nothing read, nothing
@@ -78,12 +82,15 @@ useful rather than to be novel.
   AES-256-GCM under envelope encryption, with a fresh data key per object. Key custody
   is yours — a static master key and AWS KMS both ship, and the key manager is an
   interface if neither fits (see [below](#encryption-at-rest)).
-- **Bindings**: a stable C ABI (70 functions, C99) and a Java binding over JNI
-  needing only Java 11, plus Kafka Streams state stores in
-  `bindings/kafka-streams-v3` — key-value, window and session stores in both plain
-  and timestamped form, and a versioned store (KIP-889). The windowed kinds keep
-  every window in one store rather than one store per segment, so retention is a
-  single `truncateBelow` rather than a segment directory to open and close.
+- **Bindings**: a C ABI (72 functions, C99) and a Java binding over JNI needing only
+  Java 11, plus Kafka Streams state stores in `bindings/kafka-streams-v3` — key-value,
+  window and session stores in both plain and timestamped form, and a versioned store
+  (KIP-889). The windowed kinds keep every window in one store rather than one store per
+  segment, so retention is a single `truncateBelow` rather than a segment directory to
+  open and close.
+- **Partitioned stores**: one engine instance per partition behind a single handle, with
+  staging that makes a local write and a log commit agree on their outcome — see
+  [below](#partitioned-stores).
 
 Keys are ordered as unsigned bytes. There are no column families, no snapshots and
 no sequence numbers — recency is positional, decided by which level and which file
@@ -401,9 +408,11 @@ cmake --preset release && cmake --build --preset release --target elysiumkv_jni
 mvn -f bindings/java verify
 ```
 
-The jar carries `native/{os}-{arch}/libelysiumkv_jni.{so,dylib}` and extracts it at
-first load, so there is nothing to install. Nothing is published to a package
-repository yet.
+The jar carries `native/{os}-{arch}/libelysiumkv_jni.{so,dylib}` and extracts it at first
+load, so there is no separate native install. Releases are published to Maven Central by the
+release workflow, as `io.veridia:elysiumkv` and `io.veridia:elysiumkv-kafka-streams-v3` — see
+the release notes for the current version. Building locally is only needed to work on the
+binding itself.
 
 Failures arrive as exceptions whose type says whether retrying makes sense:
 `RetryableException` for an unreachable store or a write held back by the stall
@@ -412,6 +421,41 @@ valve, distinct from `CorruptException` and `UnusableException`.
 Applications on **JDK 24 or newer** should pass `--enable-native-access=ALL-UNNAMED`
 or the equivalent `module-info` entry; without it every JNI load prints a warning.
 Older JVMs reject the flag outright, so it cannot simply be set unconditionally.
+
+## Partitioned stores
+
+`io.veridia.elysiumkv.partitioned.PartitionedStore` runs one engine instance per partition
+behind one handle: `assign`, `revoke` and `lost` follow a consumer group's rebalances, and
+each partition keeps its own tiers, its own watermark and its own directory.
+
+What it exists for is the ordering problem underneath a transactional consumer. A local write
+and a log commit cannot be made atomic, so writes are **staged** — `stage` holds them,
+`applyCommitted` lands them once the transaction commits, and `discard` drops them when it
+did not. The watermark rides in the same memtable as the writes it covers, so a crash cannot
+leave a watermark ahead of the state it claims.
+
+The part worth reading before wiring it up is the failure taxonomy. Each outcome licenses a
+different action, and they are separate types because a correct belief that permits an illegal
+call is worse than no classification at all:
+
+| Outcome                 | What the caller may do                              |
+| ----------------------- | --------------------------------------------------- |
+| `AbortableNotCommitted` | discard, then abort the transaction                  |
+| `OutcomeUnknown`        | discard, then close the producer; aborting is forbidden |
+| `ProducerDead`          | discard, then close; aborting would throw            |
+| `ApplyFailed`           | it committed — repair the partitions it names        |
+
+A partition whose outcome could not be established is marked **behind**, and both
+`getCommittedBatch` and `stage` then throw `PartitionBehindException` until `repair` replays
+it — which is what stops a fold from deriving a value from state the log has already moved
+past. `begin()` closes the one hazard a two-hook transaction manager
+leaves open: anything still staged at a transaction boundary belonged to a commit nobody
+resolved, and is dropped rather than trusted.
+
+`bindings/java/src/test/.../partitioned/kafka` carries a worked Kafka integration —
+`KafkaTransaction` maps Kafka's exceptions onto the outcomes above, and
+`ExampleStateRestore` replays a state topic. Both are test sources on purpose: the core takes
+no Kafka dependency. Copy them.
 
 ## Memory
 
@@ -549,9 +593,11 @@ an exception and switches on continuous internal verification.
 ## Building
 
 Requires **CMake 3.25+**, **Ninja**, and a **C++23** compiler (`std::expected` is
-in the public API). Dependencies — zstd, lz4, OpenSSL, GoogleTest,
-Google Benchmark — come from [vcpkg](https://github.com/microsoft/vcpkg) in manifest
-mode, pinned by `builtin-baseline` in `vcpkg.json`. OpenSSL is pinned to the 3.5 LTS
+in the public API). The library itself needs only zstd, lz4 and OpenSSL; GoogleTest,
+Google Benchmark, the AWS SDK and the CLI's CLI11 / nlohmann-json / tabulate arrive
+through vcpkg features, so a build with the tests and the CLI off pulls none of them.
+Everything comes from [vcpkg](https://github.com/microsoft/vcpkg) in manifest mode,
+pinned by `builtin-baseline` in `vcpkg.json`. OpenSSL is pinned to the 3.5 LTS
 line and is what the built-in AES-256-GCM provider uses.
 
 ```sh
@@ -581,6 +627,21 @@ object.
 Supported: **linux-x86_64**, **linux-arm64**, **macos-arm64**. Windows is not
 supported today — nothing in the design prevents it, but nothing tests it either.
 
+## Operator CLI
+
+`ELYSIUMKV_BUILD_CLI` is on by default and produces `elysiumkv`, which reads a store without
+opening it for writing — so it is safe to point at one a live process owns.
+
+```sh
+elysiumkv manifest --catalog disk --dir /data       # files, levels, tiers, what a reopen loads
+elysiumkv stats --catalog disk --dir /data --json   # per level and per tier, machine-readable
+```
+
+`--catalog` selects the backend — `disk`, `dynamo` or `s3` — and the rest of the flags belong
+to whichever one was named. `--generation` reads a generation other than the one the pointer
+names. `--json` may be written on either side of the subcommand. Both commands are read-only;
+there is no repair verb yet.
+
 ## Testing
 
 Sanitizers are a build gate, not an option. CI runs every preset on all three
@@ -597,6 +658,7 @@ platforms, and the Java binding on JDK 11 and 25.
 | `tests/soak`             | Resident memory plateaus under a steady-state threaded workload                                                  |
 | `tests/capi`             | The C ABI, including a smoke test compiled as C99                                                                |
 | `bindings/java/src/test` | The binding, including a `TreeMap` oracle driven through the Java API                                            |
+| `fuzz`                   | libFuzzer over the four decoders, seeded from the encoders so the corpus cannot drift out of format             |
 
 Two ideas run through the suite and are worth knowing before contributing.
 
@@ -646,6 +708,13 @@ and a 1M-key store must cost about the same, or file pruning is not working.
   the log, so duplicating it would double every write. The watermark is what
   makes that trade workable — it tells you where to resume, and an unflushed
   memtable is still lost.
+- **Column families, snapshots and sequence numbers** — recency is positional, and
+  much of the engine's simplicity follows from that reduction.
+- **More than one writer per store.** Ownership is arbitrated at the manifest and a
+  loser is fenced, but see [Concurrency](#concurrency) for the window before that
+  fires.
+- **A partitioned index.** One flat index block per file, which is what bounds how
+  large a single file is worth making.
 - **Windows.**
 
 ## Contributing
@@ -657,9 +726,11 @@ Issues and pull requests are welcome. Practical expectations:
   compaction, recovery or the read path, prefer extending the differential or fault
   suites over adding an isolated unit test.
 - New automated gates need a negative control, for the reason given above.
-- Comments should explain why, not what. Several in the source read as
-  over-explained; they are usually recording a mistake that was expensive to find,
-  and they earn their space.
+- Comments record what a reader cannot recover from the code: invariants, ownership,
+  concurrency assumptions, wire-format constraints, and the reason behind a surprising
+  choice. Not what the code does, and not how it came to look this way — a comment that
+  narrates a change is stale the moment the next one lands. Detailed rationale belongs in
+  [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## License
 

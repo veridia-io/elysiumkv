@@ -205,8 +205,8 @@ std::pair<size_t, size_t> Version::data_span_index_range(int level, Slice first,
 /// Whether any file older than this one still holds keys in its range — the question that
 /// decides whether an expired file can be dropped whole rather than compacted away.
 ///
-/// Searched, not scanned. This ran over every file in every level, per candidate, on every
-/// maintenance pass with a `ttl` set — quadratic in the file count. Two things make it a search:
+/// Searched, not scanned: a scan of every file in every level, per candidate, is quadratic in the
+/// file count and runs on every maintenance pass with a `ttl` set. Two things make it a search:
 /// levels shallower than the candidate's hold only *newer* files and cannot answer the question at
 /// all, and every level below L0 is sorted and disjoint by data span, so the files that could
 /// overlap are a contiguous run found by binary search.
