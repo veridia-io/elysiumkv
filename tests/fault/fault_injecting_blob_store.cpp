@@ -1,6 +1,7 @@
 #include "fault/fault_injecting_blob_store.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <thread>
 
 namespace elysiumkv::test {
@@ -151,6 +152,36 @@ std::future<Status> FaultInjectingBlobStore::remove_many(const std::vector<std::
     return BlobStore::remove_many(names);
 }
 
+namespace {
+
+/// Process-wide, because the property is that *different stores* list at the same time — a counter
+/// per store could only ever reach one.
+std::atomic<uint64_t> g_lists_in_flight{0};
+std::atomic<uint64_t> g_peak_lists{0};
+
+struct ListInFlight {
+    ListInFlight() {
+        const uint64_t now = g_lists_in_flight.fetch_add(1, std::memory_order_acq_rel) + 1;
+        uint64_t seen = g_peak_lists.load(std::memory_order_relaxed);
+        while (now > seen &&
+               !g_peak_lists.compare_exchange_weak(seen, now, std::memory_order_relaxed)) {
+        }
+    }
+    ~ListInFlight() { g_lists_in_flight.fetch_sub(1, std::memory_order_acq_rel); }
+    ListInFlight(const ListInFlight&) = delete;
+    ListInFlight& operator=(const ListInFlight&) = delete;
+};
+
+}  // namespace
+
+uint64_t FaultInjectingBlobStore::peak_concurrent_lists() {
+    return g_peak_lists.load(std::memory_order_relaxed);
+}
+
+void FaultInjectingBlobStore::reset_peak_concurrent_lists() {
+    g_peak_lists.store(0, std::memory_order_relaxed);
+}
+
 std::future<ListResult> FaultInjectingBlobStore::list(std::string_view prefix) {
     std::chrono::microseconds latency{0};
     std::optional<Status> injected;
@@ -165,7 +196,9 @@ std::future<ListResult> FaultInjectingBlobStore::list(std::string_view prefix) {
     if (injected.has_value()) {
         result = std::unexpected(*injected);
     } else {
-        // A listing is a round trip like any other, and the one open pays per store.
+        // A listing is a round trip like any other, and the one open pays per store. Counted
+        // across the sleep, so a caller that overlaps another is visible as an overlap.
+        const ListInFlight in_flight;
         if (latency.count() > 0) std::this_thread::sleep_for(latency);
         result = delegate_->list(prefix).get();
     }

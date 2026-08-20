@@ -82,8 +82,15 @@ protected:
 // Open lists every store, and against object storage each listing is a round trip. Paying them one
 // after another makes opening a two-tier instance twice as slow as it needs to be — and the futures
 // do not fix it, because every store here completes them synchronously.
+/// **Counted, not timed.** This used to measure `open` and assert it finished inside two
+/// latencies. That holds on an idle machine and fails on a loaded one under a sanitizer, and the
+/// bound cannot be widened to fix it: serial *is* two latencies, so any bound loose enough to
+/// absorb the noise also admits the behaviour being ruled out. Two listings in flight at the same
+/// instant is the property itself, it is discrete, and load makes the overlap more likely rather
+/// than less — so the test now fails only for the reason it is named after.
 TEST_F(TierMigrationTest, TheStoresAreListedConcurrentlyAtOpen) {
-    constexpr auto kListLatency = std::chrono::milliseconds(150);
+    // Long enough that two concurrent listings certainly overlap, short enough to pay for once.
+    constexpr auto kListLatency = std::chrono::milliseconds(100);
 
     Options options = make_transient_options(store_, kMaxAge, kStallAge);
     std::vector<std::shared_ptr<FaultInjectingBlobStore>> slow;
@@ -95,13 +102,10 @@ TEST_F(TierMigrationTest, TheStoresAreListedConcurrentlyAtOpen) {
     }
     ASSERT_EQ(slow.size(), 2u) << "one store would prove nothing";
 
-    const auto began = std::chrono::steady_clock::now();
+    FaultInjectingBlobStore::reset_peak_concurrent_lists();
     open(std::move(options));
-    const auto elapsed = std::chrono::steady_clock::now() - began;
 
-    // Serial would be at least two. Generous, because open does other work and a loaded machine
-    // stretches a sleep — but far below the number that says they ran one after the other.
-    EXPECT_LT(elapsed, kListLatency * 2)
+    EXPECT_GE(FaultInjectingBlobStore::peak_concurrent_lists(), 2u)
         << "the listings ran one after the other";
 }
 

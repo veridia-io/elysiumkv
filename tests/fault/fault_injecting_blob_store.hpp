@@ -58,6 +58,18 @@ public:
 
     uint64_t call_count(Op op) const;
 
+    /// The most `list` calls that were ever in flight across **every** store sharing this counter,
+    /// at the same instant.
+    ///
+    /// **A direct observation of concurrency, where the wall clock is only a proxy for it.** The
+    /// test this exists for used to time `open` and assert it came in under two latencies; that
+    /// holds on an idle machine and fails on a loaded one under a sanitizer, and widening the
+    /// bound is no help — serial *is* two latencies, so any bound loose enough to survive the
+    /// noise admits the thing being ruled out. A count of simultaneous callers is discrete, and
+    /// load makes an overlap more likely rather than less.
+    static uint64_t peak_concurrent_lists();
+    static void reset_peak_concurrent_lists();
+
     std::string id() const override { return delegate_->id(); }
     std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override;
     std::future<Status> put(std::string_view name, Slice bytes) override;
