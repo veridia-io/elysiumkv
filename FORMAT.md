@@ -326,12 +326,12 @@ size of each record type, so a decoder built against an older layout locates the
 and skips fields it does not know. **Locate records by the declared sizes, never by summing the
 fields you happen to know.**
 
-Header — `kStatsHeaderBytes = 240`:
+Header — `kStatsHeaderBytes = 264`:
 
 | Offset | Field | Type |
 | --- | --- | --- |
 | 0 | `format_version` | uint32 (1) |
-| 4 | `header_bytes` | uint32 (240) |
+| 4 | `header_bytes` | uint32 (264) |
 | 8 | `level_record_bytes` | uint32 (48) |
 | 12 | `tier_record_bytes` | uint32 (88) |
 | 16 | `level_count` | uint32 |
@@ -344,6 +344,9 @@ Header — `kStatsHeaderBytes = 240`:
 | 216 | `memtable_entries` | uint64 |
 | 224 | `memtable_tombstones` | uint64 |
 | 232 | `background_failures` | uint64 |
+| 240 | `compactions_trimmed` | uint64 |
+| 248 | `reencryptions` | uint64 |
+| 256 | `files_pending_reencryption` | uint64 |
 
 The **22** scalars in the contiguous run at offset 32, in order: `memtable_bytes`,
 `memtable_age_ms`, `compactions`, `compaction_bytes_read`, `compaction_bytes_written`,
@@ -353,19 +356,19 @@ The **22** scalars in the contiguous run at offset 32, in order: `memtable_bytes
 `memory_budget_total`, `budget_sheds`, `flushes` (offset 192), `durable_watermark` (offset 200).
 That run ends at 208, where `watermark_present` begins.
 
-Three more uint64 scalars follow the flag and its padding, and are **not** part of that run:
-`memtable_entries` (216), `memtable_tombstones` (224), `background_failures` (232). Twenty-five in
-total; the run is twenty-two. Count from the table above, which is keyed by offset and is the
-normative part — the prose here previously said "23" and then listed 25, which is the mistake a
-decoder author would inherit.
+Six more uint64 scalars follow the flag and its padding, and are **not** part of that run:
+`memtable_entries` (216), `memtable_tombstones` (224), `background_failures` (232),
+`compactions_trimmed` (240), `reencryptions` (248), `files_pending_reencryption` (256).
+Twenty-eight in total; the run is twenty-two. Count from the table above, which is keyed by offset
+and is the normative part.
 
-`flushes`, `durable_watermark`, `memtable_entries`, `memtable_tombstones` and
-`background_failures` were **appended without a version bump**, and so were the level record's `entries` and `tombstones` — which is what the
-self-describing header is for: a decoder that locates records at `header_bytes` and steps by
-`level_record_bytes` skips fields it does not know, and seven earlier scalars arrived the same way.
-The level record growing is the first time the *record* size has moved rather than the header, and it
-is safe for the same reason and under the same rule. `watermark_present` is 0 when no watermark
-has been set — zero is a valid position, so an exporter omits the series rather than publishing zero.
+Every scalar after `pins_outstanding` was **appended without a version bump**, and so were the level
+record's `entries` and `tombstones` — which is what the self-describing header is for: a decoder that
+locates records at `header_bytes` and steps by `level_record_bytes` skips fields it does not know.
+A decoder that sums the fields it knows instead of reading `header_bytes` breaks on every one of
+these, which is why that rule is stated above rather than implied. `watermark_present` is 0 when no
+watermark has been set — zero is a valid position, so an exporter omits the series rather than
+publishing zero.
 
 Then `level_count` level records at offset `header_bytes`, then `tier_count` tier records.
 
