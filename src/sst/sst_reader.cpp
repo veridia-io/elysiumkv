@@ -174,21 +174,18 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::str
     // The wrapper wins when there is one, and the reader keeps it alive; see `owned_store`.
     BlobStore& store = options.owned_store != nullptr ? *options.owned_store : incoming;
 
-    // **One speculative read of the tail, not one read per structure at it.** The index block, the
-    // range-delete block and the footer are adjacent at the end of the file (FORMAT.md §5), so a
-    // single read of the end usually carries all three — and the filter sits *before* the index,
-    // so this stops short of the one structure `open` deliberately no longer wants.
+    // One speculative read of the tail rather than one read per structure in it. The index block,
+    // the range-delete block and the footer are adjacent at the end of the file (FORMAT.md §5), so
+    // a single read usually carries all three; the filter sits before the index and `open` does not
+    // want it.
     //
-    // Sized to the **widest** footer this build knows at minimum, rather than to the version it
-    // hopes for: the width is only discoverable from the trailer, which is inside these bytes, so
-    // reading a v1 width first would cost a second round trip on every v2 file to fetch the twelve
-    // bytes it turned out to need.
+    // Sized to at least the widest footer this build knows, because the actual width is only
+    // discoverable from the trailer inside these bytes — reading a narrower width first would cost
+    // a second round trip on every wider file.
     //
-    // Guessing short costs nothing but the second read this used to make unconditionally, so the
-    // constant is a trade of bandwidth against round trips — which is the right trade on the
-    // medium this engine is for, and the wrong one nowhere that matters.
+    // Guessing short costs one extra read, so the constant trades bandwidth against round trips.
     //
-    // **Sized against the default file, not against the largest one.** At `target_file_bytes` of
+    // Sized against the default file, not against the largest one. At `target_file_bytes` of
     // 16 MiB and 4 KiB blocks an index runs to roughly 200 KB, so this covers it; a file several
     // times that has an index this does not reach and falls back to the second read, exactly as
     // before. Growing the constant to chase those would move real bandwidth on every open to save
@@ -230,7 +227,7 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::str
     if (!index) return std::unexpected(index.error());
     reader->index_block_ = *index;
 
-    // **The filter is not read here.** Iteration never consults it, and a compaction opens a
+    // The filter is not read here. Iteration never consults it, and a compaction opens a
     // reader per input, so this was a third round trip and ~1.25 MB per million entries fetched
     // and discarded on every merge. `get` loads it on first use.
     return reader;
@@ -260,7 +257,7 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
                        ? unframe_block(framed, max_uncompressed())
                        : Result<Buffer>(std::unexpected(Status::Corrupt));
     if (!content) {
-        // **A rotted cache file is not a corrupt store.** The bytes may have come from a disk
+        // A rotted cache file is not a corrupt store. The bytes may have come from a disk
         // cache whose chunk was truncated or flipped, and the authoritative object is untouched —
         // so reporting `Corrupt` here sends an operator to a restore for a healthy store. The
         // range cache already treats a *missing* entry as costing latency and nothing else;
@@ -328,7 +325,7 @@ Result<std::optional<SstReader::Found>> SstReader::get(Slice key) {
 
     auto block = load_block(handle);
     if (!block) {
-        // **A block the index says is here cannot be "absent".** The store reporting `NotFound` for
+        // A block the index says is here cannot be "absent". The store reporting `NotFound` for
         // it means the object went away underneath this reader, and returning that verbatim would
         // hand the caller the same status a missing *key* produces — collapsing an I/O failure into
         // absence, which is the one confusion `Absence is an answer, not an error` exists to
@@ -362,10 +359,8 @@ Result<bool> SstReader::range_deletes(Slice key) {
     return key < it.value();
 }
 
-/// **Decoded once per reader.** This is asked for once per carrying file per iterator
-/// construction and once per input per compaction, and it used to fetch the block and walk it
-/// every time. The reader is already where the index and the filter live; a file is immutable, so
-/// its tombstones are too.
+/// Decoded once per reader, since it is asked for once per carrying file per iterator construction
+/// and once per input per compaction. A file is immutable, so its tombstones are too.
 ///
 /// Still returns a copy, because every caller takes ownership — the merging iterator holds one
 /// vector per child and the memtable path has no reader to share from. What this removes is the

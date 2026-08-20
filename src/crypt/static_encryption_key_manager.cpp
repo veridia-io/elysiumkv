@@ -45,7 +45,7 @@ int from_hex_digit(char c) {
 struct StaticEncryptionKeyManager::Impl {
     SecretKey master;
 
-    /// **A fresh nonce per wrap, from the system generator.** The master key is used for every
+    /// A fresh nonce per wrap, from the system generator. The master key is used for every
     /// object, so this is the one place a repeat would matter — and unlike the per-object data
     /// keys, nothing structural stops it. 96 random bits per wrap is the standard margin.
     Result<DataKey> wrap() {
@@ -108,7 +108,7 @@ struct StaticEncryptionKeyManager::Impl {
             EVP_DecryptFinal_ex(ctx.get(), plain.data() + len, &len) == 1;
         if (!ok) {
             secure_zero(plain.data(), plain.size());
-            // **The tag failing means a different master key, not damaged bytes.** Both are
+            // The tag failing means a different master key, not damaged bytes. Both are
             // possible and this cannot tell them apart, so it reports the one whose remedy is
             // cheaper to try: configure the key that wrote this.
             return std::unexpected(Status::Config);

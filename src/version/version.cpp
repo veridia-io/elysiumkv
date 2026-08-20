@@ -51,8 +51,8 @@ std::vector<FileMetadata> Version::overlapping_half_open(int level, Slice lower,
                                                           Slice upper) const {
     std::vector<FileMetadata> result;
     for (const FileMetadata& file : files_at(level)) {
-        // A file earns its place if either span overlaps. **The tombstone span is checked
-        // separately because it is not bounded by the data span**: a file can delete a range it
+        // A file earns its place if either span overlaps. The tombstone span is checked
+        // separately because it is not bounded by the data span: a file can delete a range it
         // holds no keys in, and pruning on the data span alone would drop the very file that
         // answers the scan — silently, by returning keys the range delete removed.
         const bool data_overlaps =
@@ -102,7 +102,7 @@ bool Version::any_file_holds(Slice lower, Slice upper) const {
 std::vector<FileMetadata> Version::overlapping_inclusive(int level, Slice first, Slice last) const {
     std::vector<FileMetadata> result;
     for (const FileMetadata& file : files_at(level)) {
-        // **The candidate's effective span, not its data span** — the same reason the caller passes
+        // The candidate's effective span, not its data span — the same reason the caller passes
         // an effective span in. A file carrying only range tombstones has no data span at all, so
         // matching on data alone leaves it behind: the L0 file next to it compacts down without it,
         // and the tombstone is then at a shallower level than data written *after* it. Positional
@@ -132,7 +132,7 @@ std::vector<FileMetadata> Version::files_entirely_truncated() const {
             // everything it has to say is below the point. A file straddling the point keeps its
             // live half and is narrowed by compaction instead.
             //
-            // **Effective, because a file with no entries has an empty largest key** — and the
+            // Effective, because a file with no entries has an empty largest key — and the
             // empty key sorts below every truncation point, so a file carrying nothing but a range
             // tombstone read as entirely truncated and was unlinked. The tombstone went with it and
             // every key it covered came back. The differential suite found this; nothing about a
@@ -202,10 +202,10 @@ std::pair<size_t, size_t> Version::data_span_index_range(int level, Slice first,
     return {static_cast<size_t>(begin - files.begin()), static_cast<size_t>(end - files.begin())};
 }
 
-/// Whether any file **older** than this one still holds keys in its range — the question that
+/// Whether any file older than this one still holds keys in its range — the question that
 /// decides whether an expired file can be dropped whole rather than compacted away.
 ///
-/// **Searched, not scanned.** This ran over every file in every level, per candidate, on every
+/// Searched, not scanned. This ran over every file in every level, per candidate, on every
 /// maintenance pass with a `ttl` set — quadratic in the file count. Two things make it a search:
 /// levels shallower than the candidate's hold only *newer* files and cannot answer the question at
 /// all, and every level below L0 is sorted and disjoint by data span, so the files that could
@@ -293,7 +293,7 @@ std::shared_ptr<const Version> Version::apply(const Version& base, const Version
     // Monotone, like the truncation point: an edit can only raise it, so replaying the manifest is
     // idempotent and an edit arriving after a later one cannot lower the frontier again. The
     // *raise* is what makes a partial replay safe — see `Version::watermark_floor`.
-    // **Taken as given, not merged.** The direction depends on what produced the edit: a flush
+    // Taken as given, not merged. The direction depends on what produced the edit: a flush
     // raises the floor, a discard lowers it. Each emit site folds the current value in and hands
     // over the result, because only the site knows which of the two it is. Replay is in sequence
     // order and stops at the first gap, so last-writer-wins is well defined here.

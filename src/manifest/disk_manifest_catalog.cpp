@@ -80,16 +80,12 @@ Status DiskManifestCatalog::write_object(const fs::path& path, Slice bytes) {
     // Write-once: O_EXCL, because a put at an existing address is a programming
     // error rather than an overwrite (ARCHITECTURE.md "Ownership is one compare-and-set").
     //
-    // **`Config`, and the same code every implementation reports.** This used to be
-    // `Unusable` while the S3 and DynamoDB catalogs returned `Config` for the same
-    // condition, and the contract suite only checked that it was not `Ok` — so the
-    // divergence was invisible. It matters because the engine acts on it: an
-    // occupied edit address is how a fenced writer finds out, and a reaction keyed
-    // on the status cannot work if the status depends on which catalog is
-    // configured.
+    // `Config`, the same code every implementation reports for an occupied address. The engine acts
+    // on it — that is how a fenced writer finds out — so a reaction keyed on the status cannot work
+    // if the status depends on which catalog is configured.
     //
-    // The compare_and_set path shares this helper but removes its temp file first,
-    // so it does not normally reach here.
+    // The compare_and_set path shares this helper but removes its temp file first, so it does not
+    // normally reach here.
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) return errno == EEXIST ? Status::Config : Status::Io;
 

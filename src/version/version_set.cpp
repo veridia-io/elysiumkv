@@ -124,7 +124,7 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
     if (!framed) return framed.error();
     if (Status status = catalog_.put_snapshot(generation, Slice::from(*framed)).get();
         status != Status::Ok) {
-        // **The same rule as the edit path, one step earlier.** The generation
+        // The same rule as the edit path, one step earlier. The generation
         // number here is `entry_->generation + 1`, derived from what this instance
         // believes is current, so an occupied snapshot address means another writer
         // has already installed that generation — it beat us to the roll. The CAS
@@ -162,22 +162,18 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
 /// this reader can read, which is a `Stale` answer rather than a failure.
 constexpr int kRecoverAttempts = 4;
 
-/// **Loading is four round trips against a manifest that moves.** Read the pointer, fetch the
-/// snapshot, list the edits, fetch each one — and a writer rolls a generation and deletes the
-/// previous one between any two of those steps. Two interleavings used to be visible to a healthy
-/// reader, and both are answered here by re-reading the pointer:
+/// Loading is four round trips against a manifest that moves: read the pointer, fetch the snapshot,
+/// list the edits, fetch each one. A writer may roll a generation and delete the previous one
+/// between any two of those steps, and the manifest has no retention window of its own.
 ///
-/// - The pointer named generation *N*, the writer rolled and deleted *N*, and the snapshot came
-///   back `NotFound` — which was reported as **`Corrupt`**, telling an operator their store was
-///   damaged when nothing was wrong with it.
-/// - The snapshot won the race and `list_edits` lost. **A missing generation directory lists as
-///   no edits rather than as an error**, deliberately, so the snapshot installed with none of its
-///   up-to-1000 edits replayed, `refresh()` returned `Ok`, and the reader's view moved *backwards*
-///   — a key it had just read could revert or vanish.
+/// Re-reading the pointer is what distinguishes a rolled generation from a damaged store. Two
+/// interleavings depend on it:
 ///
-/// The manifest is the one thing here with no retention window of its own: SST objects get
-/// `obsolete_retention` precisely because a reader elsewhere is invisible to the collector, and
-/// generations, read by that same invisible reader in four steps rather than one, get none.
+/// - The snapshot the pointer named is gone. `NotFound` there means the generation was collected,
+///   not that the store is corrupt.
+/// - The snapshot was fetched but `list_edits` ran after the delete. A missing generation lists as
+///   no edits rather than as an error, so the snapshot would install with none of its edits
+///   replayed and the view would move backwards.
 Status VersionSet::recover() {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -198,7 +194,7 @@ Status VersionSet::recover() {
             if (moved && moved->has_value() && (*moved)->generation != generation) continue;
             return Status::Corrupt;
         }
-        // **Every failure here is hard, unlike an edit's.** A snapshot is read before any edit, so
+        // Every failure here is hard, unlike an edit's. A snapshot is read before any edit, so
         // a wrong or missing key surfaces at this one call rather than as a replay that quietly
         // stops and opens on a truncated history.
         std::string why;
@@ -271,7 +267,7 @@ Status VersionSet::recover() {
             return Status::Io;
         }
 
-        // **Re-read the pointer before installing anything.** Everything above was read across
+        // Re-read the pointer before installing anything. Everything above was read across
         // four separate round trips; if the generation moved during them, what was assembled is a
         // mixture rather than a snapshot, and the empty-edit-list case above makes that mixture
         // look perfectly well formed.
@@ -319,20 +315,15 @@ Status VersionSet::apply(VersionEdit edit) {
         status != Status::Ok) {
         // Nothing is swapped: the current version still describes what is on disk.
         //
-        // **An occupied edit address means another writer owns this store.**
+        // An occupied edit address means another writer owns this store.
         // `next_seq_` is engine-owned and monotonic, so nothing this instance has
-        // done can have put an object where it is about to write; the "a put at
-        // an existing address is a programming error" is about the caller, and here
-        // the caller is the engine. Reporting `Config` would tell a fenced writer
-        // it has a configuration problem and leave `fenced_` clear, so it would
-        // carry on with a stale view until its next generation roll happened to
-        // notice — which is the one path that used to detect this at all.
+        // done can have put an object where it is about to write. Reporting `Config` would leave
+        // `fenced_` clear, so the writer would carry on with a stale view until its next generation
+        // roll.
         //
-        // The case this deliberately misreads: a put that succeeded remotely but
-        // reported a timeout, retried by the caller, collides with its own edit and
-        // is fenced when it was not. That costs a reopen, which re-reads the true
-        // state. The opposite mistake costs a second live writer that has been told
-        // nothing useful, so the trade is not close.
+        // Misread case: a put that succeeded remotely but reported a timeout, retried by the
+        // caller, collides with its own edit and is fenced when it was not. That costs a reopen,
+        // which re-reads the true state — cheaper than leaving a second live writer undetected.
         if (status == Status::Config) {
             fenced_.store(true, std::memory_order_release);
             return Status::Fenced;
@@ -343,7 +334,7 @@ Status VersionSet::apply(VersionEdit edit) {
 
     auto base = current();
 
-    // **This does not validate that `edit.deleted` is still live**, and a second concurrent
+    // This does not validate that `edit.deleted` is still live, and a second concurrent
     // deleting task would be unsound because of it: two tasks picking inputs from the same
     // version snapshot can both commit, producing a double delete or a compaction reading a
     // file a migration has already moved and unlinked. Today it holds because compaction,
@@ -352,7 +343,7 @@ Status VersionSet::apply(VersionEdit edit) {
     // first test run instead of in production. Flush is exempt: it only adds.
     //
     // A second deleting worker therefore needs either a set of files claimed by a running
-    // task, or optimistic validation here, **before** the worker — not after.
+    // task, or optimistic validation here, before the worker — not after.
 
     // Capture the metadata of what is being removed *before* the swap: the
     // store_id says where the object physically lives, and after the swap it is
@@ -435,7 +426,7 @@ size_t VersionSet::tracked_versions() const {
 }
 
 void VersionSet::collect_obsolete_locked() {
-    // **Prune before the early return, not after it.** This is the only place expired entries
+    // Prune before the early return, not after it. This is the only place expired entries
     // leave `live_versions_`, and a flush-only edit deletes nothing — so a store that never
     // compacts (a single configured level makes the picker return nothing at all) grew the vector
     // by one entry per flush forever, each retained `weak_ptr` also holding a control block alive.
@@ -460,7 +451,7 @@ void VersionSet::collect_obsolete_locked() {
     }
     live_versions_ = std::move(alive);
 
-    // **The retention window**, and it is checked before anything else about the object. A reader
+    // The retention window, and it is checked before anything else about the object. A reader
     // in another process is invisible here — that is the whole reason this delay exists — so the
     // only thing standing between a compaction and a reader's vanished file is the clock.
     const uint64_t now = clock_ ? clock_() : 0;
@@ -484,7 +475,7 @@ void VersionSet::collect_obsolete_locked() {
         collectable.push_back(file);
     }
 
-    // **One call for the whole set**, not one per file. A compaction routinely
+    // One call for the whole set, not one per file. A compaction routinely
     // obsoletes dozens of objects, and against a remote store the per-file shape
     // was one HTTP round trip each.
     if (!collectable.empty()) {

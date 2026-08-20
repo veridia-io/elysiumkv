@@ -216,7 +216,7 @@ Status DiskBlobStore::do_put(std::string_view name, Slice bytes) {
 
 Status DiskBlobStore::do_remove(std::string_view name) {
     if (!is_valid_object_name(name)) return Status::Config;
-    // **Before the unlink, not after.** A held descriptor keeps reading an unlinked inode
+    // Before the unlink, not after. A held descriptor keeps reading an unlinked inode
     // perfectly well, so leaving one behind would make a removed object still readable.
     open_files_->erase(name);
     if (::unlink(path_for(name).c_str()) == 0) return Status::Ok;

@@ -16,15 +16,15 @@ class MemoryBudget;
 /// The open-`SstReader` cache: one entry per file whose footer, index block and
 /// bloom filter are resident.
 ///
-/// **It was unbounded, and the filter is what makes that expensive.** A reader holds
+/// It was unbounded, and the filter is what makes that expensive. A reader holds
 /// its file's bloom filter, which at the default 10 bits per key is ~1.25 MB for a
 /// million-entry file; a store with a thousand such files held over a gigabyte with no
 /// bound and no accounting. Every other cache in the engine reports to `MemoryBudget`
 /// (ARCHITECTURE.md "A process-wide memory budget") and this one did not, so it was invisible in exactly the place a sizing
 /// decision is made.
 ///
-/// **Eviction is safe by construction, which is the only reason a bound is cheap
-/// here.** Readers are handed out as `shared_ptr`, and every user — an iterator, a
+/// Eviction is safe by construction, which is the only reason a bound is cheap
+/// here. Readers are handed out as `shared_ptr`, and every user — an iterator, a
 /// point lookup, a compaction — holds its own. Dropping the cache's reference cannot
 /// pull a reader out from under anyone; it only means the *next* open of that file
 /// reads its footer, index and filter again.

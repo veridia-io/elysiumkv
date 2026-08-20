@@ -22,7 +22,7 @@ const char* crc32c_implementation();
 
 /// The portable table path, whichever one `crc32c` would select at runtime.
 ///
-/// **Exposed because otherwise nothing executes it.** The dispatch takes the hardware instruction
+/// Exposed because otherwise nothing executes it. The dispatch takes the hardware instruction
 /// on every machine this ships to and every machine CI runs on, so the table is the half that only
 /// runs where the instruction is absent — the one platform nobody is testing on. A build that
 /// cannot dispatch to hardware depends on it for every block read.

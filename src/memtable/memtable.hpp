@@ -28,7 +28,7 @@ public:
 
     /// ARCHITECTURE.md "A range delete is a record, not a rewrite" — deletes `[lower, upper)`.
     ///
-    /// **Two things happen, and both are needed.** The range is recorded, so that the SST this
+    /// Two things happen, and both are needed. The range is recorded, so that the SST this
     /// memtable flushes into carries it and shadows every older file. And every key the memtable
     /// *already holds* in the range is turned into a point delete right now — because a range
     /// tombstone shadows nothing in the file that carries it, and those keys are about to land in

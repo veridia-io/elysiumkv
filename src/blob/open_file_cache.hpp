@@ -18,7 +18,7 @@ namespace elysiumkv {
 
 /// A descriptor and the size it was opened at.
 ///
-/// **The size is cached because objects are immutable.** Nothing may rewrite or extend a named
+/// The size is cached because objects are immutable. Nothing may rewrite or extend a named
 /// object, so one `fstat` at open time answers every later read — and dropping it is what turns a
 /// block read from three syscalls into one `pread`.
 struct OpenFile {
@@ -35,11 +35,11 @@ struct OpenFile {
 
 /// Open descriptors keyed by object name, sharded and LRU-bounded.
 ///
-/// **Handed out as `shared_ptr`, so a reader's `pread` outlives eviction.** Eviction drops the
+/// Handed out as `shared_ptr`, so a reader's `pread` outlives eviction. Eviction drops the
 /// cache's reference and the last holder closes, which is the same ownership rule the block cache
 /// uses and the reason eviction never consults a use count.
 ///
-/// **Bounded by descriptor count, and the bound must stay modest.** A process running dozens of
+/// Bounded by descriptor count, and the bound must stay modest. A process running dozens of
 /// instances over dozens of stores multiplies this by every one of them, against a soft limit as
 /// low as 256.
 class OpenFileCache {

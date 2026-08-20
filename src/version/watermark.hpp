@@ -7,7 +7,7 @@
 
 namespace elysiumkv {
 
-/// The embedder's durability frontier, carried as an **interval** rather than a single value.
+/// The embedder's durability frontier, carried as an interval rather than a single value.
 ///
 /// A watermark is a position in someone else's log — a changelog offset, for the Kafka Streams
 /// adapter. The engine orders it, propagates it and hands it back; it never invents, interpolates
@@ -17,19 +17,19 @@ namespace elysiumkv {
 /// Why two values and not one. `set_watermark(M)` asserts that every write completed so far is at
 /// a position ≤ M, so every write accepted afterwards is at a position > M. That makes
 ///
-/// - **`low`** — the last watermark established when the source memtable was *created* — a strict
+/// - `low` — the last watermark established when the source memtable was *created* — a strict
 ///   *lower* bound on the positions the data occupies: the file contains no write at a position
 ///   ≤ `low`. This is the half recovery leans on. Losing a file invalidates only positions
 ///   after its `low`, so `min(low)` over a discarded set is a position everything below which
 ///   still survives.
-/// - **`high`** — the last watermark established before that memtable was sealed — an *upper*
+/// - `high` — the last watermark established before that memtable was sealed — an *upper*
 ///   bound, and the half that is safe to report when nothing was lost.
 ///
 /// A single scalar cannot do both jobs, and reporting `high` for a lost file over-reports
 /// durability: a memtable that begins at 80 and takes writes up to 100 before
 /// `set_watermark(100)` has `low = 80, high = 100`, and losing it costs the write at 81.
 ///
-/// Presence is tracked separately from the value because **zero is a valid position** — a store
+/// Presence is tracked separately from the value because zero is a valid position — a store
 /// legitimately at the start of its log. `high` can be present while `low` is absent: a memtable
 /// that predates the first `set_watermark` call has no lower bound at all, and losing it means
 /// nothing can be certified. `low` present implies `high` present, since a `low` is only ever a
@@ -71,7 +71,7 @@ inline void accumulate_max(std::optional<uint64_t>& into, std::optional<uint64_t
     into = into.has_value() ? std::max(*into, *value) : value;
 }
 
-/// **A loss, recorded so the next open still knows about it.**
+/// A loss, recorded so the next open still knows about it.
 ///
 /// Discarding is itself a manifest edit that removes the lost files, so their intervals — the only
 /// evidence of what was lost — are gone by the next open. `Version::watermark_floor` carries this
@@ -85,15 +85,13 @@ struct WatermarkFloor {
     /// The highest position still certifiable. `nullopt` means nothing is.
     std::optional<uint64_t> position;
 
-    /// **A partial replay earns nothing.** The floor is not raised as the embedder re-materialises
+    /// A partial replay earns nothing. The floor is not raised as the embedder re-materialises
     /// the gap — it stands until the replay is declared complete, and is then cleared outright.
     ///
-    /// Crediting progress incrementally is the tempting design and it is wrong twice over. A replay
-    /// is the newest data in the store, so it lands on the *transient* tier; losing that tier again
-    /// before it ages off takes the replay with it, and a floor raised on the strength of it would
-    /// go on certifying a position whose evidence had been destroyed twice. The cost of not
-    /// crediting it is that a crash mid-replay repeats work already done, which is bounded by the
-    /// gap and is the cheaper mistake by a wide margin.
+    /// Incremental credit would be unsound: a replay is the newest data in the store, so it lands
+    /// on the transient tier, and losing that tier again takes the replay with it — leaving a floor
+    /// certifying a position whose evidence is gone. Not crediting it costs a repeated replay,
+    /// bounded by the gap.
     ///
     /// Lowered, though, by a *further* loss: `nullopt` is absorbing, since nothing certifiable
     /// stays nothing certifiable.
@@ -112,7 +110,7 @@ struct WatermarkFloor {
 /// Everything recovery needs to choose a resume position, shaped so that the unsound answer cannot
 /// be written.
 ///
-/// **The controlling variable is `anything_discarded`, and it is not derivable from the bounds.**
+/// The controlling variable is `anything_discarded`, and it is not derivable from the bounds.
 /// The tempting formulation is `coalesce(discarded_lower_bound, surviving_upper_bound)` — take the
 /// discard bound if there is one, otherwise fall back. That conflates two states with *opposite*
 /// recovery implications: an empty discard set, where the surviving upper bound certifies a complete
@@ -120,13 +118,12 @@ struct WatermarkFloor {
 /// certified at all. So the flag is stored rather than inferred, and `resume_after` branches on it
 /// first.
 ///
-/// `surviving_upper_bound` is deliberately kept even when files were discarded, and deliberately
-/// not read in that case. Keeping it puts the rejected fallback in front of the next reader at the
-/// exact point they would reach for it, instead of leaving the absence to be rediscovered.
+/// `surviving_upper_bound` is kept even when files were discarded, and is not read in that case:
+/// after a loss only the discarded files' lower bounds can be trusted.
 class RecoveryWatermark {
 public:
-    /// Folds in a file that recovery is dropping. **A file with no lower bound makes the whole
-    /// discard bound absent, not merely skipped** — it is not evidence of nothing, it is the absence
+    /// Folds in a file that recovery is dropping. A file with no lower bound makes the whole
+    /// discard bound absent, not merely skipped — it is not evidence of nothing, it is the absence
     /// of evidence. Taking `min` over only the files that happen to have a bound would ignore
     /// precisely the file that might hold the only copy of an earlier write.
     void observe_discarded(const WatermarkInterval& watermark) {
@@ -161,8 +158,8 @@ public:
     /// | discarded, all had a low | `min(low)` over the discarded set | a write at or below that minimum cannot have lived only in a discarded file |
     /// | discarded, any lacked a low | `nullopt` | that file may hold the only copy of a write at *any* position, so no prefix is provable |
     ///
-    /// **`max(high)` is not a weaker-but-valid fallback after a loss — it stops being a bound at
-    /// all.** Its justification is that watermarks are non-decreasing, that compaction takes the
+    /// `max(high)` is not a weaker-but-valid fallback after a loss — it stops being a bound at
+    /// all. Its justification is that watermarks are non-decreasing, that compaction takes the
     /// `max` of its inputs' highs, and that *no state was lost*. A discard falsifies the last
     /// clause: a surviving file with `high = 100` says the prefix through 100 had been established
     /// when its lineage was produced, not that this surviving set still contains all state through

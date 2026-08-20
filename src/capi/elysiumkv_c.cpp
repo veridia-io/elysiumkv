@@ -67,8 +67,8 @@ elysiumkv_status to_c(Status status) {
     return ELYSIUMKV_UNUSABLE;
 }
 
-/// Every entry point is wrapped in this: **a C++ exception escaping the ABI is
-/// undefined behaviour** (ARCHITECTURE.md "The ABI boundary"), so the boundary converts anything that escapes
+/// Every entry point is wrapped in this: a C++ exception escaping the ABI is
+/// undefined behaviour (ARCHITECTURE.md "The ABI boundary"), so the boundary converts anything that escapes
 /// into a status and a message. `Status::Unusable` rather than `Io`, because an
 /// exception is not a "try again later" — the instance is in a state the engine
 /// does not model.
@@ -142,7 +142,7 @@ public:
     }
 
     Result<DataKey> new_data_key() override {
-        // **Zeroed before returning, whatever happened.** Key material sits in this buffer for as
+        // Zeroed before returning, whatever happened. Key material sits in this buffer for as
         // long as it takes to copy it, and nobody else is placed to clear it.
         std::array<uint8_t, kDataKeyBytes> key{};
         std::vector<uint8_t> envelope(kMaxEnvelopeBytes);
@@ -213,8 +213,8 @@ private:
     using Transform = elysiumkv_status (*)(void*, void*, uint64_t, const uint8_t*, size_t,
                                            const uint8_t*, size_t, uint8_t*, size_t, size_t*);
 
-    /// Appends to `out` in place. **Sized from the declared overhead rather than by asking the
-    /// callback twice**: that is the contract `chunk_bytes` and `overhead_bytes` exist to state, and
+    /// Appends to `out` in place. Sized from the declared overhead rather than by asking the
+    /// callback twice: that is the contract `chunk_bytes` and `overhead_bytes` exist to state, and
     /// a provider that breaks it is refused here rather than silently truncated.
     Status transform(Transform call, uint64_t chunk, Slice in, Slice aad, size_t capacity,
                      std::string& out) {
@@ -298,7 +298,7 @@ public:
         size_t produced = 0;
         const elysiumkv_status status =
             vtable_.get(vtable_.context, name_z.c_str(), offset, want, buffer.data(), &produced);
-        // **One result and one return**, so a path added later cannot escape the counter. Built by
+        // One result and one return, so a path added later cannot escape the counter. Built by
         // assignment rather than handed to a helper by value: gcc 13's `-Wmaybe-uninitialized`
         // reads the copy of an `expected` whose error arm is active as a read of the uninitialised
         // vector arm, and fails the build over it.
@@ -409,7 +409,7 @@ struct elysiumkv_batch {
 };
 
 struct elysiumkv_db {
-    /// Exactly one of these is set. **The C ABI cannot express the C++ type split**, where passing
+    /// Exactly one of these is set. The C ABI cannot express the C++ type split, where passing
     /// a read-only handle somewhere that writes is a compile error, so the distinction lives here
     /// and the write entry points refuse on a handle that has no `db`.
     std::unique_ptr<DB> db;
@@ -968,7 +968,7 @@ elysiumkv_status elysiumkv_memory_cache_blob_store_create_chunked(void* delegate
 
 #ifndef ELYSIUMKV_WITH_AWS
 
-// **CONFIG, not UNUSABLE.** Asking for S3 from a build that has no S3 is a
+// CONFIG, not UNUSABLE. Asking for S3 from a build that has no S3 is a
 // mistake in how the process was assembled, and the message has to name the
 // build option — otherwise the failure reads as "S3 is broken" rather than "this
 // library does not contain it", and the next hour goes into the wrong place.
@@ -1208,7 +1208,7 @@ elysiumkv_status open_common(const elysiumkv_options* options, elysiumkv_db** ou
     }) : DB::open_with_result(copy);
 
     if (!opened) {
-        // **The engine's message, not just the status.** A dozen distinct configuration mistakes
+        // The engine's message, not just the status. A dozen distinct configuration mistakes
         // all arrive here as `config`, and the instance that knew which one is already destroyed —
         // `elysiumkv::last_error()` is where it left the explanation.
         std::string why = std::string("open failed: ") + std::string(status_name(opened.error()));
@@ -1752,7 +1752,7 @@ void elysiumkv_iter_destroy(elysiumkv_iter* iter) {
 namespace {
 
 constexpr uint32_t kStatsFormatVersion = 1;
-// 32 fixed + 22 u64 scalars + the watermark presence byte and its padding. **No version bump:**
+// 32 fixed + 22 u64 scalars + the watermark presence byte and its padding. No version bump:
 // the header declares its own length, so a decoder that starts records at `header_bytes` skips
 // what it does not recognise — which is the property that made the previous seven appended
 // scalars a non-event too.

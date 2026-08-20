@@ -48,11 +48,11 @@ Result<ResolvedTiers> resolve_tiers(const std::vector<Tier>& tiers, double age_j
 
 /// A file's share of `Options::age_jitter` against a bound of `span_ms`.
 ///
-/// **It only ever pulls the bound earlier.** For a `Transient` tier `max_age` is a durability
+/// It only ever pulls the bound earlier. For a `Transient` tier `max_age` is a durability
 /// exposure bound the engine promises, so spreading a migration past it would weaken a guarantee
 /// to smooth a graph.
 ///
-/// **File number 0 means "not written yet"** and takes no jitter: a flush or compaction picks a
+/// File number 0 means "not written yet" and takes no jitter: a flush or compaction picks a
 /// tier for its output before the write settles a number, and a renumbering on a name collision
 /// would then move the bound underneath it. Those files sit on the exact bound until the first
 /// reconcile after they are in the manifest.
@@ -66,19 +66,18 @@ uint64_t tier_age_jitter_ms(const ResolvedTiers& tiers, uint64_t file_number,
 ///                  age(file) <= T.max_age   (or unset)
 /// ```
 ///
-/// **Age is the only input, and that is the whole of it.** A per-file size bound used to be a second
-/// predicate here and was removed: it gave size an independent route to a colder tier, so a large
-/// file could be placed cold on the day it was written, and placement is only well behaved because
-/// it is monotone. Capping a tier's footprint is `Tier::max_bytes`, which evicts oldest-first;
-/// keeping large files off a fast tier is a matter of the level's `target_file_bytes`.
+/// Age is the only input. A per-file size bound would give size an independent route to a colder
+/// tier, placing a large file cold on the day it was written, and placement is well behaved only
+/// because it is monotone in age. Cap a tier's footprint with `Tier::max_bytes`, which evicts
+/// oldest-first; keep large files off a fast tier with the level's `target_file_bytes`.
 ///
-/// **Monotone**: `min_write_time_ms` propagates as `min()` over compaction
+/// Monotone: `min_write_time_ms` propagates as `min()` over compaction
 /// inputs (ARCHITECTURE.md "The manifest is snapshots plus edits"), so it never increases — a file's age only grows and its tier
 /// only descends. That is what makes the design stable rather than oscillating,
 /// and it is why freshly compacted output made from old data lands directly in a
 /// cold tier instead of being written hot and migrated straight back out.
 ///
-/// **Still monotone under jitter.** The offset is fixed per file, so the bounds a given file
+/// Still monotone under jitter. The offset is fixed per file, so the bounds a given file
 /// faces are fixed numbers and the first one it fits only ever moves colder as its age grows.
 /// Across files the bounds no longer line up, which is the entire point.
 ///

@@ -70,7 +70,7 @@ Result<Footer> Footer::decode(Slice bytes) {
         footer.range_del.length = decode_fixed32(p + 40);
     }
     if (version >= kFormatVersion3) {
-        // **Checked before any handle above is used.** The point is to fail here rather than at a
+        // Checked before any handle above is used. The point is to fail here rather than at a
         // block read that a damaged offset sent somewhere arbitrary.
         const size_t body = static_cast<size_t>(width - kTrailerLength - 4);
         footer.crc = decode_fixed32(p + body);

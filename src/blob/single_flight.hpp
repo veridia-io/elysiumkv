@@ -16,12 +16,12 @@ namespace elysiumkv {
 
 /// Collapses concurrent identical fetches into one.
 ///
-/// **A cache miss is the one place a request count multiplies by reader count.** Ten threads
+/// A cache miss is the one place a request count multiplies by reader count. Ten threads
 /// arriving on a cold chunk each miss, each fetch it, and each write it — ten round trips and ten
 /// writes for one chunk of bytes. Against object storage that is ten times the bill, and on a cold
 /// start with a shared cache it is the difference between one fetch per chunk and one per reader.
 ///
-/// **Keyed by the whole fetch plan, not by the request.** Readers wanting different windows of one
+/// Keyed by the whole fetch plan, not by the request. Readers wanting different windows of one
 /// chunk round to the same plan and share its result; a reader whose request is larger than the
 /// chunk rounds to a different plan and correctly does not.
 class SingleFlight {
@@ -52,7 +52,7 @@ public:
             return call->result;
         }
 
-        // **Completed on every path, including an exception.** A leader that left without
+        // Completed on every path, including an exception. A leader that left without
         // publishing would leave its followers waiting forever, which is worse than any error it
         // could have reported.
         struct Completion {

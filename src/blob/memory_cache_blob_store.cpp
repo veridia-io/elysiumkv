@@ -14,7 +14,7 @@
 namespace elysiumkv {
 namespace {
 
-/// **Sharded only when there is enough capacity to divide.** One mutex over the whole cache makes
+/// Sharded only when there is enough capacity to divide. One mutex over the whole cache makes
 /// readers of unrelated objects wait on each other — measured at 1.8x throughput across eight
 /// threads, where the work is independent. Splitting the capacity to fix that is a bad trade below
 /// a few megabytes, where each shard would be too small to hold a working set and would evict what
@@ -60,13 +60,13 @@ struct MemoryCacheBlobStore::Impl {
     }
 
     bool store(const std::string& name, uint64_t offset, Slice bytes) override {
-        // **The budget decides, and a refusal is not a failure.** ARCHITECTURE.md "A process-wide memory budget" makes the
+        // The budget decides, and a refusal is not a failure. ARCHITECTURE.md "A process-wide memory budget" makes the
         // budget process-wide, so this cache competing with a dozen others is the
         // normal case; the correct response to a full budget is to serve the read
         // and cache nothing.
         if (owner->budget != nullptr && !owner->budget->try_acquire(bytes.size())) return false;
 
-        // **Give back what this key already held.** A read that missed with a small
+        // Give back what this key already held. A read that missed with a small
         // range and later missed with a larger one at the same offset repopulates the
         // same key, and charging both would drift the shared budget upward with no
         // bytes behind it. The core tracks its own accounting; this side has to track
@@ -202,7 +202,7 @@ GetResult MemoryCacheBlobStore::serve_get(std::string_view name, uint64_t offset
     // of the request, never a subset, so what comes back can always answer it.
     const FetchPlan plan = plan_fetch(offset, len, impl_->fetch_granularity);
 
-    // **One fetch per chunk, not one per reader.** Threads arriving together on a cold chunk
+    // One fetch per chunk, not one per reader. Threads arriving together on a cold chunk
     // otherwise each pay the round trip and each write the result; the first one here does the
     // work and the rest wait for it. Sharing the fetched buffer is safe because they share the
     // plan: each still cuts its own window out of it below.
@@ -235,7 +235,7 @@ GetResult MemoryCacheBlobStore::serve_get(std::string_view name, uint64_t offset
 }
 
 std::future<Status> MemoryCacheBlobStore::put(std::string_view name, Slice bytes) {
-    // **Write-through, never write-back (ARCHITECTURE.md "Caches chain").** The authoritative store
+    // Write-through, never write-back (ARCHITECTURE.md "Caches chain"). The authoritative store
     // acknowledges first; only then is anything cached. Acknowledging from a cache
     // and writing down later would make the cache authoritative for a window, which
     // is the entire class of problem this design exists to avoid.

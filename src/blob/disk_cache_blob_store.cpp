@@ -63,7 +63,7 @@ bool write_whole_file(const fs::path& path, Slice bytes) {
     return true;
 }
 
-/// **Sharded only when there is enough capacity to divide.** One mutex over the whole cache is
+/// Sharded only when there is enough capacity to divide. One mutex over the whole cache is
 /// held across the chunk file's `write` and across eviction's `remove_all`, so readers of unrelated
 /// objects wait on each other's filesystem calls. Splitting the capacity to fix that is a bad trade
 /// below a few megabytes, where each shard would be too small to hold a working set.
@@ -143,7 +143,7 @@ struct DiskCacheBlobStore::Impl {
           cache_on_write(write_through) {
         std::error_code ec;
         fs::create_directories(root, ec);
-        // **Start empty.** ARCHITECTURE.md "Caches chain" says wiping a cache at startup is valid, and it is
+        // Start empty. ARCHITECTURE.md "Caches chain" says wiping a cache at startup is valid, and it is
         // the honest choice here: the alternative is trusting a directory whose
         // contents this process did not write, with no index to say what is in it.
         // Adopting it would mean either a persisted index to keep consistent or a
@@ -232,7 +232,7 @@ GetResult DiskCacheBlobStore::serve_get(std::string_view name, uint64_t offset, 
     // of the request, never a subset, so what comes back can always answer it.
     const FetchPlan plan = plan_fetch(offset, len, impl_->fetch_granularity);
 
-    // **One fetch per chunk, not one per reader.** Threads arriving together on a cold chunk
+    // One fetch per chunk, not one per reader. Threads arriving together on a cold chunk
     // otherwise each pay the round trip and each write the result; the first one here does the
     // work and the rest wait for it. Sharing the fetched buffer is safe because they share the
     // plan: each still cuts its own window out of it below.

@@ -26,8 +26,8 @@ bool get_string(const uint8_t*& p, const uint8_t* limit, std::string& out) {
     return true;
 }
 
-/// Presence is encoded ahead of the values rather than inferred from them, because **zero is a
-/// valid watermark**. One varint carrying two bits keeps the record all-varint; `high` present
+/// Presence is encoded ahead of the values rather than inferred from them, because zero is a
+/// valid watermark. One varint carrying two bits keeps the record all-varint; `high` present
 /// with `low` absent is the legitimate state of a file whose memtable predates the first
 /// `set_watermark` call, so the two bits are independent rather than a tri-state count.
 void put_watermark(std::string& out, const WatermarkInterval& watermark) {
@@ -135,8 +135,8 @@ std::string frame(const std::string& content, Compression codec) {
     return out;
 }
 
-/// Three states, not two: **no loss recorded**, **a loss permitting a position**, and **a loss
-/// permitting nothing**. Zero is a valid position, so none of them can be inferred from the value.
+/// Three states, not two: no loss recorded, a loss permitting a position, and a loss
+/// permitting nothing. Zero is a valid position, so none of them can be inferred from the value.
 /// An edit's instruction: 0 silent, 1 set a position, 2 set "certifies nothing", 3 clear.
 void put_floor_update(std::string& out, VersionEdit::FloorUpdate update,
                       const WatermarkFloor& floor) {

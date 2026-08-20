@@ -20,7 +20,7 @@ public:
     virtual void evict_file(uint64_t file_number) = 0;
     virtual size_t approximate_bytes() const = 0;
 
-    /// ARCHITECTURE.md "A process-wide memory budget" — **the first thing shed when the shared memory budget is exceeded.**
+    /// ARCHITECTURE.md "A process-wide memory budget" — the first thing shed when the shared memory budget is exceeded.
     /// Evicts least-recently-used entries until at least `bytes` have been released, and
     /// returns how many actually were; less than asked means the cache is empty.
     ///

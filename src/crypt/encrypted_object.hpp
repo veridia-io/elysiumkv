@@ -12,14 +12,14 @@ namespace elysiumkv {
 /// One encrypted object, presented as a `BlobStore` so that everything above it is unchanged
 /// (ARCHITECTURE.md "Encryption sits at the object boundary").
 ///
-/// **The engine's half of the boundary, not the provider's.** A provider owns cryptography — keys,
+/// The engine's half of the boundary, not the provider's. A provider owns cryptography — keys,
 /// nonces, suites, its own metadata. This owns the mapping between the offsets the engine reads at
 /// and the offsets the bytes actually live at, and that has to exist in exactly one place: a
 /// provider free to choose its own layout would reimplement this arithmetic, and an error in it is
 /// invisible to everything else. `ObjectCipher` reports a chunk size and a per-chunk overhead, and
 /// those two numbers are the whole contract needed here.
 ///
-/// **Constructed per object, at the point of use** — never registered in a tier's store chain. So
+/// Constructed per object, at the point of use — never registered in a tier's store chain. So
 /// it cannot be composed in the wrong order, and it does not terminate `authoritative_store()`'s
 /// walk the way a chain decorator would.
 ///
@@ -32,8 +32,8 @@ namespace elysiumkv {
 /// ```
 class EncryptedObject final : public BlobStore {
 public:
-    /// **The identity the chunks authenticate against is the cipher's, not the file's current
-    /// number.** Migration copies an object byte for byte and renumbers the copy, so the two differ
+    /// The identity the chunks authenticate against is the cipher's, not the file's current
+    /// number. Migration copies an object byte for byte and renumbers the copy, so the two differ
     /// there — and binding to the live number would stop every migrated file from opening.
     ///
     /// `logical_bytes` is the object's plaintext length — `FileMetadata::file_bytes` for an SST.
@@ -71,9 +71,9 @@ private:
 
 /// The associated data a chunk is authenticated against.
 ///
-/// **Binds the chunk to its position and its object**, so a chunk lifted from elsewhere — or
+/// Binds the chunk to its position and its object, so a chunk lifted from elsewhere — or
 /// replayed at a different index — fails to open rather than decrypting to something plausible.
-/// **Chunk zero additionally binds the object's logical length**, which is what closes truncation:
+/// Chunk zero additionally binds the object's logical length, which is what closes truncation:
 /// a shortened object is a claim about its length, and a claim that does not match what was sealed
 /// is refused.
 std::string chunk_aad(uint64_t object_id, uint64_t chunk, uint64_t logical_bytes);
