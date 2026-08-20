@@ -14,7 +14,7 @@ import org.apache.kafka.streams.state.VersionedBytesStoreSupplier;
  *         "prices", config, Duration.ofDays(7))));
  * }</pre>
  *
- * <p><b>{@code historyRetention} bounds the past, not the present.</b> A key's current value is
+ * <p>{@code historyRetention} bounds the past, not the present. A key's current value is
  * readable however long ago it was written; the retention says how far back {@code get(key, asOf)}
  * can reach, and a write older than it is refused rather than stored where nothing could read it.
  */

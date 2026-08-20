@@ -10,10 +10,10 @@ package io.veridia.elysiumkv.partitioned;
  * manager that commits on the application's behalf offers an after-commit hook and no callback
  * position at all.
  *
- * <p>Where a callback <em>is</em> possible it is worth using: one call is one place to classify from,
- * and the two things inside it — checkpointing input positions and committing — throw an overlapping
- * taxonomy with different meanings. Anything left outside is unclassified: this component's catch
- * blocks never see it, and a transaction can be left open with batches staged.
+ * <p>Where a callback <em>is</em> possible it is one place to classify from, and the two things
+ * inside it — checkpointing input positions and committing — throw an overlapping taxonomy with
+ * different meanings. Anything left outside is unclassified: this component's catch blocks never
+ * see it, and a transaction can be left open with batches staged.
  *
  * <p>An implementation signals its outcome by throwing {@link AbortableNotCommitted},
  * {@link OutcomeUnknown} or {@link ProducerDead}. Any other exception is treated as

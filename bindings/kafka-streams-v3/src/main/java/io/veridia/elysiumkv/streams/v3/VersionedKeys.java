@@ -11,17 +11,13 @@ import org.apache.kafka.common.utils.Bytes;
  *   latest:  0x01 ‖ user key
  * </pre>
  *
- * <p><b>Why the split, and why history sorts first.</b> A versioned store keeps old versions only
- * for its history retention, but a key's <em>current</em> value must survive however long ago it was
- * written — a key written once and never touched again is still readable a year later. So the two
- * have different lifetimes and cannot share an expiry rule.
+ * <p>The two keyspaces are split because their lifetimes differ: history lives only for the
+ * retention, while a key's current value must survive however long ago it was written.
  *
  * <p>History is segmented by timestamp exactly as {@link WindowKeys} is, so expiring it is one
- * {@link io.veridia.elysiumkv.ElysiumKV#truncateBelow} rather than a delete per version. That is
- * also why history carries the low prefix byte: {@code truncateBelow} moves a floor up from the
- * bottom of the keyspace, so anything it must never touch has to sort <em>above</em> everything it
- * will. Putting latest values first would mean expiring the oldest history segment could only be
- * expressed as a floor above every latest value.
+ * {@link io.veridia.elysiumkv.ElysiumKV#truncateBelow} rather than a delete per version. History
+ * must therefore keep the lower prefix byte: {@code truncateBelow} raises a floor from the bottom
+ * of the keyspace, so anything it must never touch has to sort above everything it will.
  *
  * <p>Values are stored in the timestamped format Streams uses — {@code timestamp ‖ value} — with a
  * leading byte distinguishing a real value from a deletion, since a versioned store records a

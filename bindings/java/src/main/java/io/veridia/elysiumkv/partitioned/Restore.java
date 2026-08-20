@@ -11,7 +11,7 @@ import java.util.OptionalLong;
 @FunctionalInterface
 public interface Restore<K> {
     /**
-     * @param materializedThrough the last position this store already holds, <b>inclusive</b> — the
+     * @param materializedThrough the last position this store already holds, inclusive — the
      *                            replay resumes at {@code materializedThrough + 1}. Empty means the
      *                            store has never committed and everything must be replayed; that is
      *                            not the same as zero, which is a real position.

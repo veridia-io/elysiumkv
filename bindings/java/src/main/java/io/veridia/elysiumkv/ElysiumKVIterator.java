@@ -15,7 +15,7 @@ import java.util.NoSuchElementException;
  * }
  * }</pre>
  *
- * <p><b>Check {@link #next()} returning false with {@link #status()}</b> when it
+ * <p>Check {@link #next()} returning false with {@link #status()} when it
  * matters: exhaustion and failure look identical otherwise, and a scan cut short
  * by an unreachable store would otherwise read as a short result.
  *

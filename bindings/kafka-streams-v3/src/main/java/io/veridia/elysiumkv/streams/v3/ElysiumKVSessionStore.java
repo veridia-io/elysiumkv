@@ -37,7 +37,7 @@ import org.apache.kafka.streams.state.SessionStore;
  * is one {@code truncateBelow} rather than a store instance per segment — with the difference that
  * a session is a <em>pair</em> of timestamps and is segmented by its end.
  *
- * <p><b>Sessions merge, and that happens above this store.</b> When a record arrives that bridges
+ * <p>Sessions merge, and that happens above this store. When a record arrives that bridges
  * two existing sessions, Streams removes both and puts back one spanning the pair. This store is
  * asked to {@code remove} and {@code put}; it does not decide what a session is. What it must get
  * right is that a removal targets the exact {@code (key, start, end)} triple that was written, which

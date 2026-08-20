@@ -5,14 +5,14 @@ import java.util.Arrays;
 /**
  * One master key held in this process, wrapping a fresh data key per object.
  *
- * <p><b>Still a fresh key per object</b>, because the engine derives its nonces from the chunk
+ * <p>Still a fresh key per object, because the engine derives its nonces from the chunk
  * index: one key across every object would repeat nonces and break GCM outright. So choosing this
  * over {@link AwsKmsEncryptionKeyManager} is a decision about key custody, not about strength.
  *
  * <p>Suitable where the master key arrives from a secrets manager at startup. Where it must never
  * enter the process at all, use KMS.
  *
- * <p><b>The array you pass cannot be wiped for you.</b> It is copied into native storage that is
+ * <p>The array you pass cannot be wiped for you. It is copied into native storage that is
  * zeroed deterministically, and this object retains no copy past construction — but a {@code byte[]}
  * is collector-owned and a moving collector may already have left copies behind. Wipe your own
  * array when you are done with it, and understand that this is best-effort in a JVM.

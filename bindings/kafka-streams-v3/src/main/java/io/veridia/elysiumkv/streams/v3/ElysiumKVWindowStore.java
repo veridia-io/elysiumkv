@@ -35,7 +35,7 @@ import org.apache.kafka.streams.state.WindowStoreIterator;
 /**
  * A Kafka Streams {@link WindowStore} backed by a single ElysiumKV store.
  *
- * <p><b>One store, not one per segment.</b> Streams' own window stores are segmented across
+ * <p>One store, not one per segment. Streams' own window stores are segmented across
  * separate physical stores because retention then costs a store drop rather than a delete per key.
  * That is the right trade against RocksDB and the wrong one here: a store instance costs three
  * background threads, and Streams creates a store per task, so a topology with a dozen partitions
@@ -347,7 +347,7 @@ public class ElysiumKVWindowStore implements WindowStore<Bytes, byte[]> {
     /**
      * The segments a scan can usefully visit, clamped to those that can hold anything.
      *
-     * <p><b>Not a refinement — a bound on the loop.</b> A scan builds one range per segment it
+     * <p>Not a refinement — a bound on the loop. A scan builds one range per segment it
      * spans, so an open-ended {@code timeTo} of {@code Long.MAX_VALUE} — which is exactly what an
      * IQv2 query with no upper bound asks for — would otherwise mean 10^14 iterations before the
      * first entry came back. Nothing above the largest timestamp seen exists, and nothing below the

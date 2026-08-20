@@ -6,8 +6,8 @@ import java.util.NoSuchElementException;
 
 /**
  * A scan that crosses the JNI boundary once per batch rather than three times
- * per entry. <b>Use this for long scans; use {@link ElysiumKVIterator} when you
- * want the value without copying it.</b>
+ * per entry. Use this for long scans; use {@link ElysiumKVIterator} when you
+ * want the value without copying it.
  *
  * <pre>{@code
  * try (BatchedIterator scan = db.batchedPrefixIterator(prefix)) {
@@ -20,18 +20,13 @@ import java.util.NoSuchElementException;
  * }
  * }</pre>
  *
- * <p><b>The trade is copies for crossings, and it is measured.</b> On a 1000-key
- * prefix scan, per entry: ~419ns through {@code key()}/{@code value()}, ~251ns
- * through {@code keyInto}/{@code valueInto}, <b>~58ns</b> here, against ~36ns for
- * the same scan in C++. Only ~37ns of the unbatched cost is the advance; the
- * rest is two accessor crossings, and removing the per-entry allocation recovers
- * under half of it. That is the measurement ARCHITECTURE.md "The ABI boundary" asks for before
- * {@code elysiumkv_iter_next_batch} earns its ABI surface.
+ * <p>The trade is copies for crossings: measured over a 1000-key prefix scan, ~58ns per entry
+ * here against ~419ns through {@link ElysiumKVIterator#key()}/{@code value()}, where most of the
+ * cost is the two accessor crossings rather than the advance.
  *
- * <p>The native side fills this buffer in place — it is direct, so nothing is
- * staged between the engine and the decode below. The corresponding cost is that
- * entries are copied rather than borrowed from the block cache, which is right
- * for a scan and wrong for a point lookup; {@link ElysiumKV#get} still pins.
+ * <p>The buffer is direct and the native side fills it in place, so nothing is staged between the
+ * engine and the decode below. Entries are copied rather than borrowed from the block cache, which
+ * is right for a scan and wrong for a point lookup; {@link ElysiumKV#get} still pins.
  */
 public final class BatchedIterator implements AutoCloseable {
     /**

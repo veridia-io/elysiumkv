@@ -17,18 +17,16 @@ package io.veridia.elysiumkv;
  * }
  * }</pre>
  *
- * <p><b>The delegate must outlive this cache</b>, and both must outlive the database.
+ * <p>The delegate must outlive this cache, and both must outlive the database.
  * Closing this does not close the store underneath — a cache does not own the thing it
  * caches.
  *
- * <p>No fsync, no crash-consistency protocol, and the directory is wiped at startup.
- * That falls out of the design rather than being a shortcut: the authoritative store
- * is written and acknowledged before anything is cached, so a cache entry is never the
- * only copy and a lost one costs a single refetch.
+ * <p>No fsync, no crash-consistency protocol, and the directory is wiped at startup: the
+ * authoritative store is written and acknowledged before anything is cached, so a cache entry is
+ * never the only copy and a lost one costs a single refetch.
  *
- * <p>A cache may never be the innermost store of a tier — it holds only copies, so
- * making one the only home for a file is the one arrangement a discard has nothing to
- * fall back on. {@link ElysiumKV#open} rejects it.
+ * <p>A cache may never be the innermost store of a tier, since it holds only copies and a discard
+ * would have nothing to fall back on. {@link ElysiumKV#open} rejects it.
  */
 public final class DiskCacheBlobStore extends BlobStore {
     /**

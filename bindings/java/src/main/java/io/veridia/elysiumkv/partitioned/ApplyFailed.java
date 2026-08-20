@@ -15,11 +15,11 @@ import java.util.TreeSet;
  * nothing about the others. Every partition this names is simply <em>behind</em>, which
  * {@link PartitionedStore#repair} fixes from a watermark that never moved.
  *
- * <p><b>{@link #partitions()} means every partition whose committed changelog may not be
- * materialised</b> — not merely the stores that threw. If a transaction covers {@code {P0, P1, P2}}
- * and applying P1 fails, P2's changelog is committed too, so P2 must be named unless it was applied
- * successfully. Exiting the apply loop on the first failure is the natural way to write it and it is
- * how a partition ends up committed-but-unwritten while still marked ready.
+ * <p>{@link #partitions()} means every partition whose committed changelog may not be
+ * materialised, not merely the stores that threw: if a transaction covers {@code {P0, P1, P2}} and
+ * applying P1 fails, P2's changelog is committed too, so P2 must be named unless it was applied
+ * successfully. Exiting the apply loop on the first failure would leave a partition
+ * committed-but-unwritten while still marked ready.
  *
  * <p>{@link #isTerminal()} asks a different question, and it is about the engine rather than about
  * consistency: a retryable I/O failure means ask again later, while a terminal one means this store

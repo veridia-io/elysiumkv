@@ -3,15 +3,15 @@ package io.veridia.elysiumkv;
 /**
  * Data keys minted and unwrapped by AWS KMS, so the key that wraps them never enters this process.
  *
- * <p><b>Optional native component.</b> Like {@link S3BlobStore}, this needs a library built with the
+ * <p>Optional native component. Like {@link S3BlobStore}, this needs a library built with the
  * AWS SDK; without one, registering it fails with a {@link ConfigException} naming the build option.
  * {@link ElysiumKV#hasAwsSupport()} answers in advance.
  *
- * <p><b>Every use is a network round trip</b> — one per object written, and one per object whenever
+ * <p>Every use is a network round trip — one per object written, and one per object whenever
  * its reader is not resident, since the reader holds the unwrapped key for as long as the cache
  * keeps it. A reader cache sized well below the working set turns evictions into KMS traffic.
  *
- * <p><b>{@code keyId} is what a rotation changes.</b> The wrapped form records which key produced
+ * <p>{@code keyId} is what a rotation changes. The wrapped form records which key produced
  * it, so files written under an earlier key keep opening without it being named here.
  *
  * <pre>{@code

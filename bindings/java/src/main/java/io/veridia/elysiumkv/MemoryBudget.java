@@ -1,13 +1,11 @@
 package io.veridia.elysiumkv;
 
 /**
- * The shared memory budget (ARCHITECTURE.md "A process-wide memory budget") — <b>per process, not per instance</b>.
+ * The shared memory budget (ARCHITECTURE.md "A process-wide memory budget") — per process, not per instance.
  *
- * <p>That distinction is the whole reason this is an object you create and pass around
- * rather than a number on {@link ElysiumKVOptions}. Many embedders run one instance per
- * shard, partition or tenant, so memtable and cache sizing multiplies by the instance
- * count; a per-instance constant is the wrong unit. Create one and give it to every
- * database and every in-memory cache in the process.
+ * <p>It is an object rather than a number on {@link ElysiumKVOptions} because one instance per
+ * shard, partition or tenant multiplies memtable and cache sizing by the instance count. Create
+ * one and give it to every database and every in-memory cache in the process.
  *
  * <pre>{@code
  * MemoryBudget budget = new MemoryBudget(4L << 30);        // 4 GiB for this process
@@ -16,14 +14,12 @@ package io.veridia.elysiumkv;
  * }
  * }</pre>
  *
- * <p>When the budget is exceeded the engine sheds, in this order: evict the block cache,
- * flush memtables, then stall writes. <b>No write ever fails because of it</b> —
- * refusing a put because a different instance is using memory would be a surprising
- * failure mode, so the budget shapes behaviour rather than rejecting work. {@link
- * ElysiumKVStats#budgetSheds()} counts how often shedding has happened, which is the
- * number that tells you the budget is set too low for the instances sharing it.
+ * <p>When the budget is exceeded the engine sheds, in this order: evict the block cache, flush
+ * memtables, then stall writes. No write ever fails because of it — the budget shapes behaviour
+ * rather than rejecting work. {@link ElysiumKVStats#budgetSheds()} counts how often shedding has
+ * happened, which is what says the budget is too low for the instances sharing it.
  *
- * <p><b>Must outlive every options object, database and cache it was given to.</b>
+ * <p>Must outlive every options object, database and cache it was given to.
  */
 public final class MemoryBudget implements AutoCloseable {
     private long handle;

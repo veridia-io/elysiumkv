@@ -1,14 +1,14 @@
 package io.veridia.elysiumkv;
 
 /**
- * Wrapping and unwrapping data keys. <b>The engine owns the cryptography; you own the key
- * custody</b> — which is the split that keeps a KMS integration from becoming a cipher integration.
+ * Wrapping and unwrapping data keys. The engine owns the cryptography; you own the key
+ * custody — which is the split that keeps a KMS integration from becoming a cipher integration.
  *
- * <p>Called <b>once per object</b> rather than per read, and {@link #openDataKey} results are
+ * <p>Called once per object rather than per read, and {@link #openDataKey} results are
  * cached, so a KMS round trip here is affordable. It is called from engine background threads
  * (flush, compaction, migration), so an implementation must be thread-safe.
  *
- * <p><b>Key material handed to the engine cannot be wiped by you.</b> A {@code byte[]} is
+ * <p>Key material handed to the engine cannot be wiped by you. A {@code byte[]} is
  * collector-owned and may already have been copied by a moving collector, so a Java-held key
  * survives in memory for as long as the collector chooses. The engine copies it into storage it
  * zeroes deterministically and does not retain the array; what it cannot do is undo the copies the

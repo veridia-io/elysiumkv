@@ -4,7 +4,7 @@ package io.veridia.elysiumkv;
  * Receives what the engine has to say about itself. The engine keeps no log of its own, so this is
  * the only channel: without one, a background failure that is retried leaves no trace anywhere.
  *
- * <p><b>Called on engine threads — flush, compaction and maintenance — synchronously.</b> The
+ * <p>Called on engine threads — flush, compaction and maintenance — synchronously. The
  * calling thread is the one that produced the event and it is waiting, so a slow implementation
  * applies backpressure to that operation. Hand the line to an async appender rather than doing work
  * here. SLF4J's async appenders are the intended shape:

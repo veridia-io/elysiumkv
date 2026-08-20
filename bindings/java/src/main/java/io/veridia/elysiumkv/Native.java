@@ -6,14 +6,10 @@ import java.nio.ByteBuffer;
  * Every native entry point, and the only class in the binding that has any. The
  * ergonomic layer is built on top of this in plain Java.
  *
- * <p>These are registered explicitly by {@code JNI_OnLoad} rather than resolved
- * by name mangling (ARCHITECTURE.md "The ABI boundary"), so a rename or a signature change fails at library
- * load with a message naming the method, instead of as an {@code
- * UnsatisfiedLinkError} the first time some rarely-used call is made. That
- * matters here: the two rarest methods in this class, {@link
- * #markRecoveryComplete} and {@link #compactLevel}, are the ones an operator
- * reaches for after a discard or a codec change — exactly when a latent link
- * error is least welcome.
+ * <p>These are registered explicitly by {@code JNI_OnLoad} rather than resolved by name mangling
+ * (ARCHITECTURE.md "The ABI boundary"), so a rename or a signature change fails at library load with
+ * a message naming the method rather than as an {@code UnsatisfiedLinkError} on the first call to a
+ * rarely-used method such as {@link #markRecoveryComplete}.
  *
  * <p>Handles cross as {@code long}. Errors arrive as exceptions thrown from the
  * glue, never as status codes returned here — except absence, which is not an

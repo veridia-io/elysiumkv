@@ -4,17 +4,14 @@ package io.veridia.elysiumkv;
  * Every failure the engine reports, carrying the {@link Status} and the
  * thread-local detail from {@code elysiumkv_last_error()}.
  *
- * <p>The subclasses exist for one reason, and it is the rule ARCHITECTURE.md "The ABI boundary" puts at the top
- * of the ABI: <b>a retryable failure must never be confused with a definite
- * answer.</b> {@link RetryableException} means the engine could not determine
- * something and the call may be worth repeating; {@link CorruptException} and
- * {@link UnusableException} mean stop. Absence is not in this hierarchy at all —
- * a missing key returns {@code null}, and only a missing key does. A binding
- * that mapped an IO failure to "not found" would silently turn an unreachable
- * store into deleted data.
+ * <p>The subclasses separate a retryable failure from a definite answer
+ * (ARCHITECTURE.md "The ABI boundary"): {@link RetryableException} means the engine could not
+ * determine something and the call may be worth repeating, while {@link CorruptException} and
+ * {@link UnusableException} mean stop. Absence is not in this hierarchy — a missing key returns
+ * {@code null}, and only a missing key does.
  *
- * <p>Constructed by {@link #of}, which the glue calls; keeping the mapping here
- * rather than in C++ means one cached method id instead of six cached classes.
+ * <p>Constructed by {@link #of}, which the glue calls; keeping the mapping here rather than in C++
+ * means one cached method id instead of six cached classes.
  */
 public class ElysiumKVException extends RuntimeException {
     private static final long serialVersionUID = 1L;

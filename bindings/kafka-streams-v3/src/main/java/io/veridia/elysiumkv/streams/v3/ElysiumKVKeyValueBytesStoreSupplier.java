@@ -17,7 +17,7 @@ import org.apache.kafka.streams.state.KeyValueStore;
  *         .withValueSerde(Serdes.Long());
  * }</pre>
  *
- * <p>For a <b>plain</b> Processor-API store, ask for one explicitly:
+ * <p>For a plain Processor-API store, ask for one explicitly:
  *
  * <pre>{@code
  * StoreBuilder<KeyValueStore<String, Long>> builder = Stores.keyValueStoreBuilder(

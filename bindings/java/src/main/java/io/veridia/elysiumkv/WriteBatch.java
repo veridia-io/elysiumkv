@@ -27,7 +27,7 @@ public final class WriteBatch implements AutoCloseable {
     /**
      * Deletes {@code [lower, upper)} as part of this batch.
      *
-     * <p><b>Order within the batch decides what survives.</b> A put after this one lands on top of
+     * <p>Order within the batch decides what survives. A put after this one lands on top of
      * the range and lives; a put before it is covered. That is what makes "evict a tenant and
      * re-seed the space" a single atomic step rather than two calls with the range visibly empty
      * in between.
