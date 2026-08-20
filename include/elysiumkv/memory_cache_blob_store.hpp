@@ -11,7 +11,7 @@ class MemoryBudget;
 
 /// ARCHITECTURE.md "Caches chain" — an in-memory cache in front of a slower store.
 ///
-/// **It earns its place over a *remote* delegate and mostly not otherwise.** Over
+/// It earns its place over a *remote* delegate and mostly not otherwise. Over
 /// local files it largely duplicates the OS page cache, which does the same job with
 /// better eviction for free; there, a larger `BlockCache` is the better spend because
 /// that one caches *decoded* blocks. And over hot data `BlockCache` and this are
@@ -19,7 +19,7 @@ class MemoryBudget;
 /// held in both is stored twice and read once. The non-overlapping role is buffering
 /// against a remote store — which is why this exists at all.
 ///
-/// **Reports to the shared `MemoryBudget` (ARCHITECTURE.md "A process-wide memory budget")**, so several instances in one
+/// Reports to the shared `MemoryBudget` (ARCHITECTURE.md "A process-wide memory budget"), so several instances in one
 /// process cannot each size themselves as though they were alone. When the budget
 /// refuses, the cache simply does not populate: a cache that cannot hold something
 /// is a slow read, never an error.
@@ -57,7 +57,7 @@ private:
 
 public:
 
-    /// ARCHITECTURE.md "Invariants and sanitizers" — **the cache checks itself.** Under `ELYSIUMKV_PARANOID` every hit is
+    /// ARCHITECTURE.md "Invariants and sanitizers" — the cache checks itself. Under `ELYSIUMKV_PARANOID` every hit is
     /// re-fetched from the delegate and compared, and a mismatch aborts naming the
     /// object and the range. A cache serving wrong bytes does not crash and does not
     /// fail its own unit tests; it produces a wrong answer somewhere far away.

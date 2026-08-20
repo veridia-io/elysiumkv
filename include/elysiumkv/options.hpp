@@ -19,9 +19,8 @@ namespace elysiumkv {
 class BlockCache;
 class MemoryBudget;
 
-/// ARCHITECTURE.md "Inside an SST" — **per level, not per tier.** A tier-scoped codec would force migration
-/// (ARCHITECTURE.md "Migration between tiers") to decompress and recompress every file it moves, turning a byte copy
-/// into a full rewrite.
+/// Per level, not per tier (ARCHITECTURE.md "Inside an SST"). A tier-scoped codec would force
+/// migration to decompress and recompress every file it moves, turning a byte copy into a rewrite.
 enum class Compression : uint8_t {
     None = 0,
     Lz4 = 1,
@@ -32,8 +31,8 @@ inline bool is_known_compression(uint8_t raw) {
     return raw <= static_cast<uint8_t>(Compression::Zstd);
 }
 
-/// ARCHITECTURE.md "A tier is not a level" — **which recovery path a loss of this tier's store triggers.** That is
-/// the whole meaning of the enum; it is not a rating of the storage medium.
+/// Which recovery path a loss of this tier's store triggers (ARCHITECTURE.md "A tier is not a
+/// level"). Not a rating of the storage medium.
 enum class Durability : uint8_t {
     /// Loss is not expected and is treated as corruption: open aborts and the
     /// embedder performs a full rebuild. ElysiumKV cannot verify the assertion.
@@ -52,17 +51,14 @@ enum class BackgroundMode : uint8_t {
     /// Production: a flush thread and a background thread driving migration and
     /// compaction.
     Threaded,
-    /// Testing: background work is performed inline when the driver calls for
-    /// it, so the op stream fully determines the execution. **Determinism is a
-    /// build requirement of the harness, not a property it inherits** — and
-    /// without it, shrinking is impossible.
+    /// Testing: background work runs inline when the driver calls for it, so the op stream fully
+    /// determines the execution. Shrinking a failing stream requires that determinism.
     Inline,
 };
 
-/// ARCHITECTURE.md "A tier is not a level" — **where files live.** Tier and level are independent axes: level is
-/// LSM structure, tier is storage. A file lives in exactly one store, chosen per
-/// file by its **age**, so a single level routinely spans several tiers at
-/// once — recent files on fast storage, older ones on cheap storage.
+/// Where files live (ARCHITECTURE.md "A tier is not a level"). Tier and level are independent axes:
+/// level is LSM structure, tier is storage. A file lives in exactly one store, chosen by its age, so
+/// a single level routinely spans several tiers.
 struct Tier {
     std::shared_ptr<BlobStore> store;  ///< may itself be a cache chain
     Durability durability = Durability::Durable;
@@ -71,13 +67,10 @@ struct Tier {
 
     /// Tier capacity; oldest files evicted first.
     ///
-    /// **Not to be confused with a per-*file* size bound**, which this type used to have and no
-    /// longer does. That gave size a second, independent route to a colder tier, and placement has
-    /// to be a monotone function of age alone: a file's age only ever grows, so its tier only ever
-    /// descends, whereas a size bound could place a *new* file cold on the day it was written. If
-    /// the intent is to cap what a tier holds, this is the field — it evicts oldest-first, which is
-    /// the mechanism that was actually wanted. If the intent is to keep large files off a small fast
-    /// tier, lower that level's `target_file_bytes` so large files are not produced.
+    /// There is no per-file size bound, because placement must be monotone in age alone: a file's
+    /// age only grows, so its tier only descends, where a size bound could place a new file cold on
+    /// the day it was written. To keep large files off a small fast tier, lower that level's
+    /// `target_file_bytes`.
     std::optional<size_t> max_bytes;
     std::optional<Duration> stall_age;      ///< Transient only; default 2 * max_age
 };
@@ -130,7 +123,7 @@ enum class LogEvent : int {
 /// A vtable rather than `std::function` so it crosses the C ABI — see `Options::clock` for the
 /// asymmetry this exists to avoid.
 ///
-/// **Called on engine threads, with no engine lock held, synchronously.** A slow sink applies
+/// Called on engine threads, with no engine lock held, synchronously. A slow sink applies
 /// backpressure to flush and compaction; use an async appender. `message` is valid only for the
 /// duration of the call and is not NUL-terminated.
 struct Logger {
@@ -152,112 +145,87 @@ struct Options {
     size_t memtable_bytes = 64ull << 20;
 
     /// Flush the memtable once it has been open this long, even if it never reaches
-    /// `memtable_bytes`. **Size and age are alternatives: whichever comes first
-    /// flushes.** Unset means size alone decides, which is the historical behaviour.
+    /// `memtable_bytes`. Whichever comes first flushes; unset means size alone decides.
     ///
-    /// This closes the front of the durability story. A tier's `max_age` starts
-    /// counting from the memtable's creation time, but it can only act on a *file* —
-    /// so under a trickle of writes that never fills a memtable, data stays in memory
-    /// indefinitely and no tier bound applies to it. An interval bounds how long a
-    /// write can sit somewhere a crash would lose it, independent of write rate.
+    /// Bounds how long a write sits somewhere a crash would lose it, independent of write rate. No
+    /// tier `max_age` can do that: those act on files, and an unflushed memtable is not one.
     ///
-    /// Costs write amplification: a short interval on a quiet store produces small L0
-    /// files, and small files mean more compaction to merge them away. Pick it from
-    /// how much recent data you are willing to lose, not from a latency target.
+    /// Costs write amplification — a short interval on a quiet store produces small L0 files, and
+    /// small files mean more compaction. Pick it from how much recent data you are willing to lose,
+    /// not from a latency target.
     std::optional<Duration> flush_interval;
 
     /// Spreads the flush interval across `[interval × (1 − j), interval × (1 + j)]`, per memtable.
     /// Zero, the default, keeps it exact. `Status::Config` outside `[0, 1]`.
     ///
-    /// **Both directions, unlike `age_jitter`.** A late flush costs replay on restart and breaks
-    /// no promise, so there is no reason to only pull it earlier.
-    ///
-    /// What it smooths is compaction queue depth: instances opened together flush together, and
-    /// the L0 files they produce arrive at the compactor as one wave.
+    /// Both directions, unlike `age_jitter`: a late flush costs replay on restart and breaks no
+    /// promise. Smooths compaction queue depth, since instances opened together flush together.
     double flush_interval_jitter = 0.0;
 
     /// Spreads each file's tier `max_age` crossing across `[max_age × (1 − j), max_age]`, per
     /// file. Zero, the default, keeps it exact. `Status::Config` outside `[0, 1]`.
     ///
-    /// **Earlier only.** A `Transient` tier's `max_age` is an exposure bound the engine promises,
-    /// so a file may cross early but never late.
+    /// Earlier only: a `Transient` tier's `max_age` is an exposure bound the engine promises, so a
+    /// file may cross early but never late.
     ///
-    /// Stores normally drift apart on their own, and this is for the times they do not: a rebuild
-    /// stamps `min_write_time_ms` on everything it replays within the same few minutes, so the
-    /// whole store crosses together and migrates as one burst. That repeats after every rebalance
-    /// for an embedder that rebuilds on assignment.
-    ///
-    /// The offset is derived from the file's number and write time, not rolled, so it survives a
-    /// reopen instead of re-clustering the files it just spread. `stall_age` is deliberately left
-    /// exact — it is an alarm, and blurring it would only make the alarm harder to read.
+    /// For a store whose files all carry nearly the same `min_write_time_ms` — a rebuild from a log
+    /// — which would otherwise cross together and migrate as one burst. The offset is derived from
+    /// the file's number and write time rather than rolled, so a reopen recomputes the same one.
+    /// `stall_age` is left exact, being an alarm.
     double age_jitter = 0.0;
 
-    /// How often the maintenance coordinator reconciles: it evaluates every background
-    /// policy — flush, compaction, migration off a transient tier, capacity eviction,
-    /// obsolete-object collection — against current state and the clock, and dispatches what
-    /// is due.
+    /// How often the maintenance coordinator evaluates every background policy — flush,
+    /// compaction, migration off a transient tier, capacity eviction, obsolete-object collection —
+    /// against current state and the clock, dispatching what is due.
     ///
-    /// **It exists because a policy driven by time needs a trigger that is not a write.** Every
-    /// age bound in this engine used to be evaluated only when something arrived, so a store
-    /// that went quiet with a file sitting on a transient tier left it there indefinitely. The
-    /// coordinator is what asks.
+    /// A policy driven by time needs a trigger that is not a write: without this, a store that goes
+    /// quiet with a file on a transient tier leaves it there.
     ///
-    /// Short and boring on purpose. It is not a latency knob: the interval is the smallest term
-    /// in the exposure window — `max_age + interval + queueing behind an in-flight compaction +
-    /// the migration itself` — so spending accuracy here buys nothing. An idle tick is two
-    /// comparisons and no version scan, which is what makes a one-second default affordable
-    /// across dozens of instances in one process.
+    /// Not a latency knob. The interval is the smallest term in the exposure window
+    /// (`max_age + interval + queueing behind an in-flight compaction + the migration itself`), so
+    /// accuracy here buys nothing. An idle tick is two comparisons and no version scan.
     Duration maintenance_interval{1000};
 
     /// How long data lives before the engine drops it, measured from when it was written.
     ///
-    /// **Expiry by manifest edit: a file whose every write has outlived this is unlinked whole.**
-    /// Nothing is read and nothing is rewritten, which is what makes it affordable to run
-    /// continuously — the same trick `truncate_below` uses, keyed on age instead of key order.
+    /// Expiry by manifest edit: a file whose every write has outlived this is unlinked whole,
+    /// nothing read and nothing rewritten.
     ///
-    /// Three things it is not, each worth knowing before relying on it:
+    /// Three limits it carries:
     ///
-    /// - **The granularity is the file, not the key.** The manifest names files, so a file is the
-    ///   smallest thing an edit can drop; reaching inside one means rewriting it, which is
-    ///   compaction and no longer free. This buys "data older than X disappears", not "this key
-    ///   expires at X".
-    /// - **At or after, never before.** A file is dropped when the sweep next runs and finds it
-    ///   expired, so data may outlive the limit by up to `orphan_sweep_interval`. It is never
-    ///   dropped early, which is the direction that matters.
-    /// - **Only where nothing older sits beneath it.** Dropping a file that shadows an older
-    ///   version of the same key would *uncover* that older version rather than remove the key —
-    ///   a resurrection, not an expiry. So a file expires only once no older file overlaps its
-    ///   range, which in practice means once it has reached the bottom of the tree.
+    /// - The granularity is the file, not the key. The manifest names files, so reaching inside one
+    ///   means rewriting it. This buys "data older than X disappears", not "this key expires at X".
+    /// - At or after, never before. A file is dropped when the sweep next finds it expired, so data
+    ///   may outlive the limit by up to `orphan_sweep_interval`.
+    /// - Only where nothing older sits beneath it. Dropping a file that shadows an older version of
+    ///   the same key would uncover that version rather than remove the key, so a file expires only
+    ///   once no older file overlaps its range.
     ///
     /// Unset — the default — never expires anything.
     std::optional<Duration> ttl;
 
     /// How long an object *this instance obsoleted* is kept after nothing local references it.
     ///
-    /// **Protects readers, and only readers.** A read-only instance in another process holds a
-    /// version this one has already superseded, and the collector cannot see it — `live_versions_`
-    /// is a process-local list. Deferring the delete is what makes a reader in another process
-    /// safe, and it costs storage rather than coordination: no registration, no leases, no limit on
-    /// how many readers there are, and nothing to go wrong when one crashes.
+    /// Protects readers, and only readers. A read-only instance in another process holds a version
+    /// this one has superseded, and the collector cannot see it: `live_versions_` is process-local.
+    /// Deferring the delete costs storage rather than coordination — no registration, no leases, no
+    /// limit on reader count, nothing to go wrong when one crashes.
     ///
-    /// Unset — the default — deletes as soon as the object is locally unreferenced, which is
-    /// correct when there are no readers.
+    /// Unset — the default — deletes as soon as the object is locally unreferenced.
     std::optional<Duration> obsolete_retention;
 
     /// How long an object must be *continuously observed* unreferenced before the orphan sweep
     /// deletes it.
     ///
-    /// **Protects a concurrently-writing process**, and is needed whether or not readers exist. An
-    /// object unreferenced at the instant we happen to look is indistinguishable from another
-    /// writer's file whose edit became durable between our manifest read and our store listing —
-    /// which is why deleting on a single observation was removed. A *sustained* observation is a
-    /// claim the engine can actually make.
+    /// Protects a concurrently-writing process, whether or not readers exist. An object
+    /// unreferenced at one instant is indistinguishable from another writer's file whose edit
+    /// became durable between this instance's manifest read and its store listing; only a sustained
+    /// observation distinguishes them.
     ///
-    /// Deliberately not optional: there is no configuration in which deleting an object seen
-    /// unreferenced once is correct. Turn the sweep off with `orphan_sweep_interval` instead, which
-    /// says what it means. Must be at least `obsolete_retention` — checked at open — because a
-    /// crash empties the pending queue and an obsoleted object comes back as an orphan, protected
-    /// by this window and nothing else.
+    /// Not optional, because deleting an object seen unreferenced once is never correct. Turn the
+    /// sweep off with `orphan_sweep_interval` instead. Must be at least `obsolete_retention`,
+    /// checked at open: a crash empties the pending queue, and an obsoleted object then returns as
+    /// an orphan protected by this window alone.
     Duration orphan_retention{std::chrono::hours(24)};
 
     /// How often to list the stores looking for orphans. Unset disables the sweep, which costs
@@ -277,43 +245,35 @@ struct Options {
 
     /// How much of a compaction input is read at a time.
     ///
-    /// **The knob that decides what a compaction costs against object storage.** A merge reads
-    /// every block of every input exactly once and asks for them one at a time, which is a round
-    /// trip per block; the window makes it one per `compaction_window_bytes`. Total requests are
-    /// therefore `input bytes / this`, and against a store with 20 ms of latency that number *is*
-    /// the compaction's duration.
+    /// Decides what a compaction costs against object storage: a merge reads every block of every
+    /// input once, so requests are `input bytes / this`, and against a store with 20 ms of latency
+    /// that number is the compaction's duration.
     ///
-    /// **Traded directly against memory, which is why it is not simply large.** Every input of a
-    /// compaction is read concurrently — the merge interleaves them — so the windows are all live
-    /// at once, and each input holds two of them: the one being merged and the one being fetched
-    /// ahead of it. The footprint is `2 x this x inputs x concurrent compactions`, and with the
-    /// default `max_compaction_bytes` and a 16 MiB `target_file_bytes` that is about 25 inputs.
+    /// Traded against memory. The merge interleaves its inputs, so every window is live at once and
+    /// each input holds two — one being merged, one fetched ahead. The footprint is
+    /// `2 x this x inputs x concurrent compactions`.
     ///
-    /// **Charged to `memory_budget`, but not bounded by it.** The charge is unconditional — refusing
-    /// a compaction's buffer would turn a memory decision into a durability one — so the budget
-    /// reports this memory rather than limiting it. `open` therefore refuses a window two of which
-    /// would exceed the whole budget, since nothing downstream would.
+    /// Charged to `memory_budget` unconditionally but not bounded by it, since refusing a
+    /// compaction's buffer would turn a memory decision into a durability one. `open` refuses a
+    /// window two of which would exceed the whole budget.
     size_t compaction_window_bytes = 2ull << 20;
 
     /// Serve reads while a discarded transient store is still unreplayed.
     ///
-    /// **Off, so the safe path is the default one.** A discard leaves the store *wrong* rather than
-    /// merely incomplete — a key whose newer value lived on the lost store now reads as its older
-    /// one — and reporting that through a flag makes noticing it opt-in. Reads therefore fail with
+    /// Off by default: a discard leaves the store wrong rather than merely incomplete, since a key
+    /// whose newer value lived on the lost store now reads as its older one. Reads fail with
     /// `Status::RecoveryRequired` until `mark_recovery_complete()`.
     ///
-    /// **Writes are never refused either way**: the replay that discharges the condition is made of
-    /// them. Turn this on for a replay that also reads, which is the shape a changelog consumer
-    /// usually has — and in doing so accept that those reads may be behind, which for a replayer
-    /// about to overwrite them is exactly the trade it wants.
+    /// Writes are never refused either way — the replay that discharges the condition is made of
+    /// them. Turn this on for a replay that also reads, accepting that those reads may be behind.
     bool allow_reads_before_recovery = false;
 
     /// Encryption at rest.
     ///
-    /// **There is always a provider and it is never null.** The passthrough is pre-registered under
-    /// the reserved empty id, so an unconfigured store is not a special case — it is the passthrough
-    /// being primary. Files record the id they were written under, and a read routes on that,
-    /// which is what lets a store hold files written by several providers at once while migrating.
+    /// There is always a provider and it is never null: the passthrough is pre-registered under the
+    /// reserved empty id, so an unconfigured store is that provider being primary. Files record the
+    /// id they were written under and a read routes on it, which is what lets a store hold files
+    /// from several providers at once during a rotation.
     struct EncryptionOptions {
         /// id -> provider. The key is what objects record and what a read routes on. The engine
         /// adds the passthrough under `""`; registering that id yourself is refused.
@@ -324,45 +284,33 @@ struct Options {
         /// Rewrite files recorded under any *other* provider, in the background, until none are
         /// left. Off by default.
         ///
-        /// **A rotation is not finished when the primary changes.** Changing `primary_provider`
-        /// governs what is written next; every file already on disk keeps the provider it was
-        /// written under, and reads keep routing to it. Compaction rewrites such a file when it
-        /// happens to compact it, which for a cold file may be never — and that is exactly the
-        /// file a key rotation was performed to stop depending on. This is the switch that makes
-        /// the rotation converge.
+        /// Changing `primary_provider` governs only what is written next: every existing file
+        /// keeps the provider it was written under, and a cold file may never be compacted. This is
+        /// what makes a rotation converge.
         ///
-        /// **A background pass, not a compaction trigger.** Re-encrypting is a read, a re-seal and
-        /// a write of one object: no merge, no decode of the block format, no change to the shape
-        /// of the LSM. Driving it from the compaction picker would pull a whole level through a
-        /// merge to change the envelope on one file, and would perturb level structure for a
-        /// reason that has nothing to do with structure. It runs at the lowest priority, behind
-        /// even age migration — starving it costs the rotation time, not correctness.
+        /// A background pass rather than a compaction trigger, because re-sealing is a read and a
+        /// write of one object — no merge, no block decode, no change to the shape of the LSM. Runs
+        /// at the lowest priority, behind age migration; starving it costs the rotation time, not
+        /// correctness.
         ///
-        /// `Stats::files_pending_reencryption` is how far there is to go; it reaches zero when the
-        /// rotation is complete, and that is the moment the old provider may be unregistered.
-        ///
-        /// Leave it on afterwards or turn it off; with nothing to rewrite it costs one scan of the
-        /// version per maintenance pass.
+        /// `Stats::files_pending_reencryption` reaches zero when the rotation is complete, which is
+        /// the moment the retired provider may be unregistered. With nothing to rewrite the pass
+        /// costs one scan of the version per maintenance pass.
         bool rewrite_to_primary = false;
     };
     EncryptionOptions encryption;
 
     /// Compact a file once this fraction of its entries are tombstones. Zero — the default — is off.
     ///
-    /// **The trigger the size ratios cannot express.** A tombstone is not an erasure: it shadows
-    /// older copies of its key and can only be dropped once it reaches the bottommost level for its
-    /// range. Until then every scan over a deleted region pays to skip it. A delete-heavy store
-    /// whose levels stay within their byte and file budgets therefore never trips a compaction, and
-    /// the tombstones accumulate — visible only as scans getting slower, which is the hardest kind
-    /// of regression to attribute.
+    /// The trigger the size ratios cannot express. A tombstone shadows older copies of its key
+    /// until it reaches the bottommost level for its range, and every scan over the region pays to
+    /// skip it — so a delete-heavy store staying inside its byte and file budgets never compacts.
     ///
-    /// Expressed as a score against this threshold rather than as a separate trigger, so it
-    /// competes with the size ratios on one scale and ARCHITECTURE.md's "score is the only trigger"
-    /// stays true.
+    /// Expressed as a score against this threshold rather than as a separate trigger, so score
+    /// remains the only compaction trigger.
     ///
-    /// Off by default because it is a workload judgement, not a safety property: a store that
-    /// deletes little pays for the check and gains nothing, and a store that deletes in bulk
-    /// usually wants `truncate_below` instead, which reclaims without rewriting anything.
+    /// Off by default, being a workload judgement: a store deleting in bulk usually wants
+    /// `truncate_below`, which reclaims without rewriting.
     double tombstone_density_trigger = 0.0;
 
     /// Entries a file needs before its density is allowed to trigger anything.
@@ -376,12 +324,9 @@ struct Options {
     /// Bytes of open-`SstReader` state — each file's index block and bloom filter —
     /// kept resident, least-recently-used first. Zero means unbounded.
     ///
-    /// **The filter is what makes this matter:** at the default 10 bits per key it is
-    /// ~1.25 MB for a million-entry file, so a store with a thousand such files held
-    /// over a gigabyte before this had a bound. It is generous rather than tight on
-    /// purpose — evicting a reader costs three reads to reopen it (footer, index,
-    /// filter), which against a remote store is three round trips, so a reader cache
-    /// too small for the working set is a far worse deal than the memory it saves.
+    /// The bloom filter dominates: at the default 10 bits per key it is ~1.25 MB per million-entry
+    /// file. Sized generously because evicting a reader costs three reads to reopen it — footer,
+    /// index, filter — which against a remote store is three round trips.
     size_t reader_cache_bytes = 64ull << 20;
     int manifest_edits_per_generation = 1000;
 

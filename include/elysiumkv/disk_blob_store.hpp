@@ -15,7 +15,7 @@ struct OpenFile;
 
 /// ARCHITECTURE.md "Immutable named objects" — production store over a directory. Futures complete synchronously.
 ///
-/// **The root directory must exist.** A missing root is `Status::Io`, never
+/// The root directory must exist. A missing root is `Status::Io`, never
 /// `NotFound`: creating it is the deployment's job, and an unmounted volume must
 /// fail loudly rather than resemble a fresh one (ARCHITECTURE.md "Immutable named objects"). An *empty* existing root
 /// lists successfully and means empty.
@@ -39,7 +39,7 @@ public:
     /// held descriptor can never be stale, and keeping one removes an `open`, an `fstat` and a
     /// `close` from every block read.
     ///
-    /// **Deliberately small by default.** This multiplies by every store in the process — a
+    /// Deliberately small by default. This multiplies by every store in the process — a
     /// service with two tiers per partition has dozens — against a soft limit as low as 256, and
     /// an LSM's hot set is L0 plus whatever a scan is walking. Zero disables the cache.
     void set_max_open_files(size_t count);

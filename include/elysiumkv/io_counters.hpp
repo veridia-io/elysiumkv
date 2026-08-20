@@ -7,7 +7,7 @@ namespace elysiumkv {
 
 /// What one store has been asked to do, since it was opened.
 ///
-/// **Requests as much as bytes**, because object storage bills for both and nothing here could see
+/// Requests as much as bytes, because object storage bills for both and nothing here could see
 /// either. Every layer counts what it was asked for, so a cache and its delegate report different
 /// figures; `Stats` takes the tier's authoritative store, which is the one on the invoice.
 ///

@@ -13,7 +13,7 @@ namespace elysiumkv {
 
 using Duration = std::chrono::milliseconds;
 
-/// ARCHITECTURE.md "Statistics are a buffer, not a struct" — **never a derived global where per-level facts will do.**
+/// ARCHITECTURE.md "Statistics are a buffer, not a struct" — never a derived global where per-level facts will do.
 struct LevelStats {
     int level = 0;
     int file_count = 0;
@@ -26,32 +26,32 @@ struct LevelStats {
     bool stalling = false;       ///< oldest file is past stall_age
 
     /// ARCHITECTURE.md "Statistics are a buffer, not a struct" — files not yet rewritten under the level's current compression.
-    /// Reaches zero on its own as compaction sweeps the keyspace, **except in
-    /// key ranges that receive no writes** (ARCHITECTURE.md "Inside an SST"): a dormant range never
+    /// Reaches zero on its own as compaction sweeps the keyspace, except in
+    /// key ranges that receive no writes (ARCHITECTURE.md "Inside an SST"): a dormant range never
     /// triggers a compaction into that part of the level, so its files can sit
     /// indefinitely. `compact_level()` forces completion, and this is how an
     /// operator knows it finished.
     ///
-    /// There is no `files_stale_store` counterpart: placement is no longer
-    /// derived from the level, so the question does not arise.
+    /// There is no `files_stale_store` counterpart: placement is derived from age rather than from
+    /// the level, so the question does not arise.
     int files_stale_codec = 0;
 
-    /// **Records, not keys**, and the distinction is the whole contract. Every superseded version of
+    /// Records, not keys, and the distinction is the whole contract. Every superseded version of
     /// a key is a record until compaction merges it, and every tombstone is a record until a
-    /// compaction whose output is bottommost drops it. So a sum over levels is an **upper bound on
-    /// the number of distinct live keys** — provable rather than typical, and equal once everything
+    /// compaction whose output is bottommost drops it. So a sum over levels is an upper bound on
+    /// the number of distinct live keys — provable rather than typical, and equal once everything
     /// has merged into the bottommost level.
     ///
     /// Exact per file: the SST builder counts as it appends. The approximation is entirely in the
     /// cross-file dimension, and nothing here is sampled.
     ///
-    /// Reported per level rather than as one total because **the accuracy depends on the
-    /// distribution**: a million records in the bottommost level is close to a million keys, and a
+    /// Reported per level rather than as one total because the accuracy depends on the
+    /// distribution: a million records in the bottommost level is close to a million keys, and a
     /// million spread across L0 after an update storm is not.
     uint64_t entries = 0;
     /// How many of `entries` are deletes.
     ///
-    /// **`entries - tombstones` is the tighter upper bound, and it is what a total should use.**
+    /// `entries - tombstones` is the tighter upper bound, and it is what a total should use.
     /// A live key's newest record is always a put, never a tombstone, so tombstones are disjoint
     /// from the records representing live keys: `records >= live + tombstones`, hence
     /// `records - tombstones >= live`. Both quantities converge on the true count once compaction
@@ -75,25 +75,25 @@ struct TierStats {
     /// This tier's authoritative store's traffic, which against object storage is the bill. A
     /// cache in front of the tier is not counted here; its effect is its hit rate.
     ///
-    /// **Two tiers naming one store report the same figures** — they are the store's, not the
+    /// Two tiers naming one store report the same figures — they are the store's, not the
     /// tier's, so summing across tiers double-counts.
     IoCounters io;
 
     /// `Transient` only: the oldest file here is past `stall_age`.
     ///
-    /// **The condition as observed at this instant, which is a moment ahead of the valve.** The
+    /// The condition as observed at this instant, which is a moment ahead of the valve. The
     /// maintenance coordinator owns the decision the write path acts on and publishes it on its
     /// tick, so this can read true up to one `maintenance_interval` before writes are actually
     /// held. That is the right direction for an alarm and the wrong one for control flow, which is
     /// why the write path reads the published flag and not this.
     ///
     /// Read it as: from here on, the log is expiring while the durable position stops advancing.
-    /// **Recovery capability is what degrades, on a deadline** — the action is to extend log
+    /// Recovery capability is what degrades, on a deadline — the action is to extend log
     /// retention, and `durable_watermark` against the log's earliest offset is the margin.
     bool stalling = false;
 };
 
-/// ARCHITECTURE.md "Statistics are a buffer, not a struct". There is deliberately **no single derived horizon metric**: it would be
+/// ARCHITECTURE.md "Statistics are a buffer, not a struct". There is deliberately no single derived horizon metric: it would be
 /// a global computed from per-level facts that are more useful raw. An embedder
 /// tracking exposure reads `oldest_file_age` for the levels it placed on a
 /// transient store — it chose them, so it knows which.
@@ -126,7 +126,7 @@ struct Stats {
     uint64_t compactions = 0;
     /// Compactions whose input set `max_compaction_bytes` cut down, of `compactions`.
     ///
-    /// **The budget biting is a choice with a cost, and this is the only way to see it.** A trimmed
+    /// The budget biting is a choice with a cost, and this is the only way to see it. A trimmed
     /// compaction leaves files behind at an overlapping level, so the level is compacted again
     /// sooner: the budget trades write amplification for a bounded exposure window. A ratio near
     /// zero means the budget is not reached and could be lowered; a ratio near one means nearly
@@ -138,10 +138,10 @@ struct Stats {
     /// Files re-sealed under the primary provider by the background pass. A counter, so it says
     /// how much work a rotation has cost.
     uint64_t reencryptions = 0;
-    /// Files whose recorded encryption provider is **not** the primary — a gauge, so it says how
+    /// Files whose recorded encryption provider is not the primary — a gauge, so it says how
     /// much is left.
     ///
-    /// **Zero is the signal that a rotation is complete**, and therefore the moment the previous
+    /// Zero is the signal that a rotation is complete, and therefore the moment the previous
     /// provider may be unregistered. Non-zero with `rewrite_to_primary` off means the rotation was
     /// started and never finished, which is a store still depending on a key someone believes they
     /// retired. Counted over every level including L0, so it genuinely reaches zero: L0 files are
@@ -157,8 +157,8 @@ struct Stats {
     Duration stalled_total{0};
     uint64_t stall_count = 0;
 
-    /// Background operations that failed — a flush or a compaction. **Counted even when the engine
-    /// retries and succeeds**, which is the case that otherwise leaves no trace: a store working
+    /// Background operations that failed — a flush or a compaction. Counted even when the engine
+    /// retries and succeeds, which is the case that otherwise leaves no trace: a store working
     /// its way through a degraded object store looks identical to a healthy one.
     uint64_t background_failures = 0;
 
@@ -189,7 +189,7 @@ struct Stats {
     /// forever, so this is a first-class invariant rather than a diagnostic.
     uint64_t pins_outstanding = 0;
 
-    /// The **live** watermark frontier: the position up to which the store's state would survive
+    /// The live watermark frontier: the position up to which the store's state would survive
     /// losing every transient tier. Deliberately *not* the maximum watermark over current files,
     /// which is tier-blind and would advance on a flush to transient storage — a flush that
     /// changes nothing an operator can rely on.
@@ -201,7 +201,7 @@ struct Stats {
     /// `DB::recovered_watermark()`, which is fixed at open and must not be confused with this:
     /// sharing a name would silently change the getter's meaning after the first write.
     ///
-    /// **This is the numerator of the only margin an operator can act on.** When migration is
+    /// This is the numerator of the only margin an operator can act on. When migration is
     /// failing, this value stops advancing while the changelog keeps expiring, and the distance
     /// between the log's earliest retained offset and this value is how much recovery capability
     /// is left. Without it that distance is not computable.
@@ -211,7 +211,7 @@ struct Stats {
     ///
     /// A precision caveat for exporters: many metrics systems carry gauge samples as IEEE-754
     /// doubles, exact only below 2^53. The metric is observational, for the retention margin and
-    /// for alerting; **a restore must use the exact value** from `DB::recovered_watermark()`,
+    /// for alerting; a restore must use the exact value from `DB::recovered_watermark()`,
     /// never one that has been through a metrics pipeline.
     std::optional<uint64_t> durable_watermark;
 };

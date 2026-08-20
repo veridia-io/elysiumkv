@@ -10,14 +10,14 @@ namespace elysiumkv {
 
 /// A key-encryption key held in this process, wrapping a fresh data key per object.
 ///
-/// **Not "one key for everything", which is what the name might suggest and would be unsafe.** The
+/// Not "one key for everything", which is what the name might suggest and would be unsafe. The
 /// provider derives its nonce from a per-object salt and the chunk index; with one key across every
 /// object, two objects drawing the same salt would reuse a nonce under that key, and a repeated
 /// nonce breaks GCM completely rather than gradually. So this generates a random data key per
 /// object and wraps it under the master key, exactly as a KMS would — the difference is only where
 /// the master key lives.
 ///
-/// **For tests, single-tenant deployments, and anywhere a KMS is not warranted.** The master key is
+/// For tests, single-tenant deployments, and anywhere a KMS is not warranted. The master key is
 /// in this process's memory, so it protects storage and nothing else: an attacker who reads the
 /// process reads the key. That is the trade, and it is the whole trade — see `AwsKmsEncryptionKeyManager`
 /// for the arrangement where the master key never leaves a boundary this process cannot cross.

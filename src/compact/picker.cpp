@@ -28,9 +28,8 @@ uint64_t total_bytes(const std::vector<FileMetadata>& files) {
     return bytes;
 }
 
-/// Every file at `level` whose range overlaps [lower, upper], transitively: an
-/// added file widens the range, which may pull in more. In practice at L0 this
-/// usually ends up being all of them.
+/// Every file at `level` overlapping [lower, upper], to a fixpoint: each added file widens the
+/// range, which may pull in more. At L0 this is usually the whole level.
 std::vector<FileMetadata> transitive_overlap(const Version& version, int level,
                                              std::string lower, std::string upper) {
     std::vector<FileMetadata> selected;
@@ -49,33 +48,16 @@ std::vector<FileMetadata> transitive_overlap(const Version& version, int level,
     }
 }
 
-/// Trims an overlapping level's input set to `budget`, **oldest first**. True when it cut
-/// anything, which is what `Stats::compactions_trimmed` counts.
+/// Trims an overlapping level's input set to `budget`. Returns whether anything was cut.
 ///
-/// `max_compaction_bytes` was consulted only when deciding whether to *expand* a compaction back
-/// into its source level, so the primary set was unbounded — and at L0 the transitive closure is
-/// "usually all of them". ARCHITECTURE.md turns that budget into the third term of the exposure
-/// window, so leaving it unenforced made the arithmetic there a statement about a limit that did
-/// not exist.
-///
-/// **The direction is forced by positional recency.** Recency is `(level, file_number)`, so a file
-/// left behind at an overlapping level is newer than the output if and only if its number is
-/// larger. Keeping the oldest and dropping the newest leaves every remaining file *above* the
-/// output, which is the order reads already expect; keeping the newest would strand an older file
-/// at L0 shadowing an output built from newer data, and it would return stale values.
-///
-/// So the set stays downward-closed in age, and at least the oldest file always goes — a budget
-/// smaller than one file must still make progress rather than stall the level for ever.
+/// The kept set is downward-closed in age, so every file left at the level outranks the output
+/// under positional recency. At least the oldest is always kept, so a budget below one file size
+/// still makes progress.
 bool trim_to_budget(std::vector<FileMetadata>& inputs, size_t budget) {
     if (budget == 0 || total_bytes(inputs) <= budget) return false;
 
-    // **Which files to keep is decided by age; the order they are left in is not touched.** The
-    // vector is handed to the merge as its child list, and `write_compaction_outputs` resolves a
-    // tie by lowest child index — which is the recency rule only while the children arrive in the
-    // level's own order, newest first at L0. Sorting this vector by file number to choose from it
-    // therefore reversed exactly the thing it was protecting: the merge took the *oldest* value for
-    // every duplicated key, and a key not held by a newer file left behind at L0 read back as the
-    // value it had been overwritten from.
+    // Selection is by age; `inputs` order must survive it. The vector becomes the merge's child
+    // list, where ties resolve to the lowest index, so it has to stay in the level's own order.
     std::vector<uint64_t> by_age;
     by_age.reserve(inputs.size());
     for (const FileMetadata& file : inputs) by_age.push_back(file.file_number);
@@ -88,8 +70,7 @@ bool trim_to_budget(std::vector<FileMetadata>& inputs, size_t budget) {
                                         [number](const FileMetadata& file) {
                                             return file.file_number == number;
                                         });
-        // At least the oldest always goes: a budget smaller than one file must still make progress
-        // rather than stall the level for ever.
+        // The oldest is kept unconditionally, so a budget below one file size still progresses.
         if (!keep.empty() && bytes + found->file_bytes > budget) break;
         bytes += found->file_bytes;
         keep.insert(number);
@@ -100,10 +81,8 @@ bool trim_to_budget(std::vector<FileMetadata>& inputs, size_t budget) {
     return true;
 }
 
-/// ARCHITECTURE.md "Compaction" — the seed for a non-overlapping level comes from the persisted compaction
-/// pointer — the largest key of the previous compaction there — wrapping at the
-/// end of the keyspace, so the sweep covers the keyspace evenly instead of
-/// rewriting one hot region.
+/// The first file above the persisted compaction pointer, wrapping at the end of the keyspace so
+/// the sweep covers it evenly rather than rewriting one region (ARCHITECTURE.md "Compaction").
 const FileMetadata* seed_after_pointer(const std::vector<FileMetadata>& files,
                                        const std::string& pointer) {
     for (const FileMetadata& file : files) {
@@ -112,12 +91,8 @@ const FileMetadata* seed_after_pointer(const std::vector<FileMetadata>& files,
     return files.empty() ? nullptr : &files.front();  // wrap
 }
 
-/// The densest file in the level, scored against the trigger.
-///
-/// Per file rather than per level, because the cost is per file: one table that is nine-tenths
-/// tombstones makes every scan crossing it expensive, and averaging it against a level of clean
-/// tables hides exactly the case worth acting on. TidesDB reaches the same conclusion — one dense
-/// table is enough to fire.
+/// The densest file in the level, scored against the trigger. Per file rather than per level: the
+/// scan cost is per file, and a level average hides a single dense table.
 double tombstone_density_score(const Version& version, const ResolvedLevel& config,
                                const TombstoneDensity& density) {
     if (density.trigger <= 0.0) return 0.0;
@@ -217,7 +192,7 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
     double chosen_score = 0.0;
     bool chosen_by_density = false;
 
-    // Score, and nothing else. Age governs tier migration (ARCHITECTURE.md "Migration between tiers"), not compaction.
+    // Score only. Age governs tier migration, not compaction.
     for (int level = 0; level < last; ++level) {
         const ResolvedLevel& level_config = config.levels[static_cast<size_t>(level)];
         if (version.file_count(level) == 0) continue;
@@ -229,8 +204,7 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
         if (chosen < 0 || score > chosen_score) {
             chosen = level;
             chosen_score = score;
-            // Ties go to size, which is the trigger that was there first: density is only credited
-            // when it is strictly the reason this level was picked.
+            // Ties go to size; density is credited only when it is strictly the deciding term.
             chosen_by_density = by_density > by_size;
         }
     }
@@ -249,9 +223,8 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
 
     const FileMetadata* seed = nullptr;
     if (is_overlapping_level(chosen, source)) {
-        // The oldest file, not the newest: L0 is stored newest-first for the
-        // merging iterator's benefit, but draining it oldest-first is what keeps
-        // the level turning over evenly.
+        // Oldest first: `files_at(0)` is newest-first for the merge's benefit, but draining in
+        // that order would starve the oldest files.
         seed = &files.front();
         for (const FileMetadata& candidate : files) {
             if (candidate.file_number < seed->file_number) seed = &candidate;
@@ -264,18 +237,15 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
     }
     if (seed == nullptr) return std::nullopt;
 
-    // The seed's *effective* span, for the same reason `widen` uses it below. A file carrying only
-    // range tombstones has no data span at all, and starting from an empty one leaves the overlap
-    // search matching nothing — not even the seed itself, whose effective span sits above the empty
-    // upper bound. The compaction then has no inputs, and the code below reads `inputs.front()`.
+    // Effective span, not data span: a file carrying only range tombstones has no data span, and
+    // an empty bound matches nothing — leaving a compaction whose `inputs.front()` does not exist.
     std::string lower = seed->effective_smallest();
     std::string upper = seed->effective_largest();
 
     if (is_overlapping_level(chosen, source)) {
         compaction.inputs = transitive_overlap(version, chosen, lower, upper);
         compaction.inputs_trimmed = trim_to_budget(compaction.inputs, max_compaction_bytes);
-        // Trimming narrows the span, so the bounds are rebuilt from what survived rather than
-        // carried over from the closure.
+        // Trimming narrows the span, so the bounds come from what survived.
         lower = compaction.inputs.front().effective_smallest();
         upper = compaction.inputs.front().effective_largest();
     } else {
@@ -319,19 +289,9 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
     compaction.output_is_bottommost = is_bottommost_for_range(
         version, compaction.output_level, last, Slice::from(lower), Slice::from(upper));
 
-    // Trivial move: nothing to merge with, and the next compaction of this file
-    // will not be enormous. Tier is independent of level (ARCHITECTURE.md "A tier is not a level"), so a move never
-    // changes a file's store and there is no store boundary to consider.
-    //
-    // But a move does not rewrite, so moving a tombstone-bearing file to where it
-    // is bottommost would carry those tombstones past the only point that
-    // reclaims them, and nothing subsequently forces a rewrite. Fall back to a
-    // normal rewrite in that case.
-    // Range tombstones count here exactly as point tombstones do: a move does not rewrite, so
-    // carrying either past the level that reclaims them leaves them with nothing to force a rewrite
-    // later. A file can carry range tombstones and no point tombstones at all — a flush whose
-    // memtable saw only a `delete_range` is precisely that — so testing one and not the other lets
-    // the commonest shape through.
+    // A move re-points a file without rewriting it, so a bottommost output must carry no
+    // tombstones of either kind: nothing later would force the rewrite that reclaims them. A file
+    // can hold range tombstones and no point tombstones, so both counts are checked.
     const bool drops_nothing = !compaction.output_is_bottommost ||
                                (compaction.inputs.front().num_tombstones == 0 &&
                                 compaction.inputs.front().num_range_tombstones == 0);

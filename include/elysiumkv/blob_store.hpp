@@ -22,13 +22,13 @@ using ListResult = Result<std::vector<std::string>>;
 ///
 /// Contract, uniform across every implementation:
 ///
-/// - Objects are **write-once and immutable**. `put` at a name that already
+/// - Objects are write-once and immutable. `put` at a name that already
 ///   exists never overwrites; it reports `Status::Unusable`, because under a
 ///   single writer with a monotonic file-number counter a collision means a
 ///   zombie process is reusing numbers. A failed `put` must therefore not be
 ///   retried under the same name — allocate a new file number instead; the
 ///   partial object becomes an orphan and is collected.
-/// - `Status::NotFound` is **positive evidence** that the named object is
+/// - `Status::NotFound` is positive evidence that the named object is
 ///   absent. `Status::Io` means "could not determine" and is never evidence of
 ///   loss (ARCHITECTURE.md "A tier is not a level"). A store never reports whole-store absence.
 /// - `list` returning an empty vector is a successful, meaningful empty result.
@@ -63,7 +63,7 @@ public:
 
     /// The same read, without the future.
     ///
-    /// **Every read inside this engine is of this shape**: the caller wants the bytes now, and
+    /// Every read inside this engine is of this shape: the caller wants the bytes now, and
     /// completes the future on the next line. `std::future` costs a heap allocation and its atomics
     /// for that — measured at over a hundred nanoseconds per call, against a block read of about a
     /// microsecond — and buys nothing, because no implementation here is asynchronous and no call
@@ -89,8 +89,8 @@ public:
     /// Failure is reported for the batch, not per name. A partial failure leaves
     /// some objects present, which is safe: they are unreferenced, and the next
     /// collection pass finds them again (ARCHITECTURE.md "Versions are immutable snapshots").
-    /// **Best effort: every name is attempted, and the first failure is what is
-    /// reported.** Stopping at the first failure would make one unremovable object
+    /// Best effort: every name is attempted, and the first failure is what is
+    /// reported. Stopping at the first failure would make one unremovable object
     /// shield every name behind it, and `remove` is idempotent — so there is
     /// nothing to gain by giving up early and a stuck batch to lose.
     virtual std::future<Status> remove_many(const std::vector<std::string>& names) {
@@ -117,7 +117,7 @@ public:
     }
 
 protected:
-    /// **Called by each implementation, not by a decorator wrapping it.** `authoritative_store`
+    /// Called by each implementation, not by a decorator wrapping it. `authoritative_store`
     /// walks a chain while `as_cache()` answers, so a counting decorator would stop that walk and
     /// be mistaken for the store that holds the bytes.
     ///
@@ -183,8 +183,8 @@ class CacheBlobStore : public BlobStore {
 public:
     virtual BlobStore& delegate() = 0;
 
-    /// The bound on what this layer holds. **A cache above a few megabytes is sharded by object
-    /// name**, so this is the sum of the shards' bounds and eviction is least-recently-used within
+    /// The bound on what this layer holds. A cache above a few megabytes is sharded by object
+    /// name, so this is the sum of the shards' bounds and eviction is least-recently-used within
     /// a shard rather than across the whole cache — two objects on different shards never compete.
     /// The alternative was one mutex held across a chunk write and across eviction's unlinks,
     /// measured at 4.5x slower with eight readers of unrelated objects.
@@ -194,7 +194,7 @@ public:
     virtual uint64_t hits() const = 0;
     virtual uint64_t misses() const = 0;
 
-    /// Drops whatever this layer holds for `name`, **without touching the delegate**.
+    /// Drops whatever this layer holds for `name`, without touching the delegate.
     ///
     /// Not `remove`, which deletes the object itself. This is for the one case where a cached copy
     /// is known to be wrong while the authoritative object is fine: a chunk file that rotted or was

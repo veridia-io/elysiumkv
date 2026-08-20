@@ -18,7 +18,7 @@ namespace elysiumkv {
 
 /// Key material, and the handling rules that come with it.
 ///
-/// **Move-only, and zeroed on destruction.** A value that copies key material freely leaves plaintext
+/// Move-only, and zeroed on destruction. A value that copies key material freely leaves plaintext
 /// keys scattered through the heap for the allocator to hand out later. `std::string` is the wrong
 /// container for the same reason: its reallocation leaves the old buffer behind untouched.
 ///
@@ -52,7 +52,7 @@ struct DataKey {
 
 /// Wrapping and unwrapping, and nothing else.
 ///
-/// **The engine owns the cryptography; the embedder owns the key custody.** That split is what keeps
+/// The engine owns the cryptography; the embedder owns the key custody. That split is what keeps
 /// a KMS integration from becoming a cipher integration, and it is the seam almost every embedder
 /// needs — supplying a whole `EncryptionProvider` is for an organisation that must use a specific
 /// construction.
@@ -65,13 +65,13 @@ public:
 
 /// The construction one object is encrypted under.
 ///
-/// **Chunked, with a fixed overhead per chunk.** The engine owns the logical-to-physical offset
+/// Chunked, with a fixed overhead per chunk. The engine owns the logical-to-physical offset
 /// mapping, because that invariant has to live in exactly one place — a cipher free to choose an
 /// arbitrary layout would have to reimplement it and would eventually get it wrong somewhere the
 /// engine could not check. A chunk size and a per-chunk overhead express every construction worth
 /// using here: zero overhead is length-preserving, sixteen is a GCM tag.
 ///
-/// **Both must be constant for the life of the object.** They are read once and cached; a cipher
+/// Both must be constant for the life of the object. They are read once and cached; a cipher
 /// that varies them per call corrupts reads in a way nothing can detect.
 class ObjectCipher {
 public:
@@ -80,7 +80,7 @@ public:
 
     /// The identity the object's chunks are authenticated against.
     ///
-    /// **Recorded at creation, not the file's current number.** Migration copies an object between
+    /// Recorded at creation, not the file's current number. Migration copies an object between
     /// tiers byte for byte and gives the copy a new file number; if the authentication were bound to
     /// the live number, every migrated file would stop opening. So the id is fixed when the object
     /// is first written and travels with it.
@@ -103,7 +103,7 @@ struct NewObject {
 
 /// One construction: a suite, a key policy, and whatever metadata it needs to reopen an object.
 ///
-/// **A provider does not know its own name.** Its id is the key it is registered under in
+/// A provider does not know its own name. Its id is the key it is registered under in
 /// `EncryptionOptions::providers`, so that value exists in one place and a self-reported id can
 /// never disagree with the one objects were recorded against.
 class EncryptionProvider {
@@ -120,13 +120,13 @@ public:
 
 /// Overwrites `size` bytes at `data` with zeroes, in a way the optimiser may not remove.
 ///
-/// **For buffers key material passed through**, which is a category the compiler cannot see: a
+/// For buffers key material passed through, which is a category the compiler cannot see: a
 /// plain loop before a buffer dies is a dead store and is deleted.
 void secure_zero(void* data, size_t size);
 
 /// The identifier reserved for the built-in passthrough.
 ///
-/// **Empty, deliberately, and load-bearing.** A file written with encryption disabled and one
+/// Empty, deliberately, and load-bearing. A file written with encryption disabled and one
 /// written before encryption existed record the same thing, so there is one case rather than two.
 /// It is also how the engine knows an object needs no cipher — the id says so, and the id is the
 /// only thing that has to say so. There is no predicate on the provider asking the same question a

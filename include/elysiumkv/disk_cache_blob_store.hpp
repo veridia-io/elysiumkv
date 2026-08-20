@@ -12,7 +12,7 @@ namespace elysiumkv {
 /// remote one. This is the layer that turns a cold S3 tier from "every read is a
 /// network round trip" into "every read after the first is local".
 ///
-/// **No fsync, no crash-consistency protocol, and wiping it at startup is valid.**
+/// No fsync, no crash-consistency protocol, and wiping it at startup is valid.
 /// That falls straight out of ARCHITECTURE.md "Caches chain" — the authoritative store below is written first
 /// and acknowledged before anything is cached, so a cache entry is never the only
 /// copy. A missing or torn entry costs one refetch. This deliberately does *not*
@@ -56,7 +56,7 @@ private:
 
 public:
 
-    /// ARCHITECTURE.md "Invariants and sanitizers" — **the cache checks itself.** Under `ELYSIUMKV_PARANOID` every hit is
+    /// ARCHITECTURE.md "Invariants and sanitizers" — the cache checks itself. Under `ELYSIUMKV_PARANOID` every hit is
     /// re-fetched from the delegate and compared, and a mismatch aborts naming the
     /// object and the range. A cache serving wrong bytes does not crash and does not
     /// fail its own unit tests; it produces a wrong answer somewhere far away.

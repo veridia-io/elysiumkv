@@ -9,7 +9,7 @@
 
 namespace elysiumkv {
 
-/// The construction persisted per object. **Recorded, never inferred from configuration**: what a
+/// The construction persisted per object. Recorded, never inferred from configuration: what a
 /// file was written with is what reads it, whatever the configuration later says.
 enum class CipherSuite : uint16_t {
     /// Reserved and never written. AES-256-CTR was specified and dropped: length-preserving buys
@@ -24,7 +24,7 @@ enum class CipherSuite : uint16_t {
 /// AES-256-GCM over envelope encryption: a fresh data key per object, wrapped by the embedder's
 /// `EncryptionKeyManager`, with the wrapped form recorded in the object's metadata.
 ///
-/// **One key per object is what makes the nonce safe.** Nonce reuse under one key breaks GCM
+/// One key per object is what makes the nonce safe. Nonce reuse under one key breaks GCM
 /// completely. A fresh key per object confines the nonce space to that object, so the nonce can be
 /// a deterministic function of the chunk index with nothing to persist and nothing to coordinate —
 /// and because objects are write-once and file numbers are never reused, an object is encrypted
