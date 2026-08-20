@@ -65,7 +65,7 @@ std::string edit_suffix(uint64_t seq) {
     return buf;
 }
 
-/// Snapshots are read whole, so **whole-object compression is correct here** —
+/// Snapshots are read whole, so whole-object compression is correct here —
 /// the opposite of an SST, where it would make a ranged block read fetch and
 /// inflate the entire file. Edits are small and left alone.
 ///
@@ -265,7 +265,7 @@ Result<std::optional<ManifestCatalog::Entry>> S3ManifestCatalog::compare_and_set
 
     const auto code = outcome.GetError().GetResponseCode();
 
-    // **412 is a lost CAS, not an error.** Another writer installed first, so
+    // 412 is a lost CAS, not an error. Another writer installed first, so
     // this process is fenced: nullopt, which the engine turns into Status::Fenced
     // and an instance that must be reopened. Retrying would be wrong — its
     // Version is stale.
@@ -273,7 +273,7 @@ Result<std::optional<ManifestCatalog::Entry>> S3ManifestCatalog::compare_and_set
         return Result<std::optional<Entry>>(std::optional<Entry>{});
     }
 
-    // **409 is not a lost CAS.** S3 returns it when a conditional write races a
+    // 409 is not a lost CAS. S3 returns it when a conditional write races a
     // multipart upload, and it *is* retryable. Folding it into 412 would fence a
     // writer that never lost; folding 412 into it would retry a writer that did,
     // and the second is how two processes end up both believing they own the

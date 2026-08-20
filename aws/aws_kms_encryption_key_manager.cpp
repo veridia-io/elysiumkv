@@ -92,7 +92,7 @@ AwsKmsEncryptionKeyManager::~AwsKmsEncryptionKeyManager() = default;
 Result<DataKey> AwsKmsEncryptionKeyManager::new_data_key() {
     Aws::KMS::Model::GenerateDataKeyRequest request;
     request.SetKeyId(impl_->options.key_id);
-    // **`AES_256`, matching what the provider requires**, rather than a byte count: asking KMS for
+    // `AES_256`, matching what the provider requires, rather than a byte count: asking KMS for
     // the named spec means a mismatch is a rejected request rather than a key the cipher refuses
     // later for a reason that reads like corruption.
     request.SetKeySpec(Aws::KMS::Model::DataKeySpec::AES_256);
@@ -119,7 +119,7 @@ Result<DataKey> AwsKmsEncryptionKeyManager::new_data_key() {
 
 Result<SecretKey> AwsKmsEncryptionKeyManager::open_data_key(Slice envelope) {
     Aws::KMS::Model::DecryptRequest request;
-    // **The key id is not sent.** A ciphertext blob from KMS names the key that produced it, so
+    // The key id is not sent. A ciphertext blob from KMS names the key that produced it, so
     // Decrypt resolves it on its own — which is what lets a store keep reading files wrapped by a
     // key that is no longer the one being written under.
     request.SetCiphertextBlob(Aws::Utils::ByteBuffer(envelope.data(), envelope.size()));

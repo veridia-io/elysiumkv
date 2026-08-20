@@ -68,7 +68,7 @@ constexpr const char* kVersion = "version";
 constexpr const char* kGeneration = "generation";
 constexpr const char* kPayload = "payload";
 constexpr const char* kTotalChunks = "total_chunks";
-/// The instance that wrote a chunk. **Not in the sort key**, deliberately: the address has to stay
+/// The instance that wrote a chunk. Not in the sort key, deliberately: the address has to stay
 /// write-once, because a collision there is the only thing that detects a second writer between
 /// generation rolls. This attribute only answers "is the thing already at that address *mine*",
 /// which is what makes a retry over one's own residue safe and a retry over a rival's a fence.
@@ -79,26 +79,20 @@ constexpr const char* kSnapshotAttempt = "snapshot_attempt";
 
 constexpr const char* kPointerSk = "POINTER";
 
-/// An item caps at **400 KB including attribute names and keys**, so the payload
+/// An item caps at 400 KB including attribute names and keys, so the payload
 /// budget has to sit well below it. 300 KB leaves room for the key, the sort key
 /// and the bookkeeping attributes without arithmetic that has to be revisited
 /// whenever one is added.
 constexpr size_t kChunkPayloadBytes = 300 * 1024;
 
-/// **A snapshot address carries the attempt that wrote it, and that is what makes the write
-/// idempotent.** Chunks go in one at a time, so a failure partway leaves some behind; with a fixed
-/// address the retry collided with its own residue, `attribute_not_exists` refused it, and the
-/// engine read that refusal as another writer having won the roll — fencing the store permanently
-/// on one transient error, unrecoverably, because the residue survived the reopen.
+/// A snapshot address carries the attempt that wrote it, which is what makes the write idempotent:
+/// chunks go in one at a time, so a failure partway leaves residue, and a fixed address would make
+/// the retry collide with it. An unfinished attempt is an incomplete set no reader selects, and
+/// `delete_generation` collects it with the rest of the generation.
 ///
-/// A fresh attempt per call means a retry never collides with anything. The residue is then an
-/// incomplete set that no reader will select, and `delete_generation` collects it with the rest of
-/// the generation.
-///
-/// **Which attempt is authoritative is decided by the pointer install, not here.** Two writers
-/// rolling to the same generation both write complete snapshots; exactly one wins the CAS, and it
-/// records its attempt on the pointer as it does so. Reading the generation without that record is
-/// unambiguous only while there is one complete set.
+/// Which attempt is authoritative is decided by the pointer install, not here: two writers rolling
+/// to one generation both write complete snapshots, and the CAS winner records its attempt on the
+/// pointer. Without that record the generation is unambiguous only while one complete set exists.
 std::string sort_key_snapshot(uint64_t generation, const std::string& attempt, uint32_t chunk) {
     char buf[96];
     std::snprintf(buf, sizeof(buf), "gen#%012llu#snap#%s#%04u",
@@ -129,7 +123,7 @@ std::string fresh_id() {
     return buf;
 }
 
-/// **The chunk index is new, so an edit written by an earlier build is unreadable here.** That
+/// The chunk index is new, so an edit written by an earlier build is unreadable here. That
 /// costs nothing as long as this ships inside the same release as manifest format 6, which already
 /// requires every existing store to be rebuilt from its log — the engine takes a manifest version
 /// as a clean break and never dual-reads. Landing it after 0.7.0 would need a bump of its own.
@@ -252,7 +246,7 @@ struct DynamoManifestCatalog::Impl {
         auto outcome = client->PutItem(request);
         if (outcome.IsSuccess()) return Status::Ok;
         if (is_conditional_failure(outcome.GetError())) return Status::Config;
-        // **Terminal, not retryable.** A rejected *request* — an item over the 400 KB cap, a table
+        // Terminal, not retryable. A rejected *request* — an item over the 400 KB cap, a table
         // whose schema does not match — will be rejected identically forever, and `Status::Io`
         // means "ask again later" to everything above. That turns a permanent failure into a
         // background retry loop whose only symptom is `background_failures` climbing.
@@ -262,13 +256,11 @@ struct DynamoManifestCatalog::Impl {
 
     /// Splits and writes `bytes` as chunks addressed by `sort_key(index)`.
     ///
-    /// **Chunking only. The engine compresses.** This used to compress too, which stopped paying
-    /// once manifest payloads became encrypted: ciphertext does not compress, so the work would be
-    /// spent on every write for nothing. Compression now runs above the seal where it still sees
-    /// real data, and chunking stays here because the 400 KB item cap is DynamoDB's alone.
+    /// Chunking only: the engine compresses above the seal, where it still sees plaintext.
+    /// Chunking belongs here because the 400 KB item cap is DynamoDB's alone.
     ///
-    /// **Chunked unconditionally, not above a threshold.** A threshold would mean the chunking path
-    /// only ever runs in production, where it is least welcome to be wrong.
+    /// Chunked unconditionally rather than above a threshold, so the path is not one that only
+    /// runs in production.
     Status put_chunked(const std::function<std::string(uint32_t)>& sort_key, Slice bytes) {
         const std::string packed(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
@@ -288,7 +280,7 @@ struct DynamoManifestCatalog::Impl {
 
     /// The snapshot for `generation`, choosing between attempts.
     ///
-    /// **The pointer decides when it can.** Two writers rolling to one generation both write
+    /// The pointer decides when it can. Two writers rolling to one generation both write
     /// complete snapshots, and only the compare-and-set says which of them owns the store; the
     /// winner records its attempt as it installs, and `read()` picks that up. Falling back to "the
     /// only complete set" is correct exactly while there is one — with several and no pointer to
@@ -413,7 +405,7 @@ struct DynamoManifestCatalog::Impl {
 
     /// Whether the item at `sort_key` was written by this instance, so a retry may clear it.
     ///
-    /// **Absent counts as ours.** The only reason to ask is that a write just failed the
+    /// Absent counts as ours. The only reason to ask is that a write just failed the
     /// write-once condition, so something is there; a race that removes it between the two calls
     /// leaves the address free, which is the same position as finding our own residue.
     Result<bool> written_by_us(const std::string& sort_key) {
@@ -433,21 +425,18 @@ struct DynamoManifestCatalog::Impl {
         return found->second.GetS() == writer;
     }
 
-    /// One edit address, written once, and **retried over its own residue only**.
+    /// One edit address, written once, retried only over residue this instance left.
     ///
-    /// A snapshot solves the partial-write problem by never reusing an address (`sort_key_snapshot`).
-    /// An edit cannot: the address is `(generation, seq)` and its write-once-ness is the only thing
-    /// that detects a second writer between generation rolls — open takes no lock and performs no
-    /// compare-and-set, so two writers both believe they own the store until one of them collides
-    /// here. Give edits a per-attempt address and both would succeed, replay would silently pick
-    /// one, and the loser would never learn it had been fenced.
+    /// The address stays `(generation, seq)` rather than carrying an attempt like a snapshot does,
+    /// because its write-once-ness is the only thing that detects a second writer between
+    /// generation rolls: open takes no lock and performs no compare-and-set, so two writers both
+    /// believe they own the store until one collides here. Per-attempt addresses would let both
+    /// succeed and leave replay to pick one silently.
     ///
-    /// So the address stays fixed and the writer attribute does the work: residue this instance
-    /// wrote is cleared and the write retried; anything else is a genuine conflict and stays
-    /// `Config`, which the engine turns into a fence. **A crash is not covered** — the residue then
-    /// carries a dead instance's id, indistinguishable from a live rival's, and the store fences
-    /// until an operator removes it. Loud and recoverable, where the fixed address alone was silent
-    /// and permanent.
+    /// So the writer attribute does the work instead: an unfinished set this instance wrote is
+    /// cleared and the write retried, and anything else stays `Config`, which the engine turns into
+    /// a fence. A crash is not covered — the residue then carries a dead instance's id,
+    /// indistinguishable from a live rival's — so the store fences until an operator removes it.
     Status put_edit_chunked(uint64_t generation, uint64_t seq, Slice bytes) {
         const auto address = [generation, seq](uint32_t chunk) {
             return sort_key_edit(generation, seq, chunk);
@@ -655,7 +644,7 @@ Result<std::optional<ManifestCatalog::Entry>> DynamoManifestCatalog::compare_and
     request.SetTableName(impl_->options.table);
     request.AddKey(attr::kPk, impl_->pk());
     request.AddKey(attr::kSk, Aws::DynamoDB::Model::AttributeValue(kPointerSk));
-    // **The install is what makes one snapshot attempt authoritative**, so it records which one.
+    // The install is what makes one snapshot attempt authoritative, so it records which one.
     // Written in the same conditional update as the generation and the version: a pointer naming a
     // generation without naming the attempt it committed to would leave a reader guessing between
     // two complete snapshots, which is the case this whole layout exists to make decidable.
@@ -689,7 +678,7 @@ Result<std::optional<ManifestCatalog::Entry>> DynamoManifestCatalog::compare_and
         return Result<std::optional<Entry>>(
             std::optional<Entry>(Entry{generation, std::to_string(next_version)}));
     }
-    // **A failed condition is a lost CAS, not an error.** Another writer
+    // A failed condition is a lost CAS, not an error. Another writer
     // installed first, so this process is fenced: nullopt, which the engine turns
     // into Status::Fenced and an instance that must be reopened. Anything else is
     // a genuine failure and stays retryable — conflating the two would either
@@ -733,7 +722,7 @@ std::future<GetResult> DynamoManifestCatalog::get_snapshot(uint64_t generation) 
     return make_ready_future(impl_->get_snapshot_attempt(generation));
 }
 
-/// **Chunked exactly as a snapshot is.** This wrote one raw item, so an edit had to
+/// Chunked exactly as a snapshot is. This wrote one raw item, so an edit had to
 /// fit the 400 KB cap whole — and an edit carries a full `FileMetadata` per output file, five
 /// strings each. The bound was `max_compaction_bytes / target_file_bytes x per-file record`, both
 /// of which an embedder sets: lowering `target_file_bytes` to 256 KiB, which `options.hpp`
@@ -754,7 +743,7 @@ std::future<Result<std::vector<uint64_t>>> DynamoManifestCatalog::list_edits(uin
         return make_ready_future(Result<std::vector<uint64_t>>(std::unexpected(items.error())));
     }
 
-    // **One entry per edit, not per chunk.** A chunked edit is several items sharing a sequence
+    // One entry per edit, not per chunk. A chunked edit is several items sharing a sequence
     // number, and the replay above this asks for each sequence once.
     std::set<uint64_t> seen;
     for (const auto& item : *items) {
@@ -775,7 +764,7 @@ std::future<Result<std::vector<uint64_t>>> DynamoManifestCatalog::list_edits(uin
 }
 
 std::future<Status> DynamoManifestCatalog::delete_generation(uint64_t generation) {
-    // **This is also what collects a failed snapshot attempt.** A partial attempt leaves chunks
+    // This is also what collects a failed snapshot attempt. A partial attempt leaves chunks
     // under `gen#G#snap#<attempt>#…`; the retry installs the generation under a *different*
     // attempt, and when the generation after that is installed this removes the whole prefix —
     // the good snapshot, the dead attempt and the edits together. So the residue is bounded by one
