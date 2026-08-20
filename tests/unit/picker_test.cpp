@@ -128,6 +128,25 @@ TEST(PickerTest, TrimmingAnOverlappingLevelLeavesTheLevelsOwnOrder) {
     EXPECT_EQ(compaction->inputs.back().file_number, 1u);
 }
 
+/// The one public helper in `LevelOptions`, and until now the only piece of public API with no
+/// caller anywhere — not in `src`, not in the tests, not in either binding. A shape an embedder is
+/// invited to use should at least be known to produce the shape it describes.
+TEST(PickerTest, TheGeometricLayoutIsWhatItDescribes) {
+    const auto levels = LevelOptions::geometric(/*base=*/1024, /*multiplier=*/10, /*count=*/4);
+    ASSERT_EQ(levels.size(), 4u);
+
+    // L0 is bounded by file count, not bytes: it overlaps, so capacity there is a read-amplification
+    // term rather than a size one.
+    EXPECT_FALSE(levels.at(0).max_bytes.has_value());
+    EXPECT_TRUE(levels.at(0).max_files.has_value());
+
+    EXPECT_EQ(levels.at(1).max_bytes, 1024u);
+    EXPECT_EQ(levels.at(2).max_bytes, 10240u);
+    // **The last level carries no capacity**, because it absorbs everything: a bound there would be
+    // a limit on the store rather than a compaction trigger.
+    EXPECT_FALSE(levels.at(3).max_bytes.has_value());
+}
+
 TEST(PickerTest, NothingToDoWhenEveryLevelIsUnderItsLimits) {
     auto version = version_of({file(0, 1, "a", "b"), file(1, 2, "a", "b")});
     EXPECT_FALSE(pick_compaction(*version, config(), 1u << 30).has_value());

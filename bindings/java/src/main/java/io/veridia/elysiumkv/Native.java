@@ -232,6 +232,8 @@ final class Native {
 
     static native void optionsSetEncryptionRewriteToPrimary(long options, boolean enabled);
 
+    static native void optionsSetGeometricLevels(long options, long base, int multiplier, int count);
+
     static native void optionsConfigureCompaction(long options, double tombstoneDensityTrigger,
                                                   long tombstoneDensityMinEntries);
 

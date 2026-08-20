@@ -1,5 +1,6 @@
 #include "contract/manifest_catalog_contract.hpp"
 
+#include <algorithm>
 #include <random>
 #include <string>
 #include <vector>
@@ -138,6 +139,48 @@ TEST_P(ManifestCatalogContract, ListEditsIsSortedAndScopedToItsGeneration) {
     auto empty = catalog_->list_edits(99).get();
     ASSERT_TRUE(empty.has_value());
     EXPECT_TRUE(empty->empty());
+}
+
+/// **Optional, and the contract is that it is one of exactly two things.** An implementation that
+/// can enumerate cheaply should, because that is what makes generation reclamation complete rather
+/// than merely usual; one that cannot says `Unsupported` and the engine probes a bounded window
+/// below the pointer instead. What must not happen is a third answer — a partial list, or an empty
+/// one from a store that holds generations — because the caller's whole decision is "collect
+/// exactly what this returned".
+///
+/// The disk catalog enumerates. DynamoDB deliberately does not: its sort key varies the generation
+/// in the middle, so no prefix query selects snapshots alone. Both are correct, and this is the
+/// only test that says so for either — the remote implementations had no coverage of it at all.
+TEST_P(ManifestCatalogContract, ListGenerationsEitherEnumeratesOrSaysItCannot) {
+    auto empty = catalog_->list_generations().get();
+    const bool supported = empty.has_value();
+    if (!supported) {
+        EXPECT_EQ(empty.error(), Status::Unsupported)
+            << "an implementation that cannot enumerate says so with Unsupported, not an I/O error";
+    } else {
+        EXPECT_TRUE(empty->empty()) << "nothing has been written yet";
+    }
+
+    ASSERT_EQ(catalog_->put_snapshot(4, Slice::from(std::string("s4"))).get(), Status::Ok);
+    ASSERT_EQ(catalog_->put_snapshot(7, Slice::from(std::string("s7"))).get(), Status::Ok);
+    ASSERT_EQ(catalog_->put_edit(7, 1, Slice::from(std::string("e"))).get(), Status::Ok);
+
+    auto listed = catalog_->list_generations().get();
+    ASSERT_EQ(listed.has_value(), supported)
+        << "the answer must not change with the contents: a caller decides once whether to use it";
+    if (!supported) return;
+
+    // **Every generation, once each** — an edit must not add a second entry for the generation its
+    // snapshot already named, or the caller would delete the same one twice.
+    std::vector<uint64_t> seen = *listed;
+    std::sort(seen.begin(), seen.end());
+    EXPECT_EQ(seen, (std::vector<uint64_t>{4, 7}));
+
+    // And it tracks deletion, which is the half that makes reclamation terminate.
+    ASSERT_EQ(catalog_->delete_generation(4).get(), Status::Ok);
+    auto after = catalog_->list_generations().get();
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(*after, (std::vector<uint64_t>{7}));
 }
 
 TEST_P(ManifestCatalogContract, DeleteGenerationTakesEverythingOfItsOwnAndNothingElse) {

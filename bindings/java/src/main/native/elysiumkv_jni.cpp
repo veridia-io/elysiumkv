@@ -1045,6 +1045,15 @@ void JNICALL options_add_aes256_gcm_encryption_with_kms(JNIEnv* env, jclass, jlo
     });
 }
 
+void JNICALL options_set_geometric_levels(JNIEnv* env, jclass, jlong options, jlong base,
+                                          jint multiplier, jint count) {
+    guard_void(env, [&] {
+        check(env, elysiumkv_options_set_geometric_levels(as_options(options),
+                                                          static_cast<uint64_t>(base), multiplier,
+                                                          count));
+    });
+}
+
 void JNICALL options_set_encryption_rewrite_to_primary(JNIEnv* env, jclass, jlong options,
                                                        jboolean enabled) {
     guard_void(env, [&] {
@@ -1396,6 +1405,8 @@ const JNINativeMethod kMethods[] = {
      const_cast<char*>("(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;"
                        "Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JJ)V"),
      reinterpret_cast<void*>(options_add_aes256_gcm_encryption_with_kms)},
+    {const_cast<char*>("optionsSetGeometricLevels"), const_cast<char*>("(JJII)V"),
+     reinterpret_cast<void*>(options_set_geometric_levels)},
     {const_cast<char*>("optionsSetEncryptionRewriteToPrimary"), const_cast<char*>("(JZ)V"),
      reinterpret_cast<void*>(options_set_encryption_rewrite_to_primary)},
     {const_cast<char*>("optionsSetPrimaryEncryptionProvider"),

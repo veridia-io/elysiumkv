@@ -118,4 +118,8 @@ uint32_t crc32c(const uint8_t* data, size_t size, uint32_t seed) {
 
 const char* crc32c_implementation() { return have_hardware() ? "hardware" : "table"; }
 
+uint32_t crc32c_portable(const uint8_t* data, size_t size, uint32_t seed) {
+    return crc32c_table(data, size, seed ^ 0xFFFFFFFFu) ^ 0xFFFFFFFFu;
+}
+
 }  // namespace elysiumkv

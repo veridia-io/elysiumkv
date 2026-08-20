@@ -684,6 +684,184 @@ TEST_F(CApiTest, TheBuiltInManagersRefuseUnusableConfiguration) {
     elysiumkv_options_destroy(options);
 }
 
+namespace {
+
+// A whole construction supplied through the ABI: the seam an embedder uses when the built-in one
+// will not do. **Nothing had ever run it** — the only call to
+// `elysiumkv_options_add_encryption_provider` passed an empty vtable, which is refused before the
+// adapter is constructed, and there is no Java path to it. So every one of `create`, `open`,
+// `seal`, `open_chunk`, `chunk_bytes`, `overhead_bytes`, `object_id` and `destroy_cipher` was
+// dead on arrival, in a seam whose failure mode is a wrong byte rather than an error.
+//
+// Deliberately **not** length-preserving: a four-byte trailer per chunk is what exercises the
+// engine's logical-to-physical mapping, which a zero-overhead cipher would leave untested.
+struct AbiCipher {
+    uint64_t object_id = 0;
+};
+
+constexpr size_t kAbiChunkBytes = 512;
+constexpr size_t kAbiOverhead = 4;
+
+int abi_ciphers_alive = 0;
+int abi_seals = 0;
+int abi_opens = 0;
+
+uint8_t abi_key(uint64_t object_id, uint64_t chunk) {
+    return static_cast<uint8_t>(0xA5u ^ (object_id * 31u) ^ (chunk * 7u));
+}
+
+extern "C" elysiumkv_status abi_create(void*, uint64_t object_id, void** cipher_out,
+                                       uint8_t* metadata_out, size_t metadata_cap,
+                                       size_t* metadata_len) {
+    *metadata_len = sizeof(uint64_t);
+    if (metadata_cap < sizeof(uint64_t)) return ELYSIUMKV_CONFIG;
+    for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+        metadata_out[i] = static_cast<uint8_t>(object_id >> (8 * i));
+    }
+    auto* cipher = new AbiCipher{object_id};
+    ++abi_ciphers_alive;
+    *cipher_out = cipher;
+    return ELYSIUMKV_OK;
+}
+
+extern "C" elysiumkv_status abi_open(void*, uint64_t, const uint8_t* metadata,
+                                     size_t metadata_len, void** cipher_out) {
+    if (metadata_len != sizeof(uint64_t)) return ELYSIUMKV_CORRUPT;
+    uint64_t object_id = 0;
+    for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+        object_id |= static_cast<uint64_t>(metadata[i]) << (8 * i);
+    }
+    auto* cipher = new AbiCipher{object_id};
+    ++abi_ciphers_alive;
+    *cipher_out = cipher;
+    return ELYSIUMKV_OK;
+}
+
+extern "C" void abi_destroy_cipher(void*, void* cipher) {
+    delete static_cast<AbiCipher*>(cipher);
+    --abi_ciphers_alive;
+}
+
+extern "C" size_t abi_chunk_bytes(void*, void*) { return kAbiChunkBytes; }
+extern "C" size_t abi_overhead_bytes(void*, void*) { return kAbiOverhead; }
+extern "C" uint64_t abi_object_id(void*, void* cipher) {
+    return static_cast<AbiCipher*>(cipher)->object_id;
+}
+
+extern "C" elysiumkv_status abi_seal(void*, void* cipher, uint64_t chunk, const uint8_t* plaintext,
+                                     size_t plaintext_len, const uint8_t* aad, size_t aad_len,
+                                     uint8_t* out, size_t out_cap, size_t* out_len) {
+    *out_len = plaintext_len + kAbiOverhead;
+    if (out_cap < *out_len) return ELYSIUMKV_CONFIG;
+    const uint8_t key = abi_key(static_cast<AbiCipher*>(cipher)->object_id, chunk);
+    uint32_t tag = static_cast<uint32_t>(aad_len);
+    for (size_t i = 0; i < aad_len; ++i) tag = tag * 31u + aad[i];
+    for (size_t i = 0; i < plaintext_len; ++i) {
+        out[i] = static_cast<uint8_t>(plaintext[i] ^ key);
+        tag = tag * 31u + plaintext[i];
+    }
+    for (size_t i = 0; i < kAbiOverhead; ++i) {
+        out[plaintext_len + i] = static_cast<uint8_t>(tag >> (8 * i));
+    }
+    ++abi_seals;
+    return ELYSIUMKV_OK;
+}
+
+extern "C" elysiumkv_status abi_open_chunk(void*, void* cipher, uint64_t chunk,
+                                           const uint8_t* ciphertext, size_t ciphertext_len,
+                                           const uint8_t* aad, size_t aad_len, uint8_t* out,
+                                           size_t out_cap, size_t* out_len) {
+    if (ciphertext_len < kAbiOverhead) return ELYSIUMKV_CORRUPT;
+    const size_t plain_len = ciphertext_len - kAbiOverhead;
+    *out_len = plain_len;
+    if (out_cap < plain_len) return ELYSIUMKV_CONFIG;
+
+    const uint8_t key = abi_key(static_cast<AbiCipher*>(cipher)->object_id, chunk);
+    uint32_t tag = static_cast<uint32_t>(aad_len);
+    for (size_t i = 0; i < aad_len; ++i) tag = tag * 31u + aad[i];
+    for (size_t i = 0; i < plain_len; ++i) {
+        out[i] = static_cast<uint8_t>(ciphertext[i] ^ key);
+        tag = tag * 31u + out[i];
+    }
+    uint32_t stored = 0;
+    for (size_t i = 0; i < kAbiOverhead; ++i) {
+        stored |= static_cast<uint32_t>(ciphertext[plain_len + i]) << (8 * i);
+    }
+    // The engine hands the associated data to both halves; a mismatch means the chunk was moved
+    // or the object was renumbered, and reporting it is the point of taking the aad at all.
+    if (stored != tag) return ELYSIUMKV_CORRUPT;
+    ++abi_opens;
+    return ELYSIUMKV_OK;
+}
+
+elysiumkv_encryption_provider abi_provider() {
+    elysiumkv_encryption_provider provider{};
+    provider.create = abi_create;
+    provider.open = abi_open;
+    provider.destroy_cipher = abi_destroy_cipher;
+    provider.chunk_bytes = abi_chunk_bytes;
+    provider.overhead_bytes = abi_overhead_bytes;
+    provider.object_id = abi_object_id;
+    provider.seal = abi_seal;
+    provider.open_chunk = abi_open_chunk;
+    return provider;
+}
+
+}  // namespace
+
+TEST_F(CApiTest, AnEncryptionProviderSuppliedThroughTheAbiEncryptsTheStore) {
+    abi_ciphers_alive = 0;
+    abi_seals = 0;
+    abi_opens = 0;
+
+    const elysiumkv_encryption_provider provider = abi_provider();
+    elysiumkv_options* options = make_options();
+    ASSERT_EQ(elysiumkv_options_add_encryption_provider(options, "abi-cipher", &provider),
+              ELYSIUMKV_OK);
+    ASSERT_EQ(elysiumkv_options_set_primary_encryption_provider(options, "abi-cipher"),
+              ELYSIUMKV_OK);
+
+    elysiumkv_db* db = nullptr;
+    ASSERT_EQ(elysiumkv_open(options, &db), ELYSIUMKV_OK) << elysiumkv_last_error();
+    elysiumkv_options_destroy(options);
+
+    const std::string canary = "CANARY-THROUGH-A-PROVIDER-VTABLE-0123456789";
+    for (int i = 0; i < 200; ++i) {
+        const std::string key = "k" + std::to_string(i);
+        ASSERT_EQ(put(db, key.c_str(), canary.c_str()), ELYSIUMKV_OK);
+    }
+    ASSERT_EQ(elysiumkv_flush(db), ELYSIUMKV_OK);
+    EXPECT_GT(abi_seals, 0) << "the embedder's seal was never called";
+
+    // Read back through the ABI, which is what drives `open` and `open_chunk`.
+    for (int i = 0; i < 200; ++i) {
+        const std::string key = "k" + std::to_string(i);
+        const uint8_t* value = nullptr;
+        size_t len = 0;
+        uint64_t pin = 0;
+        ASSERT_EQ(elysiumkv_get(db, reinterpret_cast<const uint8_t*>(key.data()), key.size(),
+                                &value, &len, &pin),
+                  ELYSIUMKV_OK)
+            << key;
+        EXPECT_EQ(std::string(reinterpret_cast<const char*>(value), len), canary) << key;
+        elysiumkv_unpin(db, pin);
+    }
+    EXPECT_GT(abi_opens, 0) << "the embedder's open_chunk was never called";
+    elysiumkv_close(db);
+
+    // The engine owns the cipher handles it asked for, and must hand every one back.
+    EXPECT_EQ(abi_ciphers_alive, 0) << "a cipher handle was leaked across the boundary";
+
+    // And the bytes on disk are the embedder's ciphertext, not the canary.
+    for (const auto& entry : std::filesystem::directory_iterator(store_dir_)) {
+        if (!entry.is_regular_file()) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string contents((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+        EXPECT_EQ(contents.find(canary), std::string::npos) << entry.path();
+    }
+}
+
 TEST_F(CApiTest, TheReservedProviderIdIsRefusedThroughTheAbi) {
     elysiumkv_encryption_key_manager manager{};
     int counter = 0;
