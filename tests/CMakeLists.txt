@@ -15,6 +15,7 @@ add_executable(elysiumkv_tests
     unit/status_test.cpp
     unit/slice_test.cpp
     unit/hash_test.cpp
+    unit/crc32c_test.cpp
     unit/block_test.cpp
     unit/bloom_test.cpp
     unit/compression_test.cpp

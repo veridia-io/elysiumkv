@@ -604,6 +604,25 @@ elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* st
     });
 }
 
+elysiumkv_status elysiumkv_options_set_geometric_levels(elysiumkv_options* options, uint64_t base,
+                                                       int multiplier, int count) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config, "elysiumkv_options_set_geometric_levels: null options");
+        }
+        if (base == 0 || multiplier < 2 || count < 2) {
+            return fail(Status::Config,
+                        "elysiumkv_options_set_geometric_levels: base must be non-zero, and both "
+                        "multiplier and count at least 2");
+        }
+        // Replaces rather than merges: the layout is a whole shape, and half of one left over from
+        // an earlier call is a configuration nobody asked for.
+        options->options.levels =
+            LevelOptions::geometric(static_cast<size_t>(base), multiplier, count);
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_options_set_level(elysiumkv_options* options, int level,
                                          elysiumkv_compression compression, int64_t max_bytes,
                                          int max_files, int slowdown_at, int stop_at,

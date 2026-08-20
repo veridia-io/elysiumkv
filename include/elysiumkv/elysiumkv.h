@@ -118,6 +118,19 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options*, vo
 /* Levels (ARCHITECTURE.md "Compaction"), LSM structure only — no storage decisions. `level` may skip
  * numbers; gaps inherit the nearest shallower entry. A negative bound is
  * "unset". */
+/* Replaces the level map with the classic geometric layout: L0 by file count, each deeper level
+ * `multiplier` times the capacity of the one above, and the last carrying none because it absorbs
+ * everything.
+ *
+ * For embedders who want the usual shape without stating `count` capacities by hand. Everything
+ * else here is explicit on purpose — there is no base size and no multiplier on a level, because
+ * those are a formula for producing this map and stating it directly is clearer. `count` is chosen
+ * against expected total size: more levels means lower write amplification, and configured levels
+ * sitting empty cost nothing. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_geometric_levels(elysiumkv_options*,
+                                                                     uint64_t base,
+                                                                     int multiplier, int count);
+
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_level(elysiumkv_options*, int level,
                                          elysiumkv_compression compression, int64_t max_bytes,
                                          int max_files, int slowdown_at, int stop_at,

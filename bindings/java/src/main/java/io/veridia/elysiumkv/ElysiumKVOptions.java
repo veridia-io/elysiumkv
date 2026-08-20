@@ -332,6 +332,29 @@ public final class ElysiumKVOptions implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Replaces the level map with the classic geometric layout: L0 bounded by file count, each
+     * deeper level {@code multiplier} times the capacity of the one above it, and the last
+     * carrying none because it absorbs everything.
+     *
+     * <p>For when you want the usual shape without stating {@code count} capacities by hand.
+     * Everything else here is explicit on purpose — a base size and a multiplier are a formula for
+     * producing this map, and stating the map directly is clearer. Choose {@code count} against
+     * expected total size: more levels means lower write amplification, and configured levels
+     * sitting empty cost nothing.
+     *
+     * <p>Replaces rather than merges, so call it before any {@link #level} of your own.
+     */
+    public ElysiumKVOptions geometricLevels(long base, int multiplier, int count) {
+        if (base <= 0) throw new IllegalArgumentException("base must be positive: " + base);
+        if (multiplier < 2) {
+            throw new IllegalArgumentException("multiplier must be at least 2: " + multiplier);
+        }
+        if (count < 2) throw new IllegalArgumentException("count must be at least 2: " + count);
+        Native.optionsSetGeometricLevels(handle(), base, multiplier, count);
+        return this;
+    }
+
     public ElysiumKVOptions manifestEditsPerGeneration(int edits) {
         manifestEditsPerGeneration = edits;
         return this;
