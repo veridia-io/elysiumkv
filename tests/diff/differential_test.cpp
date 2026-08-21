@@ -64,6 +64,15 @@ std::string report(int seed, const ReplayConfig& config, const DiffFailure& fail
     return out;
 }
 
+/// Reported without shrinking: a premise failure only gets worse as operations are dropped, and
+/// rendering one as a mismatch sends a reader after a bug in an operation the run never performed.
+std::string premise_report(int seed, const ReplayConfig& config, const DiffFailure& failure) {
+    return "\nthe configuration tested nothing\n  config:  " + config.name +
+           "\n  seed:    " + std::to_string(seed) + "\n  message: " + failure.message +
+           "\n\nNo operation disagreed with the oracle. The configuration's own premise is what "
+           "failed, so the fix is to the configuration, not to the engine.\n";
+}
+
 class DifferentialTest : public ::testing::TestWithParam<ReplayConfig> {};
 
 TEST_P(DifferentialTest, MatchesTheOracle) {
@@ -78,6 +87,7 @@ TEST_P(DifferentialTest, MatchesTheOracle) {
             generate_ops(static_cast<uint64_t>(seed), ops_count, generator);
         auto failure = replay(ops, config);
         if (!failure.has_value()) continue;
+        if (failure->premise) FAIL() << premise_report(seed, config, *failure);
 
         // ARCHITECTURE.md "The differential oracle" — a mismatch deep in a million operations is close to
         // undebuggable, so minimize before reporting.
@@ -130,11 +140,21 @@ INSTANTIATE_TEST_SUITE_P(
         // The same transient band with the age trigger spread. Jitter decides *when* a file
         // crosses to the colder tier, so every answer here must be identical to `TransientBand`
         // — and if it is not, the offset has leaked into something it must not touch.
+        //
+        // The age is 20 s of the replay's virtual clock against a run of 30 s at 3,000 operations,
+        // and it is sized by measurement: at the 60 s the transient helper defaults to, no file was
+        // old enough to cross before the stream ended, so the offsets were derived and then
+        // decided nothing. Shorter is not better either — placement puts a compaction output on
+        // the tier its oldest write belongs to, so past a few multiples of the age every output is
+        // born cold and the boundary is never crossed at all. Measured across 100 seeds at 20 s:
+        // 2 to 7 crossings per run, against 0 to 2 at 60 s. Worth re-measuring if the memtable
+        // size, the op mix or the clock step here change.
         ReplayConfig{.name = "JitteredTransientBand",
                      .compression = Compression::Zstd,
                      .split_stores = true,
                      .transient_band = true,
-                     .jitter = 0.25},
+                     .jitter = 0.25,
+                     .tier_max_age_ms = 20'000},
         // ARCHITECTURE.md "Caches chain" — the same oracle with a memory-over-disk chain in front of every tier. If a
         // cache is invisible to the engine, this cannot differ from `Zstd`.
         ReplayConfig{.name = "CachedChain", .compression = Compression::Zstd, .cached = true},
@@ -282,6 +302,7 @@ TEST(ThreadedDifferentialTest, MatchesTheOracleWithThreadsRunning) {
             const std::vector<DiffOp> ops_list = generate_ops(static_cast<uint64_t>(seed), ops);
             auto failure = replay(ops_list, config);
             if (!failure.has_value()) continue;
+            if (failure->premise) FAIL() << premise_report(seed, config, *failure);
 
             // No shrinking here: without reproducibility, delta-debugging cannot
             // tell a fix from luck.
@@ -402,6 +423,23 @@ TEST(DifferentialHarness, ShrinkerMinimizesToTheOperationsThatMatter) {
     // And the report is something a person can read.
     const std::string rendered = describe_ops(minimal);
     EXPECT_NE(rendered.find("the-culprit"), std::string::npos) << rendered;
+}
+
+/// A configuration's own premise is not shrinkable, and the shrinker must not mistake one for
+/// the mismatch it is minimizing: a shortened candidate fails a premise for want of writes, so
+/// counting it reduces every real difference to the empty stream.
+TEST(DifferentialHarness, ShrinkerIgnoresAPremiseFailure) {
+    const ReplayConfig config{.name = "NeverSheds",
+                              .compression = Compression::None,
+                              .memtable_bytes = 16u << 10,
+                              .budget_bytes = 64u << 20};
+    const std::vector<DiffOp> ops = generate_ops(11, 60);
+
+    const auto failure = replay(ops, config);
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_TRUE(failure->premise) << failure->message;
+    // Bounded: every candidate is replayed, and the property holds however few are tried.
+    EXPECT_EQ(shrink(ops, config, 40).size(), ops.size());
 }
 
 TEST(DifferentialHarness, ShrinkerLeavesAnAlreadyMinimalStreamAlone) {

@@ -111,7 +111,10 @@ jobs:
       - run: ctest --test-dir build/coverage --parallel "$(getconf _NPROCESSORS_ONLN)" || true
       - name: Summarise
         run: |
+          # gcov reports negative branch counts for inlined templates (GCC PR 68080), and gcovr
+          # treats one such line as fatal by default — losing the whole map over a header.
           gcovr --root . --filter 'src/' --filter 'include/' \
+                --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
                 --exclude-unreachable-branches --print-summary \
                 --html-details /tmp/coverage.html --txt /tmp/coverage.txt
           echo '### Coverage' >> "$GITHUB_STEP_SUMMARY"

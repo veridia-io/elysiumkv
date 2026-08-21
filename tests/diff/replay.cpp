@@ -87,8 +87,12 @@ public:
           store_(config.split_stores ? 2 : 1),
           watchdog_(watchdog_timeout(), "differential replay") {
         options_ = config.transient_band
-                       ? make_transient_options(store_, Duration(60'000), Duration(120'000),
-                                                config.memtable_bytes)
+                       ? make_transient_options(store_,
+                                                Duration(config.tier_max_age_ms != 0
+                                                             ? static_cast<int64_t>(
+                                                                   config.tier_max_age_ms)
+                                                             : 60'000),
+                                                Duration(120'000), config.memtable_bytes)
                    : config.split_stores
                        ? make_tiered_options(
                              store_,
@@ -139,6 +143,12 @@ public:
         // Atomic: in threaded mode the flush and background threads read this
         // while the replay advances it.
         options_.clock = [this] { return now_ms_.load(std::memory_order_relaxed); };
+
+        if (config.jitter > 0.0) {
+            if (auto tiers = resolve_tiers(options_.tiers, options_.age_jitter)) {
+                jitter_tiers_ = std::move(*tiers);
+            }
+        }
     }
 
     std::optional<DiffFailure> run(const std::vector<DiffOp>& ops) {
@@ -150,6 +160,7 @@ public:
             if (auto message = apply(ops[i])) {
                 return DiffFailure{i, *message};
             }
+            note_jitter_offsets();
         }
 
         // Final check, then once more after a reopen: the manifest must describe
@@ -179,20 +190,34 @@ public:
             density_compactions_seen_ + engine().density_compactions_for_test() == 0) {
             return DiffFailure{ops.size(),
                                "the tombstone-density trigger never fired, so this configuration "
-                               "tested nothing: raise the delete rate or lower the trigger"};
+                               "tested nothing: raise the delete rate or lower the trigger",
+                               true};
         }
 
         // And for jitter: a configuration whose files all took the same offset spread nothing.
-        if (config_.jitter > 0.0 && distinct_jitter_offsets() < 2) {
+        if (config_.jitter > 0.0 && jitter_offsets_.size() < 2) {
             return DiffFailure{ops.size(),
                                "the age jitter gave every file the same offset, so this "
-                               "configuration spread nothing: raise the write volume"};
+                               "configuration spread nothing: widen the window",
+                               true};
+        }
+
+        // And that an offset decided something. Every crossing happens inside the window by
+        // construction — the jittered bound lies in `[max_age - window, max_age)` — so a band
+        // nothing leaves exercises the derivation and never the decision it feeds.
+        if (config_.jitter > 0.0 && migrations_seen_ + db_->stats().migrations == 0) {
+            return DiffFailure{ops.size(),
+                               "no file ever crossed the jittered tier boundary, so the offsets "
+                               "decided nothing: shorten the hot tier's max_age relative to the "
+                               "run, or raise the write volume",
+                               true};
         }
 
         if (budget_ != nullptr && sheds_seen_ + db_->stats().budget_sheds == 0) {
             return DiffFailure{ops.size(),
                                "the memory budget was never exceeded, so this configuration "
-                               "tested nothing: lower budget_bytes or raise the write volume"};
+                               "tested nothing: lower budget_bytes or raise the write volume",
+                               true};
         }
 
         // The check this list was missing. `TinyCompactionBudget` carried a budget sized
@@ -204,7 +229,8 @@ public:
             return DiffFailure{ops.size(),
                                "max_compaction_bytes never trimmed a compaction, so this "
                                "configuration tested nothing: lower it, or raise the write volume "
-                               "until an L0 closure exceeds it"};
+                               "until an L0 closure exceeds it",
+                               true};
         }
         // A tiered configuration that never moves a file tests placement, not migration. The
         // migrator copies an object between stores byte for byte and *renumbers* it, under reads —
@@ -215,7 +241,8 @@ public:
             return DiffFailure{ops.size(),
                                "no file was ever migrated between tiers, so this configuration "
                                "tested nothing: lower tier0_max_bytes, or raise the write volume "
-                               "until the hot tier exceeds it"};
+                               "until the hot tier exceeds it",
+                               true};
         }
         // A cache that never misses tests half of a cache. `cache_on_write` populates on every
         // write, so a layer sized above the working set serves everything and the refill path —
@@ -238,7 +265,8 @@ public:
                                    std::string("the blob cache ") +
                                        (misses == 0 ? "never missed" : "never hit") +
                                        ", so this configuration tested half a cache: resize the "
-                                       "layers in wrap_in_cache_chain relative to the working set"};
+                                       "layers in wrap_in_cache_chain relative to the working set",
+                                   true};
             }
         }
         return std::nullopt;
@@ -554,22 +582,24 @@ private:
     /// the data lives, never what it says.
     DbImpl& engine() { return *static_cast<DbImpl*>(db_.get()); }
 
-    /// How many *different* age offsets the live files were given. One means the window is
-    /// there and nothing landed in it.
-    size_t distinct_jitter_offsets() {
-        auto tiers = resolve_tiers(options_.tiers, options_.age_jitter);
-        if (!tiers.has_value()) return 0;
-        std::set<uint64_t> offsets;
+    /// Accumulates the age offsets the run's files were given. Per operation and not once at the
+    /// end: an offset is fixed when its file is created, so the final version answers how many
+    /// files outlived the stream rather than how far jitter spread them. `levels()` rather than
+    /// `all_files()`, which copies every `FileMetadata`.
+    void note_jitter_offsets() {
+        if (!jitter_tiers_.has_value()) return;
         auto version = engine().current_version();
-        for (const FileMetadata& file : version->all_files()) {
-            const int at = tiers->tier_of_store(file.store_id);
-            if (at < 0) continue;
-            const Tier& tier = tiers->tiers[static_cast<size_t>(at)];
-            if (!tier.max_age.has_value()) continue;
-            offsets.insert(tier_age_jitter_ms(*tiers, file.file_number, file.min_write_time_ms,
-                                              static_cast<uint64_t>(tier.max_age->count())));
+        for (const auto& level : version->levels()) {
+            for (const FileMetadata& file : level) {
+                const int at = jitter_tiers_->tier_of_store(file.store_id);
+                if (at < 0) continue;
+                const Tier& tier = jitter_tiers_->tiers[static_cast<size_t>(at)];
+                if (!tier.max_age.has_value()) continue;
+                jitter_offsets_.insert(
+                    tier_age_jitter_ms(*jitter_tiers_, file.file_number, file.min_write_time_ms,
+                                       static_cast<uint64_t>(tier.max_age->count())));
+            }
         }
-        return offsets.size();
     }
 
     /// ARCHITECTURE.md "Versions are immutable snapshots" — the failure this component exists to prevent: an iterator reading a
@@ -658,6 +688,10 @@ private:
     uint64_t density_compactions_seen_ = 0;
     uint64_t trims_seen_ = 0;
     uint64_t migrations_seen_ = 0;
+    /// Resolved once, and absent unless the configuration jitters: `options_.tiers` no longer
+    /// changes by the time a replay starts.
+    std::optional<ResolvedTiers> jitter_tiers_;
+    std::set<uint64_t> jitter_offsets_;
     std::unique_ptr<DB> db_;
     Oracle oracle_;
     Oracle flushed_;
@@ -678,7 +712,11 @@ std::vector<DiffOp> shrink(std::vector<DiffOp> ops, const ReplayConfig& config,
     return shrink(
         std::move(ops),
         [&config](const std::vector<DiffOp>& candidate) {
-            return replay(candidate, config).has_value();
+            const auto failure = replay(candidate, config);
+            // A premise failure is never the mismatch being minimized: a shortened candidate
+            // fails one for want of writes, so counting it walks any stream down to empty and
+            // reports "this configuration tested nothing" in place of the difference.
+            return failure.has_value() && !failure->premise;
         },
         max_replays);
 }
