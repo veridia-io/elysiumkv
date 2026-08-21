@@ -64,6 +64,15 @@ std::string report(int seed, const ReplayConfig& config, const DiffFailure& fail
     return out;
 }
 
+/// Reported without shrinking: a premise failure only gets worse as operations are dropped, and
+/// rendering one as a mismatch sends a reader after a bug in an operation the run never performed.
+std::string premise_report(int seed, const ReplayConfig& config, const DiffFailure& failure) {
+    return "\nthe configuration tested nothing\n  config:  " + config.name +
+           "\n  seed:    " + std::to_string(seed) + "\n  message: " + failure.message +
+           "\n\nNo operation disagreed with the oracle. The configuration's own premise is what "
+           "failed, so the fix is to the configuration, not to the engine.\n";
+}
+
 class DifferentialTest : public ::testing::TestWithParam<ReplayConfig> {};
 
 TEST_P(DifferentialTest, MatchesTheOracle) {
@@ -78,6 +87,7 @@ TEST_P(DifferentialTest, MatchesTheOracle) {
             generate_ops(static_cast<uint64_t>(seed), ops_count, generator);
         auto failure = replay(ops, config);
         if (!failure.has_value()) continue;
+        if (failure->premise) FAIL() << premise_report(seed, config, *failure);
 
         // ARCHITECTURE.md "The differential oracle" — a mismatch deep in a million operations is close to
         // undebuggable, so minimize before reporting.
@@ -282,6 +292,7 @@ TEST(ThreadedDifferentialTest, MatchesTheOracleWithThreadsRunning) {
             const std::vector<DiffOp> ops_list = generate_ops(static_cast<uint64_t>(seed), ops);
             auto failure = replay(ops_list, config);
             if (!failure.has_value()) continue;
+            if (failure->premise) FAIL() << premise_report(seed, config, *failure);
 
             // No shrinking here: without reproducibility, delta-debugging cannot
             // tell a fix from luck.
@@ -402,6 +413,23 @@ TEST(DifferentialHarness, ShrinkerMinimizesToTheOperationsThatMatter) {
     // And the report is something a person can read.
     const std::string rendered = describe_ops(minimal);
     EXPECT_NE(rendered.find("the-culprit"), std::string::npos) << rendered;
+}
+
+/// A configuration's own premise is not shrinkable, and the shrinker must not mistake one for
+/// the mismatch it is minimizing: a shortened candidate fails a premise for want of writes, so
+/// counting it reduces every real difference to the empty stream.
+TEST(DifferentialHarness, ShrinkerIgnoresAPremiseFailure) {
+    const ReplayConfig config{.name = "NeverSheds",
+                              .compression = Compression::None,
+                              .memtable_bytes = 16u << 10,
+                              .budget_bytes = 64u << 20};
+    const std::vector<DiffOp> ops = generate_ops(11, 60);
+
+    const auto failure = replay(ops, config);
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_TRUE(failure->premise) << failure->message;
+    // Bounded: every candidate is replayed, and the property holds however few are tried.
+    EXPECT_EQ(shrink(ops, config, 40).size(), ops.size());
 }
 
 TEST(DifferentialHarness, ShrinkerLeavesAnAlreadyMinimalStreamAlone) {

@@ -93,6 +93,11 @@ struct ReplayConfig {
 struct DiffFailure {
     size_t op_index = 0;
     std::string message;
+    /// A premise the configuration asserts about itself — the perturbation it exists to apply
+    /// never happened — rather than a disagreement with the oracle at `op_index`. Dropping
+    /// operations can only make such a premise less true, so shrinking one reduces to the empty
+    /// stream and reports a failure at operation 0 that no operation caused.
+    bool premise = false;
 };
 
 /// Replays an op list against a fresh store and the `std::map` oracle, returning
