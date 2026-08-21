@@ -87,8 +87,12 @@ public:
           store_(config.split_stores ? 2 : 1),
           watchdog_(watchdog_timeout(), "differential replay") {
         options_ = config.transient_band
-                       ? make_transient_options(store_, Duration(60'000), Duration(120'000),
-                                                config.memtable_bytes)
+                       ? make_transient_options(store_,
+                                                Duration(config.tier_max_age_ms != 0
+                                                             ? static_cast<int64_t>(
+                                                                   config.tier_max_age_ms)
+                                                             : 60'000),
+                                                Duration(120'000), config.memtable_bytes)
                    : config.split_stores
                        ? make_tiered_options(
                              store_,
@@ -195,6 +199,17 @@ public:
             return DiffFailure{ops.size(),
                                "the age jitter gave every file the same offset, so this "
                                "configuration spread nothing: widen the window",
+                               true};
+        }
+
+        // And that an offset decided something. Every crossing happens inside the window by
+        // construction — the jittered bound lies in `[max_age - window, max_age)` — so a band
+        // nothing leaves exercises the derivation and never the decision it feeds.
+        if (config_.jitter > 0.0 && migrations_seen_ + db_->stats().migrations == 0) {
+            return DiffFailure{ops.size(),
+                               "no file ever crossed the jittered tier boundary, so the offsets "
+                               "decided nothing: shorten the hot tier's max_age relative to the "
+                               "run, or raise the write volume",
                                true};
         }
 
@@ -580,9 +595,9 @@ private:
                 if (at < 0) continue;
                 const Tier& tier = jitter_tiers_->tiers[static_cast<size_t>(at)];
                 if (!tier.max_age.has_value()) continue;
-                jitter_offsets_.insert(tier_age_jitter_ms(
-                    *jitter_tiers_, file.file_number, file.min_write_time_ms,
-                    static_cast<uint64_t>(tier.max_age->count())));
+                jitter_offsets_.insert(
+                    tier_age_jitter_ms(*jitter_tiers_, file.file_number, file.min_write_time_ms,
+                                       static_cast<uint64_t>(tier.max_age->count())));
             }
         }
     }

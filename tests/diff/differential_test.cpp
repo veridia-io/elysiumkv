@@ -140,11 +140,21 @@ INSTANTIATE_TEST_SUITE_P(
         // The same transient band with the age trigger spread. Jitter decides *when* a file
         // crosses to the colder tier, so every answer here must be identical to `TransientBand`
         // — and if it is not, the offset has leaked into something it must not touch.
+        //
+        // The age is 20 s of the replay's virtual clock against a run of 30 s at 3,000 operations,
+        // and it is sized by measurement: at the 60 s the transient helper defaults to, no file was
+        // old enough to cross before the stream ended, so the offsets were derived and then
+        // decided nothing. Shorter is not better either — placement puts a compaction output on
+        // the tier its oldest write belongs to, so past a few multiples of the age every output is
+        // born cold and the boundary is never crossed at all. Measured across 100 seeds at 20 s:
+        // 2 to 7 crossings per run, against 0 to 2 at 60 s. Worth re-measuring if the memtable
+        // size, the op mix or the clock step here change.
         ReplayConfig{.name = "JitteredTransientBand",
                      .compression = Compression::Zstd,
                      .split_stores = true,
                      .transient_band = true,
-                     .jitter = 0.25},
+                     .jitter = 0.25,
+                     .tier_max_age_ms = 20'000},
         // ARCHITECTURE.md "Caches chain" — the same oracle with a memory-over-disk chain in front of every tier. If a
         // cache is invisible to the engine, this cannot differ from `Zstd`.
         ReplayConfig{.name = "CachedChain", .compression = Compression::Zstd, .cached = true},

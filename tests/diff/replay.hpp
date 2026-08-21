@@ -40,12 +40,6 @@ struct ReplayConfig {
     /// object at the last one, so an off-by-one in the slicing shows up as a wrong value or a
     /// short read — which the oracle catches and a request-count test cannot.
     size_t cache_fetch_granularity = 0;
-    /// Compacts a file once this fraction of its entries are tombstones; zero leaves it off.
-    ///
-    /// Changes when compaction happens, and nothing else. Every answer must be identical to
-    /// the same stream without it — a trigger that fired on the wrong file, or dropped a live key
-    /// while reclaiming a tombstone, is a difference the oracle sees and a picker unit test does
-    /// not, because the unit test never replays the compaction it asked for.
     /// `Options::age_jitter`. Changes when a file crosses to a colder tier, and nothing else —
     /// every answer must be identical to the same stream without it, which is the property. Only
     /// meaningful alongside a tier that bounds age.
@@ -63,14 +57,22 @@ struct ReplayConfig {
     /// cold and the migrator never has anything to move. A byte cap does not depend on the clock
     /// at all, which also keeps the replay reproducible.
     size_t tier0_max_bytes = 0;
-    /// `Tier::max_age` on the hot tier, in milliseconds; zero leaves the 50 ms default. Set it far
-    /// past the run's duration to take age out of the placement decision, so `tier0_max_bytes` is
-    /// the only thing moving files.
+    /// `Tier::max_age` on the hot tier, in milliseconds; zero leaves the default, which is 50 ms
+    /// for a tiered configuration and 60 s for a transient band. Set it far past the run's duration
+    /// to take age out of the placement decision, so `tier0_max_bytes` is the only thing moving
+    /// files — or within it, to make the age bound itself the thing under test. The replay's clock
+    /// advances 10 ms per operation, so the run is that long in these units.
     uint64_t tier_max_age_ms = 0;
     /// Distinct keys the op stream draws from; zero leaves the generator's default. A narrow
     /// keyspace makes every operation land on top of another, which is what puts a *stale* value
     /// under a newer one — without that there is nothing for a mis-ordered compaction to uncover.
     int distinct_keys = 0;
+    /// Compacts a file once this fraction of its entries are tombstones; zero leaves it off.
+    ///
+    /// Changes when compaction happens, and nothing else. Every answer must be identical to
+    /// the same stream without it — a trigger that fired on the wrong file, or dropped a live key
+    /// while reclaiming a tombstone, is a difference the oracle sees and a picker unit test does
+    /// not, because the unit test never replays the compaction it asked for.
     double tombstone_density_trigger = 0.0;
     /// ARCHITECTURE.md "A process-wide memory budget" — a shared `MemoryBudget` of this size, or none when zero.
     ///
