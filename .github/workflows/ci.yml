@@ -248,16 +248,25 @@ jobs:
           - {os: ubuntu-latest,    arch: x86_64}
           - {os: ubuntu-24.04-arm, arch: aarch64}
     steps:
+      # Before any JavaScript action. The runner ships a musl Node only for x64, so an arm64 runner
+      # with an Alpine container refuses checkout outright: "JavaScript Actions in Alpine containers
+      # are only supported on x64 Linux runners". Renaming the distribution sends it to the glibc
+      # Node instead, and gcompat is what that Node runs against.
+      - name: Bootstrap glibc compatibility
+        run: |
+          apk add --no-cache gcompat
+          sed -i "s:ID=alpine:ID=NotpineForGHA:" /etc/os-release
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
       - name: Install build tools
         # No vcpkg: its lz4 port does not build under musl. Alpine's own zstd, lz4, OpenSSL and
         # gtest are used instead, which the CMake pkg-config fallback exists to make possible.
         run: |
           apk add --no-cache build-base cmake ninja git zstd-dev lz4-dev openssl-dev \
               gtest-dev linux-headers pkgconf
-
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
 
       # One preset, deliberately. This job answers "does the engine work when libc is not glibc",
       # which is a yes-or-no about the C++ rather than something the sanitiser or thread presets

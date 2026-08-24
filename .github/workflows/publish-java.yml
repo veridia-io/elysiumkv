@@ -202,6 +202,15 @@ jobs:
           - {os: ubuntu-latest,    platform: linux-x86_64-musl}
           - {os: ubuntu-24.04-arm, platform: linux-aarch64-musl}
     steps:
+      # Before any JavaScript action. The runner ships a musl Node only for x64, so an arm64 runner
+      # with an Alpine container refuses checkout outright: "JavaScript Actions in Alpine containers
+      # are only supported on x64 Linux runners". Renaming the distribution sends it to the glibc
+      # Node instead, and gcompat is what that Node runs against.
+      - name: Bootstrap glibc compatibility
+        run: |
+          apk add --no-cache gcompat
+          sed -i "s:ID=alpine:ID=NotpineForGHA:" /etc/os-release
+
       - name: Install build tools
         run: |
           apk add --no-cache build-base cmake ninja git curl-dev zlib-dev openssl-dev \
@@ -213,7 +222,8 @@ jobs:
 
       # Pinned, and the version is load-bearing rather than "recent": conditional writes on
       # PutObject arrived after the release Alpine packages, and the manifest catalog's whole
-      # correctness argument is that compare-and-set.
+      # correctness argument is that compare-and-set. The glibc job checks this against what vcpkg
+      # actually installs, so the two libcs cannot drift onto different SDKs.
       - name: Cache the AWS SDK
         id: sdk-cache
         uses: actions/cache@v4
