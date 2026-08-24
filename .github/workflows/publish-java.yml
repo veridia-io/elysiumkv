@@ -255,8 +255,13 @@ jobs:
           apk add --no-cache build-base cmake ninja zstd-dev lz4-dev openssl-dev curl-dev \
               zlib-dev linux-headers pkgconf openjdk11
           export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+          # Tests, CLI and benchmarks off: this job builds one shared object, and each of the
+          # three pulls a dependency the container does not have — gtest, cli11 and friends, google
+          # benchmark. Tests default to ON, so leaving them out is not the same as not needing them.
           cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_PREFIX_PATH=/work/aws-sdk-install -DELYSIUMKV_BUILD_AWS=ON \
+                -DELYSIUMKV_BUILD_TESTS=OFF -DELYSIUMKV_BUILD_CLI=OFF \
+                -DELYSIUMKV_BUILD_BENCH=OFF \
                 -DELYSIUMKV_VERSION="$ELYSIUMKV_VERSION"
           # A stale CMakeCache would silently keep an older value, and the generated header is the
           # only place the result is observable before the library is in someone's hands.
