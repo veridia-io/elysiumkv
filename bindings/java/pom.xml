@@ -349,6 +349,14 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-source-plugin</artifactId>
         <version>3.3.1</version>
+        <configuration>
+          <!-- Sources only. The plugin includes resource directories by default, and this project's
+               resources are the native libraries — so without this the sources jar carries every
+               platform's .so and .dylib, and is larger than the jar that exists to deliver them.
+               Nobody reading sources wants them, and every IDE that auto-fetches sources pays for
+               them. -->
+          <excludeResources>true</excludeResources>
+        </configuration>
         <executions>
           <execution>
             <id>attach-sources</id>
