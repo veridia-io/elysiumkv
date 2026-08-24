@@ -51,7 +51,13 @@ final class NativeLibrary {
                 throw new UnsatisfiedLinkError(
                         "no native library at " + resource + " in this jar, and -D" + PROPERTY
                                 + " is unset. The jar was built without a native artifact for "
-                                + platform() + ".");
+                                + platform() + "."
+                                + (platform().endsWith("-musl")
+                                        ? " This is a musl system: the published jar carries"
+                                                + " glibc builds only, so run on a glibc image or"
+                                                + " build the library from source and point -D"
+                                                + PROPERTY + " at it."
+                                        : ""));
             }
             Path extracted = extract(in);
             System.load(extracted.toString());
@@ -114,8 +120,30 @@ final class NativeLibrary {
         }
     }
 
+    /**
+     * The directory this jar is searched for, {@code {os}-{arch}} plus a libc suffix on musl.
+     *
+     * <p>The libc matters and the {@code {os}-{arch}} pair cannot express it. A library built
+     * against glibc does not run on musl, but both report {@code linux} and {@code x86_64} — so
+     * without the suffix Alpine finds a match, extracts it, and fails inside {@code dlopen} with a
+     * missing-symbol relocation error that names the library rather than the distribution. Naming
+     * the libc turns that into a miss, and a miss says what is actually wrong.
+     */
     static String platform() {
-        return osName() + "-" + archName();
+        String platform = osName() + "-" + archName();
+        return platform.startsWith("linux-") && isMusl() ? platform + "-musl" : platform;
+    }
+
+    /**
+     * Whether this is a musl system, decided by the dynamic loader that is present.
+     *
+     * <p>The loader's own path carries the libc's name and the architecture, so its existence is the
+     * fact rather than a proxy for it. Preferred over parsing {@code ldd --version} or
+     * {@code /proc/self/maps}: no subprocess, nothing to parse, and it is equally true in a
+     * distroless or scratch image where neither of those exists.
+     */
+    private static boolean isMusl() {
+        return Files.exists(Path.of("/lib/ld-musl-" + archName() + ".so.1"));
     }
 
     private static String osName() {

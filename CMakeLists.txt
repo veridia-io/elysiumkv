@@ -85,8 +85,24 @@ configure_file(
     @ONLY)
 
 # --- dependencies -------------------------------------------------------------
-find_package(zstd CONFIG REQUIRED)
-find_package(lz4 CONFIG REQUIRED)
+# CONFIG first, then pkg-config. vcpkg installs CMake config packages for both, which is what every
+# release build uses — but a distribution that ships only a `.pc` file is not an unusual way to get
+# these, and CONFIG-only turns that into "zstd not found" on a system where zstd is plainly
+# installed. Alpine is the case that forced this: it packages zstd, lz4 and the AWS SDK, but only
+# the SDK brings CMake configs.
+find_package(zstd CONFIG QUIET)
+find_package(lz4 CONFIG QUIET)
+if(NOT zstd_FOUND OR NOT lz4_FOUND)
+    find_package(PkgConfig REQUIRED)
+    if(NOT zstd_FOUND)
+        pkg_check_modules(PC_ZSTD REQUIRED IMPORTED_TARGET libzstd)
+        add_library(zstd::libzstd ALIAS PkgConfig::PC_ZSTD)
+    endif()
+    if(NOT lz4_FOUND)
+        pkg_check_modules(PC_LZ4 REQUIRED IMPORTED_TARGET liblz4)
+        add_library(lz4::lz4 ALIAS PkgConfig::PC_LZ4)
+    endif()
+endif()
 
 # **Crypto is not hand-rolled here.** AES-256-GCM with hardware acceleration, a vetted
 # implementation and an audit trail is what an encryption-at-rest claim rests on; writing one is

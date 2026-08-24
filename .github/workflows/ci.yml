@@ -234,6 +234,50 @@ jobs:
             exit 1
           fi
 
+  musl:
+    name: alpine / release / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    container: alpine:3.20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, for the reason the glibc matrix gives: CRC32 dispatches on SSE4.2 or on the ARMv8
+        # CRC extension, and one arch can silently fall back to the software path while the other
+        # does not. The libc does not change that, and the jar ships both musl keys.
+        include:
+          - {os: ubuntu-latest,    arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    steps:
+      - name: Install build tools
+        # No vcpkg: its lz4 port does not build under musl. Alpine's own zstd, lz4, OpenSSL and
+        # gtest are used instead, which the CMake pkg-config fallback exists to make possible.
+        run: |
+          apk add --no-cache build-base cmake ninja git zstd-dev lz4-dev openssl-dev \
+              gtest-dev linux-headers pkgconf
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # One preset, deliberately. This job answers "does the engine work when libc is not glibc",
+      # which is a yes-or-no about the C++ rather than something the sanitiser or thread presets
+      # would say differently — and those already run four-deep on the glibc side.
+      #
+      # No preset file: the presets set the vcpkg toolchain, which is the one thing that cannot work
+      # here. The cache variables that matter are set by hand instead. AWS is off because its tests
+      # need LocalStack and building the SDK from source is forty minutes; the release workflow's
+      # musl job is where the AWS build is proven.
+      - name: Configure and build
+        run: |
+          cmake -S . -B build/musl -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DELYSIUMKV_BUILD_TESTS=ON -DELYSIUMKV_WERROR=ON \
+                -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF
+          cmake --build build/musl
+
+      - name: Test
+        working-directory: build/musl
+        run: ctest --output-on-failure -j"$(nproc)"
+
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
     runs-on: ${{ matrix.os }}
@@ -250,7 +294,13 @@ jobs:
         # ubuntu-latest is x86-64 and macos-latest is arm64, so those two cover
         # both arches; ubuntu-24.04-arm covers arm64 under gcc, which is the
         # combination with no other home and the one that caught this.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        #
+        # macos-13 completes the grid: x86-64 under Apple Clang, which is the
+        # last of {gcc, clang} x {x86-64, arm64} with nowhere else to run. It is
+        # also the platform the jar ships as darwin-x86_64 and the one an x86-64
+        # JDK asks for under Rosetta, so it is a shipped artifact rather than a
+        # hypothetical.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13]
         preset: [debug, release, asan-ubsan, tsan]
     steps:
       - uses: actions/checkout@v7
@@ -351,6 +401,9 @@ jobs:
           - {os: ubuntu-latest,    jdk: '11'}
           - {os: ubuntu-24.04-arm, jdk: '11'}
           - {os: macos-latest,     jdk: '11'}
+          # The jar ships darwin-x86_64, so by this job's own rule it runs here: an x86_64 JDK
+          # asks for that key, including under Rosetta on Apple Silicon.
+          - {os: macos-13,         jdk: '11'}
           - {os: ubuntu-latest,    jdk: '25'}
     steps:
       - uses: actions/checkout@v7
