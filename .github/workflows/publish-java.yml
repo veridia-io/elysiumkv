@@ -69,10 +69,6 @@ jobs:
           - {os: ubuntu-latest,    platform: linux-x86_64,   library: libelysiumkv_jni.so}
           - {os: ubuntu-24.04-arm, platform: linux-aarch64,  library: libelysiumkv_jni.so}
           - {os: macos-latest,     platform: darwin-aarch64, library: libelysiumkv_jni.dylib}
-          # Intel Macs, and not only Intel Macs: an x86_64 JDK on Apple Silicon reports
-          # os.arch=x86_64 under Rosetta, so the loader asks for this key on a machine that has the
-          # aarch64 library sitting in the same jar. macos-13 is the last Intel runner.
-          - {os: macos-13,         platform: darwin-x86_64,  library: libelysiumkv_jni.dylib}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -340,11 +336,10 @@ jobs:
                        linux-aarch64/libelysiumkv_jni.so \
                        linux-x86_64-musl/libelysiumkv_jni.so \
                        linux-aarch64-musl/libelysiumkv_jni.so \
-                       darwin-aarch64/libelysiumkv_jni.dylib \
-                       darwin-x86_64/libelysiumkv_jni.dylib; do
+                       darwin-aarch64/libelysiumkv_jni.dylib; do
             [ -s "$entry" ] || { echo "missing or empty: $entry" >&2; exit 1; }
           done
-          echo "all six platform libraries staged"
+          echo "all five platform libraries staged"
 
       # Runs the test suite as part of the lifecycle, and deliberately *without*
       # -Delysiumkv.library.path: that exercises extraction against the assembled multi-platform
@@ -384,8 +379,7 @@ jobs:
                        native/linux-aarch64/libelysiumkv_jni.so \
                        native/linux-x86_64-musl/libelysiumkv_jni.so \
                        native/linux-aarch64-musl/libelysiumkv_jni.so \
-                       native/darwin-aarch64/libelysiumkv_jni.dylib \
-                       native/darwin-x86_64/libelysiumkv_jni.dylib; do
+                       native/darwin-aarch64/libelysiumkv_jni.dylib; do
             jar tf "$JAR" | grep -qx "$entry" || { echo "missing $entry" >&2; exit 1; }
           done
           echo "all platforms present"

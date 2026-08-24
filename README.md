@@ -633,7 +633,7 @@ load fails:
 | `linux-x86_64` | yes | glibc |
 | `linux-aarch64` | yes | glibc |
 | `darwin-aarch64` | yes | Apple Silicon |
-| `darwin-x86_64` | yes | Intel Macs, and an x86_64 JDK under Rosetta, which reports `os.arch=x86_64` on Apple Silicon |
+| `darwin-x86_64` | **no** | Intel Macs — see below |
 | `linux-x86_64-musl` | yes | Alpine and other musl distributions |
 | `linux-aarch64-musl` | yes | as above |
 | `windows-x86_64` | **no** | see below |
@@ -653,6 +653,12 @@ under musl. So that job takes zstd, lz4 and OpenSSL from Alpine and builds the S
 Building on Alpine yourself: Maven cannot detect a libc, so pass
 `-Delysiumkv.platform=linux-x86_64-musl` to package it under the key the loader will ask for, or
 point `-Delysiumkv.library.path` straight at the build and skip extraction.
+
+**Intel Macs.** Not built. The catch is that this is not only about Intel hardware: an x86_64 JDK
+reports `os.arch=x86_64` even on Apple Silicon under Rosetta, so the loader asks for
+`darwin-x86_64` on a machine whose `darwin-aarch64` library is sitting unused in the same jar. If a
+load fails on a Mac, check `java -XshowSettings:properties -version 2>&1 | grep os.arch` before
+anything else; an arm64 JDK is the fix.
 
 **Windows.** Not supported, and further off than "untested": `disk_blob_store.cpp`,
 `disk_manifest_catalog.cpp`, `disk_cache_blob_store.cpp` and `open_file_cache.hpp` use `unistd.h`,
@@ -677,11 +683,10 @@ there is no repair verb yet.
 
 ## Testing
 
-Sanitizers are a build gate, not an option. CI runs every preset on all four
-glibc platforms — both architectures under both compilers — plus the release
-preset on both Alpine architectures, which answers whether the engine works when
-libc is not glibc without repeating the sanitiser and thread runs. The Java
-binding runs on JDK 11 and 25.
+Sanitizers are a build gate, not an option. CI runs every preset on all three
+glibc platforms, plus the release preset on both Alpine architectures — which
+answers whether the engine works when libc is not glibc, without repeating the
+sanitiser and thread runs. The Java binding runs on JDK 11 and 25.
 
 | Suite                    | Covers                                                                                                           |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------- |

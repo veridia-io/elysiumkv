@@ -299,13 +299,7 @@ jobs:
         # ubuntu-latest is x86-64 and macos-latest is arm64, so those two cover
         # both arches; ubuntu-24.04-arm covers arm64 under gcc, which is the
         # combination with no other home and the one that caught this.
-        #
-        # macos-13 completes the grid: x86-64 under Apple Clang, which is the
-        # last of {gcc, clang} x {x86-64, arm64} with nowhere else to run. It is
-        # also the platform the jar ships as darwin-x86_64 and the one an x86-64
-        # JDK asks for under Rosetta, so it is a shipped artifact rather than a
-        # hypothetical.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         preset: [debug, release, asan-ubsan, tsan]
     steps:
       - uses: actions/checkout@v7
@@ -406,9 +400,6 @@ jobs:
           - {os: ubuntu-latest,    jdk: '11'}
           - {os: ubuntu-24.04-arm, jdk: '11'}
           - {os: macos-latest,     jdk: '11'}
-          # The jar ships darwin-x86_64, so by this job's own rule it runs here: an x86_64 JDK
-          # asks for that key, including under Rosetta on Apple Silicon.
-          - {os: macos-13,         jdk: '11'}
           - {os: ubuntu-latest,    jdk: '25'}
     steps:
       - uses: actions/checkout@v7
