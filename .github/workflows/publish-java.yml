@@ -194,12 +194,6 @@ jobs:
     name: native / ${{ matrix.platform }}
     needs: version
     runs-on: ${{ matrix.os }}
-    container:
-      image: alpine:3.20
-      # Empty entrypoint so the container is up before any step runs, which is what lets the first
-      # step install a node the runner might use.
-      options: >-
-        --entrypoint ""
     strategy:
       fail-fast: false
       matrix:
@@ -207,26 +201,6 @@ jobs:
           - {os: ubuntu-latest,    platform: linux-x86_64-musl}
           - {os: ubuntu-24.04-arm, platform: linux-aarch64-musl}
     steps:
-      # Before any JavaScript action. The runner ships a musl Node only for x64, so an arm64 runner
-      # with an Alpine container refuses checkout outright: "JavaScript Actions in Alpine containers
-      # are only supported on x64 Linux runners". Renaming the distribution gets past that check,
-      # which routes the runner to its glibc Node — so both a native musl node and the glibc
-      # shims are installed, and whichever one the runner reaches for is satisfied.
-      - name: Install native Alpine node
-        run: |
-          apk add --no-cache nodejs gcompat libstdc++ libgcc
-          sed -i "s:ID=alpine:ID=NotpineForGHA:" /etc/os-release
-          # Aliased rather than symlinked over the runner's own binary, which is bind-mounted
-          # read-only. The shebang matters: without it execve returns ENOEXEC and nothing runs it.
-          mkdir -p /usr/local/bin
-          printf '#!/bin/sh\nexec /usr/bin/node "$@"\n' > /usr/local/bin/node
-          chmod +x /usr/local/bin/node
-
-      - name: Install build tools
-        run: |
-          apk add --no-cache build-base cmake ninja git curl-dev zlib-dev openssl-dev \
-              zstd-dev lz4-dev linux-headers pkgconf openjdk11 tar
-
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
@@ -235,16 +209,28 @@ jobs:
       # PutObject arrived after the release Alpine packages, and the manifest catalog's whole
       # correctness argument is that compare-and-set. The glibc job checks this against what vcpkg
       # actually installs, so the two libcs cannot drift onto different SDKs.
+      #
+      # Under the workspace so the cache action can reach it on the host and the container can see
+      # it at the same path — the SDK's exported CMake configs carry their install prefix, so it has
+      # to be mounted where it was built.
       - name: Cache the AWS SDK
         id: sdk-cache
         uses: actions/cache@v4
         with:
-          path: /opt/aws
+          path: aws-sdk-install
           key: aws-sdk-musl-${{ matrix.platform }}-${{ env.AWS_SDK_VERSION }}
 
+      # Docker rather than `container:`, which would run every step inside Alpine. The runner's
+      # JavaScript actions — checkout, cache, upload-artifact — need a Node it ships as a musl build
+      # for x64 only, and renaming the distribution to get past that check routes both architectures
+      # to the glibc Node, which gcompat cannot carry. Keeping the actions on the host sidesteps it:
+      # only the build needs musl.
       - name: Build the AWS SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
+          cat > musl-sdk.sh <<'SCRIPT'
+          set -eux
+          apk add --no-cache build-base cmake ninja git curl-dev zlib-dev openssl-dev
           git clone -q --depth 1 --branch "$AWS_SDK_VERSION" --recurse-submodules \
               --shallow-submodules https://github.com/aws/aws-sdk-cpp.git /sdk
           # USE_AWS_MEMORY_MANAGEMENT=OFF is what makes Aws::String an ordinary std::string, which
@@ -252,28 +238,36 @@ jobs:
           cmake -S /sdk -B /sdk/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DBUILD_ONLY="s3;dynamodb;kms" -DENABLE_TESTING=OFF -DAUTORUN_UNIT_TESTS=OFF \
                 -DUSE_AWS_MEMORY_MANAGEMENT=OFF -DBUILD_SHARED_LIBS=OFF \
-                -DCMAKE_INSTALL_PREFIX=/opt/aws
+                -DCMAKE_INSTALL_PREFIX=/work/aws-sdk-install
           cmake --build /sdk/build --target install
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work -e AWS_SDK_VERSION alpine:3.20 sh musl-sdk.sh
+        env:
+          AWS_SDK_VERSION: ${{ env.AWS_SDK_VERSION }}
 
+      # The ldd check runs in the container on purpose: the host is glibc and its ldd says nothing
+      # useful about a musl object. A glibc build would otherwise upload cleanly and fail inside
+      # dlopen in somebody's cluster.
       - name: Build the native library
         run: |
+          cat > musl-jni.sh <<'SCRIPT'
+          set -eux
+          apk add --no-cache build-base cmake ninja zstd-dev lz4-dev openssl-dev curl-dev \
+              zlib-dev linux-headers pkgconf openjdk11
           export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
           cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_PREFIX_PATH=/opt/aws -DELYSIUMKV_BUILD_AWS=ON \
+                -DCMAKE_PREFIX_PATH=/work/aws-sdk-install -DELYSIUMKV_BUILD_AWS=ON \
                 -DELYSIUMKV_VERSION="$ELYSIUMKV_VERSION"
-          grep -F "\"$ELYSIUMKV_VERSION\"" \
-              build/release/generated/elysiumkv/elysiumkv_version.hpp \
-            || { echo "the build is not reporting $ELYSIUMKV_VERSION" >&2; exit 1; }
+          # A stale CMakeCache would silently keep an older value, and the generated header is the
+          # only place the result is observable before the library is in someone's hands.
+          grep -F "$ELYSIUMKV_VERSION" \
+              build/release/generated/elysiumkv/elysiumkv_version.hpp
           cmake --build build/release --target elysiumkv_jni
+          ldd build/release/libelysiumkv_jni.so | grep -q ld-musl
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work -e ELYSIUMKV_VERSION alpine:3.20 sh musl-jni.sh
         env:
           ELYSIUMKV_VERSION: ${{ needs.version.outputs.version }}
-
-      # The one check that matters for this platform: a glibc build would have resolved and failed
-      # inside dlopen, so proving the loader is musl's is proving the artifact is the right one.
-      - name: Verify it is a musl binary
-        run: |
-          ldd build/release/libelysiumkv_jni.so | grep -q "ld-musl" \
-            || { echo "not linked against musl" >&2; ldd build/release/libelysiumkv_jni.so; exit 1; }
 
       - name: Upload
         uses: actions/upload-artifact@v6
@@ -383,7 +377,10 @@ jobs:
           echo "checking $JAR"
           for entry in native/linux-x86_64/libelysiumkv_jni.so \
                        native/linux-aarch64/libelysiumkv_jni.so \
-                       native/darwin-aarch64/libelysiumkv_jni.dylib; do
+                       native/linux-x86_64-musl/libelysiumkv_jni.so \
+                       native/linux-aarch64-musl/libelysiumkv_jni.so \
+                       native/darwin-aarch64/libelysiumkv_jni.dylib \
+                       native/darwin-x86_64/libelysiumkv_jni.dylib; do
             jar tf "$JAR" | grep -qx "$entry" || { echo "missing $entry" >&2; exit 1; }
           done
           echo "all platforms present"

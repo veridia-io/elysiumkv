@@ -237,12 +237,6 @@ jobs:
   musl:
     name: alpine / release / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-    container:
-      image: alpine:3.20
-      # Empty entrypoint so the container is up before any step runs, which is what lets the first
-      # step install a node the runner might use.
-      options: >-
-        --entrypoint ""
     strategy:
       fail-fast: false
       matrix:
@@ -253,50 +247,41 @@ jobs:
           - {os: ubuntu-latest,    arch: x86_64}
           - {os: ubuntu-24.04-arm, arch: aarch64}
     steps:
-      # Before any JavaScript action. The runner ships a musl Node only for x64, so an arm64 runner
-      # with an Alpine container refuses checkout outright: "JavaScript Actions in Alpine containers
-      # are only supported on x64 Linux runners". Renaming the distribution gets past that check,
-      # which routes the runner to its glibc Node — so both a native musl node and the glibc
-      # shims are installed, and whichever one the runner reaches for is satisfied.
-      - name: Install native Alpine node
-        run: |
-          apk add --no-cache nodejs gcompat libstdc++ libgcc
-          sed -i "s:ID=alpine:ID=NotpineForGHA:" /etc/os-release
-          # Aliased rather than symlinked over the runner's own binary, which is bind-mounted
-          # read-only. The shebang matters: without it execve returns ENOEXEC and nothing runs it.
-          mkdir -p /usr/local/bin
-          printf '#!/bin/sh\nexec /usr/bin/node "$@"\n' > /usr/local/bin/node
-          chmod +x /usr/local/bin/node
-
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - name: Install build tools
-        # No vcpkg: its lz4 port does not build under musl. Alpine's own zstd, lz4, OpenSSL and
-        # gtest are used instead, which the CMake pkg-config fallback exists to make possible.
-        run: |
-          apk add --no-cache build-base cmake ninja git zstd-dev lz4-dev openssl-dev \
-              gtest-dev linux-headers pkgconf
-
+      # Docker rather than `container:`, which would run every step inside Alpine. The runner's
+      # JavaScript actions need a Node it ships as a musl build for x64 only, so an arm64 runner
+      # refuses outright: "JavaScript Actions in Alpine containers are only supported on x64 Linux
+      # runners". Renaming the distribution gets past that check but routes *both* architectures to
+      # the glibc Node, which gcompat cannot carry — it is one symbol short, and supplying that
+      # symbol only moves the failure to an abort in Node's threading.
+      #
+      # Keeping the actions on the host sidesteps all of it: only the build needs musl.
+      #
       # One preset, deliberately. This job answers "does the engine work when libc is not glibc",
       # which is a yes-or-no about the C++ rather than something the sanitiser or thread presets
       # would say differently — and those already run four-deep on the glibc side.
       #
-      # No preset file: the presets set the vcpkg toolchain, which is the one thing that cannot work
-      # here. The cache variables that matter are set by hand instead. AWS is off because its tests
+      # No preset file: the presets set the vcpkg toolchain, which cannot work here — vcpkg's lz4
+      # port does not build under musl. Alpine's own zstd, lz4, OpenSSL and gtest are used instead,
+      # which the CMake pkg-config fallback exists to make possible. AWS is off because its tests
       # need LocalStack and building the SDK from source is forty minutes; the release workflow's
       # musl job is where the AWS build is proven.
-      - name: Configure and build
+      - name: Build and test under musl
         run: |
+          cat > musl-ci.sh <<'SCRIPT'
+          set -eux
+          apk add --no-cache build-base cmake ninja git zstd-dev lz4-dev openssl-dev \
+              gtest-dev linux-headers pkgconf
           cmake -S . -B build/musl -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                 -DELYSIUMKV_BUILD_TESTS=ON -DELYSIUMKV_WERROR=ON \
                 -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF
           cmake --build build/musl
-
-      - name: Test
-        working-directory: build/musl
-        run: ctest --output-on-failure -j"$(nproc)"
+          cd build/musl && ctest --output-on-failure -j"$(nproc)"
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work alpine:3.20 sh musl-ci.sh
 
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
