@@ -194,7 +194,12 @@ jobs:
     name: native / ${{ matrix.platform }}
     needs: version
     runs-on: ${{ matrix.os }}
-    container: alpine:3.20
+    container:
+      image: alpine:3.20
+      # Empty entrypoint so the container is up before any step runs, which is what lets the first
+      # step install a node the runner might use.
+      options: >-
+        --entrypoint ""
     strategy:
       fail-fast: false
       matrix:
@@ -204,12 +209,18 @@ jobs:
     steps:
       # Before any JavaScript action. The runner ships a musl Node only for x64, so an arm64 runner
       # with an Alpine container refuses checkout outright: "JavaScript Actions in Alpine containers
-      # are only supported on x64 Linux runners". Renaming the distribution sends it to the glibc
-      # Node instead, and gcompat is what that Node runs against.
-      - name: Bootstrap glibc compatibility
+      # are only supported on x64 Linux runners". Renaming the distribution gets past that check,
+      # which routes the runner to its glibc Node — so both a native musl node and the glibc
+      # shims are installed, and whichever one the runner reaches for is satisfied.
+      - name: Install native Alpine node
         run: |
-          apk add --no-cache gcompat
+          apk add --no-cache nodejs gcompat libstdc++ libgcc
           sed -i "s:ID=alpine:ID=NotpineForGHA:" /etc/os-release
+          # Aliased rather than symlinked over the runner's own binary, which is bind-mounted
+          # read-only. The shebang matters: without it execve returns ENOEXEC and nothing runs it.
+          mkdir -p /usr/local/bin
+          printf '#!/bin/sh\nexec /usr/bin/node "$@"\n' > /usr/local/bin/node
+          chmod +x /usr/local/bin/node
 
       - name: Install build tools
         run: |
