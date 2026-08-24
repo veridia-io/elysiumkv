@@ -121,7 +121,16 @@ public final class PartitionedStore<K> implements AutoCloseable {
                 // Closed *with* a flush, deliberately. Whatever the restore managed to apply came
                 // from the log and its watermark covers exactly that, so keeping it is both safe and
                 // the reason a retried restore resumes rather than starting over.
-                db.close();
+                //
+                // Attached rather than substituted, because this partition is not in `partitions`
+                // and never will be: a close that throws would otherwise replace the restore's
+                // failure — the one the caller can act on — with its own consequence, and leave
+                // nothing to say which partition it belonged to.
+                try {
+                    db.close();
+                } catch (RuntimeException | Error cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
                 throw failure;
             }
             partitions.put(id, partition);
@@ -236,9 +245,41 @@ public final class PartitionedStore<K> implements AutoCloseable {
                 continue;
             }
             dropStaged(id);
-            partition.db.flush();
-            partition.db.close();
+            closeFlushing(partition.db);
         }
+    }
+
+    /**
+     * Flushes and closes, and closes even when the flush fails.
+     *
+     * <p>The flush is the fallible half — it writes to the durable tier and takes the manifest's
+     * compare-and-set, so a fenced writer or an object-store error surfaces here. Letting that
+     * failure skip the close is not a smaller problem than the failure: this partition has already
+     * been removed from {@code partitions}, so nothing can reach the database again and no caller
+     * can close it. Its compaction and migration threads keep running against handles the caller is
+     * entitled to release the moment this returns, and the only way to reclaim them becomes ending
+     * the process.
+     *
+     * <p>Closing without the flush is safe in a way that is specific to this class: a partitioned
+     * store is fed from a log, and the durable watermark covers only what was flushed — so
+     * everything the memtable still holds is replayed from that watermark by whoever takes the
+     * partition next. Losing it costs a longer replay, not a value.
+     *
+     * <p>The flush failure is what propagates; a close that also fails is attached to it. The caller
+     * needs to know the flush did not happen, and the close is the consequence, not the cause.
+     */
+    private static void closeFlushing(ElysiumKV db) {
+        try {
+            db.flush();
+        } catch (RuntimeException | Error failure) {
+            try {
+                db.closeWithoutFlush();
+            } catch (RuntimeException | Error cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+        db.close();
     }
 
     /**
@@ -249,14 +290,29 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * had not reached disk is redelivered from the log to whoever owns it now.
      */
     public void lost(Collection<Integer> ids) {
+        Throwable lostFailure = null;
         for (int id : new TreeSet<>(Objects.requireNonNull(ids, "ids"))) {
             Partition partition = partitions.remove(id);
             if (partition == null) {
                 continue;
             }
             dropStaged(id);
-            partition.db.closeWithoutFlush();
+            try {
+                partition.db.closeWithoutFlush();
+            } catch (RuntimeException | Error failure) {
+                // One partition's failure must not abandon the rest: every one of them is already
+                // out of `partitions`, so a loop that stops here leaves the remainder unreachable
+                // and unclosed. Collected and thrown together once every partition has had its turn.
+                if (lostFailure == null) {
+                    lostFailure = failure;
+                } else {
+                    lostFailure.addSuppressed(failure);
+                }
+            }
         }
+        // Rethrown by kind, because a precise rethrow does not survive being stored in a variable.
+        if (lostFailure instanceof RuntimeException) throw (RuntimeException) lostFailure;
+        if (lostFailure instanceof Error) throw (Error) lostFailure;
     }
 
     // --- the transaction -----------------------------------------------------
