@@ -54,6 +54,26 @@ public:
 
     bool saw(LogEvent event) const { return count(event) != 0; }
 
+    /// Waits for an event a background thread emits, which is the only safe way to assert one.
+    ///
+    /// **A call returning is not its log line having been delivered.** The emit sites leave the
+    /// critical section before calling the sink — deliberately, because the sink is caller code and
+    /// `ASinkMayReadTheStoreItIsLoggingAbout` re-enters the engine from inside it, which under the
+    /// lock would deadlock. So `flush()` can observe `imm_` cleared and return while the line is
+    /// still unsent, and `saw()` immediately afterwards reads that as "never emitted": it passes on
+    /// an idle machine and fails on a loaded arm runner. That has now been found twice, because the
+    /// first time it was fixed at the one call site that failed rather than everywhere the
+    /// assumption was made.
+    bool waited_for(LogEvent event,
+                    std::chrono::milliseconds limit = std::chrono::seconds(5)) const {
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (saw(event)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return saw(event);
+    }
+
 private:
     mutable std::mutex mutex_;
     std::vector<Line> lines_;
@@ -101,7 +121,7 @@ TEST(LoggerTest, TheSweepReportsWhatItReclaimed) {
 
     now.fetch_add(120'000);
     ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
-    EXPECT_TRUE(recorder.saw(LogEvent::OrphansReclaimed))
+    EXPECT_TRUE(recorder.waited_for(LogEvent::OrphansReclaimed))
         << "the sweep deleted an object and said nothing about it";
 }
 
@@ -147,7 +167,7 @@ TEST(LoggerTest, ReportsAFlushAtInfo) {
     put_until_flush(**db, 200);
     ASSERT_EQ((*db)->flush(), Status::Ok);
 
-    EXPECT_TRUE(recorder.saw(LogEvent::FlushComplete));
+    EXPECT_TRUE(recorder.waited_for(LogEvent::FlushComplete));
     for (const Line& line : recorder.lines()) {
         if (line.event == LogEvent::FlushComplete) {
             EXPECT_EQ(line.level, LogLevel::Info);
@@ -198,9 +218,9 @@ TEST(LoggerTest, ARetryableBackgroundFailureIsVisibleAsBothTheFailureAndTheRetry
     put_until_flush(**db, 200, "second");
     (void)(*db)->flush();
 
-    EXPECT_TRUE(recorder.saw(LogEvent::BackgroundFailure))
+    EXPECT_TRUE(recorder.waited_for(LogEvent::BackgroundFailure))
         << "the flush failure reached no counter, no Stats field and now no log line either";
-    EXPECT_TRUE(recorder.saw(LogEvent::BackgroundRetry))
+    EXPECT_TRUE(recorder.waited_for(LogEvent::BackgroundRetry))
         << "the retry that clears bg_error_ is the half that hides a degraded backend";
 }
 
@@ -236,12 +256,10 @@ TEST(LoggerTest, ASinkMayReadTheStoreItIsLoggingAbout) {
     put_until_flush(**db, 400);
     ASSERT_EQ((*db)->flush(), Status::Ok);
 
-    // `flush()` returning is not the line having been delivered, and the gap is the very thing
-    // this test exists to protect: the emit sites leave the critical section *before* calling the
-    // sink, so a background flush that has already cleared `imm_` lets `flush()` return with its
-    // log line still unsent. Asserting immediately reads that as "nothing was ever emitted", which
-    // is how this failed on a loaded arm runner and passed everywhere else.
-    for (int i = 0; i < 2000 && reentrant.calls.load() == 0; ++i) {
+    // The same wait as Recorder::waited_for, for the same reason. This sink counts rather than
+    // records, so it cannot use the helper itself.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (reentrant.calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_GT(reentrant.calls.load(), 0);
@@ -262,7 +280,7 @@ TEST(LoggerTest, CompactionIsReportedFromABackgroundThread) {
     }
     ASSERT_EQ((*db)->compact_level(0), Status::Ok);
 
-    ASSERT_TRUE(recorder.saw(LogEvent::CompactionComplete));
+    ASSERT_TRUE(recorder.waited_for(LogEvent::CompactionComplete));
     for (const Line& line : recorder.lines()) {
         if (line.event == LogEvent::CompactionComplete) {
             EXPECT_NE(line.message.find("L0->L1"), std::string::npos) << line.message;
