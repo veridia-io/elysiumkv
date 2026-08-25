@@ -137,6 +137,11 @@
       </properties>
     </profile>
 
+    <!-- These pick the key for a build on the developer's own machine, where one platform is being
+         packaged. A release does not use them: it stages pre-named directories under
+         native-staging/. Maven cannot detect a libc, so a local build on Alpine needs
+         -Delysiumkv.platform=linux-x86_64-musl to match what NativeLibrary will ask for — or, more
+         usually, -Delysiumkv.library.path pointed straight at the build. -->
     <profile>
       <id>linux-x86_64</id>
       <activation><os><name>linux</name><arch>amd64</arch></os></activation>

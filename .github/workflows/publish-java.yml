@@ -27,6 +27,9 @@ on:
   release:
     types: [published]
 
+env:
+  AWS_SDK_VERSION: "1.11.860"
+
 jobs:
   # The release tag is the only place the version is written down. Both artifacts derive from it:
   # the jar through `versions:set`, the native library through `-DELYSIUMKV_VERSION`. Nothing to bump
@@ -148,6 +151,23 @@ jobs:
         env:
           ELYSIUMKV_VERSION: ${{ needs.version.outputs.version }}
 
+      # The musl job cannot use vcpkg — its lz4 port does not build under musl — so it pins the AWS
+      # SDK by hand. Two pins for one release is a version skew waiting to happen, and it would be
+      # invisible: the artifacts differ only in the SDK's own behaviour, on the half of consumers
+      # running the other libc. Checked here, where vcpkg's answer is on disk, so drift fails the
+      # release rather than shipping.
+      - name: The musl pin must match what vcpkg installs
+        run: |
+          installed=$(sed -n '/^Package: aws-sdk-cpp$/,/^$/p' \
+              build/release/vcpkg_installed/vcpkg/status | sed -n 's/^Version: //p' | head -1)
+          [ -n "$installed" ] || { echo "could not read vcpkg's aws-sdk-cpp version" >&2; exit 1; }
+          [ "$installed" = "$AWS_SDK_VERSION" ] || {
+            echo "vcpkg installs aws-sdk-cpp $installed but the musl job pins $AWS_SDK_VERSION;" >&2
+            echo "update AWS_SDK_VERSION so both libcs ship the same SDK" >&2
+            exit 1
+          }
+          echo "both libcs will ship aws-sdk-cpp $installed"
+
       - name: Upload
         uses: actions/upload-artifact@v6
         with:
@@ -156,9 +176,111 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # A separate job rather than a matrix entry, because almost nothing is shared: apk instead of apt,
+  # no vcpkg, and the AWS SDK built from source. Alpine packages the SDK, but not usably — 1.11.205
+  # has no PutObjectRequest::SetIfNoneMatch, which is the conditional write the S3 manifest's
+  # compare-and-set is, and it is built with AWS memory management on so `Aws::String` is not
+  # `std::string` and none of aws/ compiles against it. vcpkg is not the answer either: its lz4 port
+  # fails to build under musl.
+  #
+  # The engine itself needed nothing — it compiles clean against musl. What the port cost was two
+  # CMake changes: a pkg-config fallback for zstd and lz4, which Alpine ships without CMake configs,
+  # and importing ZLIB before the SDK, whose exported targets name ZLIB::ZLIB without importing it.
+  native-musl:
+    name: native / ${{ matrix.platform }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest,    platform: linux-x86_64-musl}
+          - {os: ubuntu-24.04-arm, platform: linux-aarch64-musl}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Pinned, and the version is load-bearing rather than "recent": conditional writes on
+      # PutObject arrived after the release Alpine packages, and the manifest catalog's whole
+      # correctness argument is that compare-and-set. The glibc job checks this against what vcpkg
+      # actually installs, so the two libcs cannot drift onto different SDKs.
+      #
+      # Under the workspace so the cache action can reach it on the host and the container can see
+      # it at the same path — the SDK's exported CMake configs carry their install prefix, so it has
+      # to be mounted where it was built.
+      - name: Cache the AWS SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: aws-sdk-install
+          key: aws-sdk-musl-${{ matrix.platform }}-${{ env.AWS_SDK_VERSION }}
+
+      # Docker rather than `container:`, which would run every step inside Alpine. The runner's
+      # JavaScript actions — checkout, cache, upload-artifact — need a Node it ships as a musl build
+      # for x64 only, and renaming the distribution to get past that check routes both architectures
+      # to the glibc Node, which gcompat cannot carry. Keeping the actions on the host sidesteps it:
+      # only the build needs musl.
+      - name: Build the AWS SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          cat > musl-sdk.sh <<'SCRIPT'
+          set -eux
+          apk add --no-cache build-base cmake ninja git curl-dev zlib-dev openssl-dev
+          git clone -q --depth 1 --branch "$AWS_SDK_VERSION" --recurse-submodules \
+              --shallow-submodules https://github.com/aws/aws-sdk-cpp.git /sdk
+          # USE_AWS_MEMORY_MANAGEMENT=OFF is what makes Aws::String an ordinary std::string, which
+          # is what the rest of this repository is written against.
+          cmake -S /sdk -B /sdk/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_ONLY="s3;dynamodb;kms" -DENABLE_TESTING=OFF -DAUTORUN_UNIT_TESTS=OFF \
+                -DUSE_AWS_MEMORY_MANAGEMENT=OFF -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_INSTALL_PREFIX=/work/aws-sdk-install
+          cmake --build /sdk/build --target install
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work -e AWS_SDK_VERSION alpine:3.20 sh musl-sdk.sh
+        env:
+          AWS_SDK_VERSION: ${{ env.AWS_SDK_VERSION }}
+
+      # The ldd check runs in the container on purpose: the host is glibc and its ldd says nothing
+      # useful about a musl object. A glibc build would otherwise upload cleanly and fail inside
+      # dlopen in somebody's cluster.
+      - name: Build the native library
+        run: |
+          cat > musl-jni.sh <<'SCRIPT'
+          set -eux
+          apk add --no-cache build-base cmake ninja zstd-dev lz4-dev openssl-dev curl-dev \
+              zlib-dev linux-headers pkgconf openjdk11
+          export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+          # Tests, CLI and benchmarks off: this job builds one shared object, and each of the
+          # three pulls a dependency the container does not have — gtest, cli11 and friends, google
+          # benchmark. Tests default to ON, so leaving them out is not the same as not needing them.
+          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_PREFIX_PATH=/work/aws-sdk-install -DELYSIUMKV_BUILD_AWS=ON \
+                -DELYSIUMKV_BUILD_TESTS=OFF -DELYSIUMKV_BUILD_CLI=OFF \
+                -DELYSIUMKV_BUILD_BENCH=OFF \
+                -DELYSIUMKV_VERSION="$ELYSIUMKV_VERSION"
+          # A stale CMakeCache would silently keep an older value, and the generated header is the
+          # only place the result is observable before the library is in someone's hands.
+          grep -F "$ELYSIUMKV_VERSION" \
+              build/release/generated/elysiumkv/elysiumkv_version.hpp
+          cmake --build build/release --target elysiumkv_jni
+          ldd build/release/libelysiumkv_jni.so | grep -q ld-musl
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work -e ELYSIUMKV_VERSION alpine:3.20 sh musl-jni.sh
+        env:
+          ELYSIUMKV_VERSION: ${{ needs.version.outputs.version }}
+
+      - name: Upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-${{ matrix.platform }}
+          path: build/release/libelysiumkv_jni.so
+          if-no-files-found: error
+          retention-days: 1
+
   jar:
     name: assemble and publish
-    needs: [version, native]
+    needs: [version, native, native-musl]
     runs-on: ubuntu-latest
     permissions:
       # Read-only: publishing goes to Maven Central, not GitHub Packages, so this workflow needs no
@@ -212,10 +334,12 @@ jobs:
           cd bindings/java/native-staging
           for entry in linux-x86_64/libelysiumkv_jni.so \
                        linux-aarch64/libelysiumkv_jni.so \
+                       linux-x86_64-musl/libelysiumkv_jni.so \
+                       linux-aarch64-musl/libelysiumkv_jni.so \
                        darwin-aarch64/libelysiumkv_jni.dylib; do
             [ -s "$entry" ] || { echo "missing or empty: $entry" >&2; exit 1; }
           done
-          echo "all three platform libraries staged"
+          echo "all five platform libraries staged"
 
       # Runs the test suite as part of the lifecycle, and deliberately *without*
       # -Delysiumkv.library.path: that exercises extraction against the assembled multi-platform
@@ -253,6 +377,8 @@ jobs:
           echo "checking $JAR"
           for entry in native/linux-x86_64/libelysiumkv_jni.so \
                        native/linux-aarch64/libelysiumkv_jni.so \
+                       native/linux-x86_64-musl/libelysiumkv_jni.so \
+                       native/linux-aarch64-musl/libelysiumkv_jni.so \
                        native/darwin-aarch64/libelysiumkv_jni.dylib; do
             jar tf "$JAR" | grep -qx "$entry" || { echo "missing $entry" >&2; exit 1; }
           done

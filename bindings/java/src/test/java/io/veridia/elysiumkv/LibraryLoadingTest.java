@@ -16,6 +16,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 
@@ -38,6 +40,30 @@ import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
  * would make every loader share one path, which is exactly what the JVM forbids.
  */
 class LibraryLoadingTest {
+
+    /**
+     * The platform key names the libc when there is one to name.
+     *
+     * <p>A glibc build does not run on musl, but both report {@code linux} and {@code x86_64} — so
+     * an unsuffixed key finds a match on Alpine, extracts it, and fails inside {@code dlopen} with a
+     * relocation error against the library rather than a word about the distribution. The suffix
+     * turns that into a miss, and the miss is what can carry an explanation.
+     *
+     * <p>Asserted against whichever system runs it: on glibc and macOS the key must not claim musl,
+     * and on musl it must.
+     */
+    @Test
+    void thePlatformKeyNamesTheLibcOnMusl() {
+        String platform = NativeLibrary.platform();
+        boolean musl = Files.exists(Path.of("/lib/ld-musl-x86_64.so.1"))
+                || Files.exists(Path.of("/lib/ld-musl-aarch64.so.1"));
+
+        assertEquals(musl, platform.endsWith("-musl"),
+                "platform key " + platform + " disagrees with the loader present on this system");
+        if (musl) {
+            assertTrue(platform.startsWith("linux-"), "only linux distinguishes a libc here");
+        }
+    }
     /** Loads io.veridia.elysiumkv.* itself so each instance gets its own copy of the class. */
     private static final class IsolatedLoader extends URLClassLoader {
         IsolatedLoader(URL[] urls) {

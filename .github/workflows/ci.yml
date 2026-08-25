@@ -234,6 +234,55 @@ jobs:
             exit 1
           fi
 
+  musl:
+    name: alpine / release / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, for the reason the glibc matrix gives: CRC32 dispatches on SSE4.2 or on the ARMv8
+        # CRC extension, and one arch can silently fall back to the software path while the other
+        # does not. The libc does not change that, and the jar ships both musl keys.
+        include:
+          - {os: ubuntu-latest,    arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Docker rather than `container:`, which would run every step inside Alpine. The runner's
+      # JavaScript actions need a Node it ships as a musl build for x64 only, so an arm64 runner
+      # refuses outright: "JavaScript Actions in Alpine containers are only supported on x64 Linux
+      # runners". Renaming the distribution gets past that check but routes *both* architectures to
+      # the glibc Node, which gcompat cannot carry — it is one symbol short, and supplying that
+      # symbol only moves the failure to an abort in Node's threading.
+      #
+      # Keeping the actions on the host sidesteps all of it: only the build needs musl.
+      #
+      # One preset, deliberately. This job answers "does the engine work when libc is not glibc",
+      # which is a yes-or-no about the C++ rather than something the sanitiser or thread presets
+      # would say differently — and those already run four-deep on the glibc side.
+      #
+      # No preset file: the presets set the vcpkg toolchain, which cannot work here — vcpkg's lz4
+      # port does not build under musl. Alpine's own zstd, lz4, OpenSSL and gtest are used instead,
+      # which the CMake pkg-config fallback exists to make possible. AWS is off because its tests
+      # need LocalStack and building the SDK from source is forty minutes; the release workflow's
+      # musl job is where the AWS build is proven.
+      - name: Build and test under musl
+        run: |
+          cat > musl-ci.sh <<'SCRIPT'
+          set -eux
+          apk add --no-cache build-base cmake ninja git zstd-dev lz4-dev openssl-dev \
+              gtest-dev linux-headers pkgconf
+          cmake -S . -B build/musl -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DELYSIUMKV_BUILD_TESTS=ON -DELYSIUMKV_WERROR=ON \
+                -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF
+          cmake --build build/musl
+          cd build/musl && ctest --output-on-failure -j"$(nproc)"
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work alpine:3.20 sh musl-ci.sh
+
   build:
     name: ${{ matrix.os }} / ${{ matrix.preset }}
     runs-on: ${{ matrix.os }}

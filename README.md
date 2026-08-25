@@ -624,8 +624,47 @@ already loaded in the host process, and the failure appears as corruption or a
 crash depending on load order. The Java binding's glue is a third, separate shared
 object.
 
-Supported: **linux-x86_64**, **linux-arm64**, **macos-arm64**. Windows is not
-supported today — nothing in the design prevents it, but nothing tests it either.
+The jar carries one library per platform under `native/{os}-{arch}/`, and those directory names are
+what the loader computes from `os.name` and `os.arch` — so they are the spellings that matter when a
+load fails:
+
+| Key | Built | Notes |
+| --- | --- | --- |
+| `linux-x86_64` | yes | glibc |
+| `linux-aarch64` | yes | glibc |
+| `darwin-aarch64` | yes | Apple Silicon |
+| `darwin-x86_64` | **no** | Intel Macs — see below |
+| `linux-x86_64-musl` | yes | Alpine and other musl distributions |
+| `linux-aarch64-musl` | yes | as above |
+| `windows-x86_64` | **no** | see below |
+
+**musl.** A glibc build does not run on musl, and `{os}-{arch}` cannot say which libc it was built
+against — so the loader appends `-musl` when `/lib/ld-musl-{arch}.so.1` is present. Without that the
+key matches, the wrong library is extracted, and the failure is a relocation error inside `dlopen`
+naming the library rather than the distribution.
+
+The musl artifacts are built on Alpine, and not the way the others are. Alpine packages the AWS SDK
+but not usably: 1.11.205 has no `PutObjectRequest::SetIfNoneMatch`, which is what the S3 manifest's
+compare-and-set *is*, and it is compiled with AWS memory management on, so `Aws::String` is not
+`std::string` and none of `aws/` builds against it. vcpkg is not the alternative — its lz4 port fails
+under musl. So that job takes zstd, lz4 and OpenSSL from Alpine and builds the SDK from source with
+`USE_AWS_MEMORY_MANAGEMENT=OFF`. The engine needed no changes at all; it compiles clean against musl.
+
+Building on Alpine yourself: Maven cannot detect a libc, so pass
+`-Delysiumkv.platform=linux-x86_64-musl` to package it under the key the loader will ask for, or
+point `-Delysiumkv.library.path` straight at the build and skip extraction.
+
+**Intel Macs.** Not built. The catch is that this is not only about Intel hardware: an x86_64 JDK
+reports `os.arch=x86_64` even on Apple Silicon under Rosetta, so the loader asks for
+`darwin-x86_64` on a machine whose `darwin-aarch64` library is sitting unused in the same jar. If a
+load fails on a Mac, check `java -XshowSettings:properties -version 2>&1 | grep os.arch` before
+anything else; an arm64 JDK is the fix.
+
+**Windows.** Not supported, and further off than "untested": `disk_blob_store.cpp`,
+`disk_manifest_catalog.cpp`, `disk_cache_blob_store.cpp` and `open_file_cache.hpp` use `unistd.h`,
+`sys/mman.h`, `dirent.h` and `pthread.h` with no alternative path. The C ABI already has its
+`_WIN32` export macro and the Java loader already names `elysiumkv_jni.dll`, so the seams are in
+place; the storage layer is the work.
 
 ## Operator CLI
 
@@ -645,7 +684,9 @@ there is no repair verb yet.
 ## Testing
 
 Sanitizers are a build gate, not an option. CI runs every preset on all three
-platforms, and the Java binding on JDK 11 and 25.
+glibc platforms, plus the release preset on both Alpine architectures — which
+answers whether the engine works when libc is not glibc, without repeating the
+sanitiser and thread runs. The Java binding runs on JDK 11 and 25.
 
 | Suite                    | Covers                                                                                                           |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------- |

@@ -1,4 +1,11 @@
 # ARCHITECTURE.md "Dependencies and artifacts" — the remote implementations, confined to their own target.
+# Before the SDK, because its exported targets name ZLIB::ZLIB and CURL::libcurl without importing
+# them. vcpkg's toolchain resolves those on its own, so this is invisible on a vcpkg build and a hard
+# failure on any other — a distribution package or an SDK built from source, which is how the musl
+# artifact is produced.
+find_package(ZLIB REQUIRED)
+find_package(CURL QUIET)
+
 find_package(AWSSDK CONFIG REQUIRED COMPONENTS s3 dynamodb kms)
 
 add_library(elysiumkv_aws STATIC
