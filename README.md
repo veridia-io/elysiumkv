@@ -681,6 +681,20 @@ to whichever one was named. `--generation` reads a generation other than the one
 names. `--json` may be written on either side of the subcommand. Both commands are read-only;
 there is no repair verb yet.
 
+An encrypted store needs the provider its manifest payloads were sealed under. Routing is by the id
+recorded in each payload, so the id given here has to be the one the writer registered:
+
+```sh
+elysiumkv stats --catalog disk --dir /data --encryption-provider kms-gcm kms:alias/elysiumkv
+elysiumkv manifest --catalog disk --dir /data --encryption-provider aes-gcm env:ELYSIUMKV_KEY
+```
+
+The key is `hex:<hex>`, `file:<path>`, `env:<VAR>` or `kms:<key-id>`, all of them 32-byte master
+keys wrapping a data key per object. The flag repeats, because a rotation changes the primary
+provider without starting a new generation and one generation can hold payloads under two ids. Run
+without it first if you do not know which: a payload this process cannot route reports the id it
+needs.
+
 ## Testing
 
 Sanitizers are a build gate, not an option. CI runs every preset on all three

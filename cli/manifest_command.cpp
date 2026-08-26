@@ -14,6 +14,7 @@
 
 #include "catalog.hpp"
 #include "commands.hpp"
+#include "encryption.hpp"
 #include "version_load.hpp"
 
 #include "version/version.hpp"
@@ -204,21 +205,24 @@ void add_manifest_command(CLI::App& root, const GlobalOptions& globals) {
         "manifest", "summarise a manifest: files, levels, tiers, what a reopen would load");
 
     auto options = std::make_shared<CatalogOptions>();
+    auto encryption = std::make_shared<EncryptionOptions>();
     auto generation = std::make_shared<uint64_t>(0);
 
     add_catalog_flags(*command, *options);
+    add_encryption_flags(*command, *encryption);
     auto* generation_flag =
         command->add_option("--generation", *generation,
                             "read this generation instead of the one the pointer names");
 
-    command->callback([options, generation, generation_flag, &globals]() {
+    command->callback([options, encryption, generation, generation_flag, &globals]() {
         std::shared_ptr<ManifestCatalog> catalog = open_catalog(*options);
+        const ProviderRegistry registry = open_registry(*encryption);
 
         const uint64_t chosen =
             generation_flag->count() ? *generation : current_generation(*catalog);
 
         size_t edits = 0;
-        std::shared_ptr<const Version> version = load_version(*catalog, chosen, edits);
+        std::shared_ptr<const Version> version = load_version(*catalog, registry, chosen, edits);
         if (globals.json) {
             print_json(*version, chosen, edits);
         } else {

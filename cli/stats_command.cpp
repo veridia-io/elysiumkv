@@ -12,6 +12,7 @@
 
 #include "commands.hpp"
 #include "catalog.hpp"
+#include "encryption.hpp"
 #include "version_load.hpp"
 
 #include "version/version_edit.hpp"
@@ -20,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <tabulate/table.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <iostream>
@@ -78,12 +80,21 @@ struct Group {
 /// What a restore would resume after, by the engine's own rule rather than a second reading of it.
 /// Every file counts as a survivor: whether one is actually missing is `verify`'s question, and
 /// assuming loss here would under-report on a healthy store.
+///
+/// The floor binds the answer for the same reason it binds recovery's: a loss an earlier open
+/// recorded also removed the files that were evidence of it, so the surviving intervals alone would
+/// certify a position that nothing can replay to.
 std::optional<uint64_t> resume_after(const Version& v) {
     RecoveryWatermark rule;
     for (const auto& level : v.levels()) {
         for (const FileMetadata& f : level) rule.observe_survivor(f.watermark);
     }
-    return rule.resume_after();
+    std::optional<uint64_t> after = rule.resume_after();
+    if (auto floor = v.watermark_floor()) {
+        if (!floor->position.has_value()) return std::nullopt;
+        after = after.has_value() ? std::min(*after, *floor->position) : floor->position;
+    }
+    return after;
 }
 
 uint64_t now_ms() {
@@ -99,17 +110,20 @@ void add_stats_command(CLI::App& root, const GlobalOptions& globals) {
         "stats", "what each level and tier holds, how old it is, and where a restore resumes");
 
     auto options = std::make_shared<CatalogOptions>();
+    auto encryption = std::make_shared<EncryptionOptions>();
     auto generation = std::make_shared<uint64_t>(0);
     add_catalog_flags(*command, *options);
+    add_encryption_flags(*command, *encryption);
     auto* generation_flag = command->add_option("--generation", *generation,
                                                 "read this generation instead of the current one");
 
-    command->callback([options, generation, generation_flag, &globals]() {
+    command->callback([options, encryption, generation, generation_flag, &globals]() {
         std::shared_ptr<ManifestCatalog> catalog = open_catalog(*options);
+        const ProviderRegistry registry = open_registry(*encryption);
         const uint64_t chosen =
             generation_flag->count() ? *generation : current_generation(*catalog);
         size_t edits = 0;
-        std::shared_ptr<const Version> v = load_version(*catalog, chosen, edits);
+        std::shared_ptr<const Version> v = load_version(*catalog, registry, chosen, edits);
         const uint64_t now = now_ms();
 
         std::map<int, Group> by_level;

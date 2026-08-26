@@ -38,7 +38,10 @@ std::shared_ptr<ManifestCatalog> open_catalog(const CatalogOptions& options) {
         dynamo.region = options.region;
         dynamo.endpoint = options.endpoint;
         auto catalog = DynamoManifestCatalog::open(std::move(dynamo));
-        if (!catalog) throw CLI::ValidationError("could not open the DynamoDB catalog");
+        if (!catalog) {
+            throw CLI::ValidationError("could not open the DynamoDB catalog (" +
+                                       std::string(status_name(catalog.error())) + ")");
+        }
         return *catalog;
     }
     if (options.backend == "s3") {
@@ -49,7 +52,10 @@ std::shared_ptr<ManifestCatalog> open_catalog(const CatalogOptions& options) {
         s3.region = options.region;
         s3.endpoint = options.endpoint;
         auto catalog = S3ManifestCatalog::open(std::move(s3));
-        if (!catalog) throw CLI::ValidationError("could not open the S3 catalog");
+        if (!catalog) {
+            throw CLI::ValidationError("could not open the S3 catalog (" +
+                                       std::string(status_name(catalog.error())) + ")");
+        }
         return *catalog;
     }
     throw CLI::ValidationError("unreachable: --catalog was validated already");
