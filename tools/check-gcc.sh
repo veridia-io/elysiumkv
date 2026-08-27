@@ -33,7 +33,8 @@ mkdir -p "$GENERATED/elysiumkv"
 sed 's/@ELYSIUMKV_VERSION@/0.0.0-syntax-check/' cmake/version.hpp.in \
   > "$GENERATED/elysiumkv/elysiumkv_version.hpp"
 
-INCLUDES=(-Iinclude -Isrc -Itests "-I$GENERATED")
+# `-Icli` because the suite covers the CLI's manifest read, which lives there.
+INCLUDES=(-Iinclude -Isrc -Itests -Icli "-I$GENERATED")
 
 # vcpkg's headers, if a local build has them; harmless when absent.
 for d in build/*/vcpkg_installed/*/include; do
@@ -49,7 +50,7 @@ for f in $(find src tests -name '*.cpp' | sort); do
   if ! out=$("$CXX" -std=c++23 -fsyntax-only -fno-rtti -DELYSIUMKV_PARANOID=1 \
                  "${WARNINGS[@]}" "${INCLUDES[@]}" "$f" 2>&1); then
     # A missing third-party header means this file is out of scope here, not broken.
-    if grep -qE "fatal error: (zstd|lz4|aws|gtest|gmock)" <<<"$out"; then continue; fi
+    if grep -qE "fatal error: (zstd|lz4|aws|gtest|gmock|CLI|nlohmann|tabulate)" <<<"$out"; then continue; fi
     echo "=== $f"
     echo "$out" | head -12
     fail=1

@@ -5,6 +5,7 @@
 #include <zstd.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace elysiumkv {
@@ -87,6 +88,20 @@ Result<std::string> decompress(Slice packed, uint32_t codec, uint64_t plain_len)
 }
 
 }  // namespace
+
+std::string ManifestPayload::snapshot_address(uint64_t generation) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "snap#%012llu", static_cast<unsigned long long>(generation));
+    return buf;
+}
+
+std::string ManifestPayload::edit_address(uint64_t generation, uint64_t seq) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "edit#%012llu#%012llu",
+                  static_cast<unsigned long long>(generation),
+                  static_cast<unsigned long long>(seq));
+    return buf;
+}
 
 Result<std::string> ManifestPayload::seal(const ProviderRegistry& registry, uint64_t generation,
                                           std::string_view address, Slice plaintext) {

@@ -10,27 +10,6 @@
 #include <vector>
 
 namespace elysiumkv {
-namespace {
-
-/// A manifest payload's address, bound into its authentication so that one cannot be replayed at
-/// another. Fixed-width so it cannot be made ambiguous by a generation that happens to contain the
-/// separator.
-std::string snapshot_address(uint64_t generation) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "snap#%012llu", static_cast<unsigned long long>(generation));
-    return buf;
-}
-
-std::string edit_address(uint64_t generation, uint64_t seq) {
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "edit#%012llu#%012llu",
-                  static_cast<unsigned long long>(generation),
-                  static_cast<unsigned long long>(seq));
-    return buf;
-}
-
-}  // namespace
-
 
 VersionSet::VersionSet(ManifestCatalog& catalog, int edits_per_generation, DeleteObjects deleter,
                        const ProviderRegistry& encryption, std::function<uint64_t()> clock,
@@ -119,7 +98,8 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
     snapshot.watermark_floor = version->watermark_floor();
 
     const std::string bytes = encode_version_snapshot(snapshot);
-    auto framed = ManifestPayload::seal(encryption_, generation, snapshot_address(generation),
+    auto framed = ManifestPayload::seal(encryption_, generation,
+                                        ManifestPayload::snapshot_address(generation),
                                         Slice::from(bytes));
     if (!framed) return framed.error();
     if (Status status = catalog_.put_snapshot(generation, Slice::from(*framed)).get();
@@ -199,7 +179,7 @@ Status VersionSet::recover() {
         // stops and opens on a truncated history.
         std::string why;
         auto snapshot_plain = ManifestPayload::open(encryption_, generation,
-                                                    snapshot_address(generation),
+                                                    ManifestPayload::snapshot_address(generation),
                                                     Slice::from(*snapshot_bytes), why);
         if (!snapshot_plain) {
             if (!why.empty()) last_error_ = why;
@@ -244,8 +224,8 @@ Status VersionSet::recover() {
             // as though they had never been written.
             std::string edit_why;
             auto plain = ManifestPayload::open(encryption_, generation,
-                                               edit_address(generation, seq), Slice::from(*bytes),
-                                               edit_why);
+                                               ManifestPayload::edit_address(generation, seq),
+                                               Slice::from(*bytes), edit_why);
             if (!plain && (plain.error() == Status::Config ||
                            plain.error() == Status::Unsupported)) {
                 if (!edit_why.empty()) last_error_ = edit_why;
@@ -306,9 +286,9 @@ Status VersionSet::apply(VersionEdit edit) {
     edit.next_file_number = next_file_number_.load(std::memory_order_relaxed);
 
     const std::string bytes = encode_version_edit(edit);
-    auto framed = ManifestPayload::seal(encryption_, entry_->generation,
-                                        edit_address(entry_->generation, next_seq_),
-                                        Slice::from(bytes));
+    const std::string address = ManifestPayload::edit_address(entry_->generation, next_seq_);
+    auto framed =
+        ManifestPayload::seal(encryption_, entry_->generation, address, Slice::from(bytes));
     if (!framed) return framed.error();
     if (Status status =
             catalog_.put_edit(entry_->generation, next_seq_, Slice::from(*framed)).get();

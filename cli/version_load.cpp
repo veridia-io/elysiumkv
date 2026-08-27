@@ -2,47 +2,96 @@
 
 #include "commands.hpp"
 
+#include "version/manifest_payload.hpp"
 #include "version/version_edit.hpp"
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
 namespace elysiumkv::cli {
+namespace {
 
-/// Snapshot, then every edit above it, exactly as recovery does.
-std::shared_ptr<const Version> load_version(ManifestCatalog& catalog, uint64_t generation,
-                                    size_t& edits_replayed) {
+std::string named(Status status) { return std::string(status_name(status)); }
+
+/// `ManifestPayload::open` fills `why` only for the failures configuration can fix — a provider
+/// this process does not hold, a key that is not the one the store was written with. The rest are
+/// bytes that are not what was written, and have only a status to report.
+std::string payload_error(const char* what, Status status, const std::string& why) {
+    if (!why.empty()) return why;
+    return std::string("the ") + what + " payload did not open (" + named(status) + ")";
+}
+
+}  // namespace
+
+/// Snapshot, then every edit above it, exactly as recovery does — including stopping at the first
+/// gap, because an edit above one was never acknowledged and a reopen would not apply it either.
+std::shared_ptr<const Version> load_version(ManifestCatalog& catalog,
+                                            const ProviderRegistry& encryption, uint64_t generation,
+                                            size_t& edits_replayed) {
     auto snapshot_bytes = catalog.get_snapshot(generation).get();
-    if (!snapshot_bytes) fail("that generation has no snapshot");
-    auto snapshot = decode_version_snapshot(Slice(snapshot_bytes->data(), snapshot_bytes->size()));
+    if (!snapshot_bytes) {
+        // A collected generation is a different instruction to an operator than an unreachable or
+        // forbidden store, and one sentence for both sent them looking at their data for a defect
+        // in this tool.
+        if (snapshot_bytes.error() == Status::NotFound) fail("that generation has no snapshot");
+        fail("could not fetch the snapshot (" + named(snapshot_bytes.error()) + ")");
+    }
+
+    // Every manifest payload is framed, whether or not the store is encrypted, so this is on the
+    // way to every decode rather than a branch for encrypted stores.
+    std::string why;
+    auto snapshot_plain = ManifestPayload::open(encryption, generation,
+                                                ManifestPayload::snapshot_address(generation),
+                                                Slice::from(*snapshot_bytes), why);
+    if (!snapshot_plain) fail(payload_error("snapshot", snapshot_plain.error(), why));
+
+    auto snapshot = decode_version_snapshot(Slice::from(*snapshot_plain));
     if (!snapshot) {
         // Unsupported rather than Corrupt is the interesting case: the bytes are fine and this
         // binary is the wrong one, which is a different instruction to the operator.
-        fail("the snapshot did not decode (status " +
-             std::to_string(static_cast<int>(snapshot.error())) + ") — a newer format, or damage");
+        fail("the snapshot did not decode (" + named(snapshot.error()) +
+             ") — a newer format, or damage");
     }
 
-    std::vector<std::vector<FileMetadata>> levels;
-    for (const FileMetadata& file : snapshot->files) {
-        const auto level = static_cast<size_t>(file.level);
-        if (levels.size() <= level) levels.resize(level + 1);
-        levels[level].push_back(file);
-    }
-    std::map<int, std::string> pointers(snapshot->compaction_pointers.begin(),
-                                        snapshot->compaction_pointers.end());
-    auto version = std::make_shared<const Version>(std::move(levels), snapshot->next_file_number,
-                                                   std::move(pointers), snapshot->truncation_point);
+    std::map<int, std::string> pointers;
+    for (const auto& [level, key] : snapshot->compaction_pointers) pointers[level] = key;
+
+    VersionEdit initial;
+    initial.added = std::move(snapshot->files);
+    auto version = Version::apply(Version({}, snapshot->next_file_number, std::move(pointers),
+                                          snapshot->truncation_point, snapshot->watermark_floor),
+                                  initial);
 
     auto seqs = catalog.list_edits(generation).get();
-    if (!seqs) fail("could not list the edits");
+    if (!seqs) fail("could not list the edits (" + named(seqs.error()) + ")");
     std::sort(seqs->begin(), seqs->end());
+
+    uint64_t expected_seq = 1;
     for (uint64_t seq : *seqs) {
+        if (seq != expected_seq) break;
         auto bytes = catalog.get_edit(generation, seq).get();
-        if (!bytes) break;   // replay stops at the first unreadable record, as recovery does
-        auto edit = decode_version_edit(Slice(bytes->data(), bytes->size()));
+        if (!bytes) {
+            if (bytes.error() == Status::NotFound) break;
+            fail("could not fetch edit " + std::to_string(seq) + " (" + named(bytes.error()) + ")");
+        }
+
+        std::string edit_why;
+        auto plain = ManifestPayload::open(encryption, generation,
+                                           ManifestPayload::edit_address(generation, seq),
+                                           Slice::from(*bytes), edit_why);
+        // A payload this process cannot route is not a torn write. Stopping there would report a
+        // history that ends where the operator's configuration ends, which reads as data loss.
+        if (!plain && (plain.error() == Status::Config || plain.error() == Status::Unsupported)) {
+            fail(payload_error("edit", plain.error(), edit_why));
+        }
+        if (!plain) break;   // torn write: everything above it is unacknowledged
+
+        auto edit = decode_version_edit(Slice::from(*plain));
         if (!edit) break;
         version = Version::apply(*version, *edit);
+        ++expected_seq;
         ++edits_replayed;
     }
     return version;
@@ -50,7 +99,7 @@ std::shared_ptr<const Version> load_version(ManifestCatalog& catalog, uint64_t g
 
 uint64_t current_generation(ManifestCatalog& catalog) {
     auto pointer = catalog.read();
-    if (!pointer) fail("could not read the manifest pointer");
+    if (!pointer) fail("could not read the manifest pointer (" + named(pointer.error()) + ")");
     if (!pointer->has_value()) fail("no manifest here: this store has never been written");
     return (*pointer)->generation;
 }

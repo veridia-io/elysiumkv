@@ -81,6 +81,13 @@ if(ELYSIUMKV_BUILD_AWS)
     target_sources(elysiumkv_tests PRIVATE contract/remote_store_test.cpp)
 endif()
 
+# The CLI reads a manifest without going through `VersionSet`, so nothing else in this suite would
+# notice the two disagreeing about the framing.
+if(ELYSIUMKV_BUILD_CLI)
+    target_sources(elysiumkv_tests PRIVATE unit/cli_version_load_test.cpp)
+    target_link_libraries(elysiumkv_tests PRIVATE elysiumkv_cli_core)
+endif()
+
 target_link_libraries(elysiumkv_tests PRIVATE
     elysiumkv elysiumkv_flags GTest::gtest GTest::gtest_main)
 target_include_directories(elysiumkv_tests PRIVATE

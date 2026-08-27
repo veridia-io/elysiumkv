@@ -46,6 +46,19 @@ jobs:
         with:
           fetch-depth: 1
 
+      # The tag is the version, and it has to be passed in: `ELYSIUMKV_VERSION` otherwise takes its
+      # development default, which is how a published v0.7.1 binary came to answer `0.0.0-dev`. The
+      # non-release value carries the commit so that "is this the build I think it is" stays
+      # answerable off a tag as well as on one.
+      - name: Derive the version from the event
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            echo "ELYSIUMKV_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          else
+            echo "ELYSIUMKV_VERSION=0.0.0-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          fi
+
       # Same CMake pin as the ci workflow — see the comment there.
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
@@ -99,6 +112,7 @@ jobs:
             -DELYSIUMKV_BUILD_AWS=ON \
             -DELYSIUMKV_BUILD_TESTS=OFF \
             -DELYSIUMKV_BUILD_BENCH=OFF \
+            -DELYSIUMKV_VERSION="$ELYSIUMKV_VERSION" \
             -B build/cli
           cmake --build build/cli --target elysiumkv_cli
 
@@ -108,7 +122,13 @@ jobs:
       - name: Smoke test
         run: |
           BIN=build/cli/cli/elysiumkv
-          "$BIN" --version
+          # An unstamped release is only ever noticed by whoever is already debugging something
+          # else, so the assertion is here rather than left to the first operator who asks.
+          reported=$("$BIN" --version)
+          if [ "$reported" != "$ELYSIUMKV_VERSION" ]; then
+            echo "the binary reports '$reported', but was built from '$ELYSIUMKV_VERSION'" >&2
+            exit 1
+          fi
           "$BIN" manifest --help > /dev/null
           for backend in dynamo s3; do
             if "$BIN" manifest --catalog "$backend" 2>&1 | grep -q "no AWS support"; then

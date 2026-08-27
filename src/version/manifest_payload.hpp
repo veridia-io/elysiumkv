@@ -42,9 +42,16 @@ namespace elysiumkv {
 struct ManifestPayload {
     static constexpr size_t kHeaderBytes = 32;
 
-    /// Seals under the registry's primary provider. `address` is the payload's manifest address
-    /// (`snap#<gen>` or `edit#<gen>#<seq>`) and is bound into every chunk's authentication, so a
-    /// payload lifted to another address is refused rather than opened.
+    /// A payload's manifest address, bound into its authentication so one cannot be replayed at
+    /// another. Fixed-width, so a generation containing the separator cannot make one ambiguous.
+    /// Shared rather than derived twice: an address the reader spells differently authenticates
+    /// nothing, and the failure would look like corruption.
+    static std::string snapshot_address(uint64_t generation);
+    static std::string edit_address(uint64_t generation, uint64_t seq);
+
+    /// Seals under the registry's primary provider. `address` comes from the two above and is
+    /// bound into every chunk's authentication, so a payload lifted to another address is refused
+    /// rather than opened.
     static Result<std::string> seal(const ProviderRegistry& registry, uint64_t generation,
                                     std::string_view address, Slice plaintext);
 

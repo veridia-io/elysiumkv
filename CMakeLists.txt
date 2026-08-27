@@ -277,6 +277,14 @@ if(ELYSIUMKV_BUILD_JNI)
     endif()
 endif()
 
+# --- the operator CLI ---------------------------------------------------------
+# A shipped binary rather than a build-tree tool, so it is not gated on tests or benchmarks: it is
+# what you reach for when a store is misbehaving, which is when a release build is what you have.
+# Ahead of tests/, which links `elysiumkv_cli_core`.
+if(ELYSIUMKV_BUILD_CLI)
+    add_subdirectory(cli)
+endif()
+
 # --- tests and benchmarks -----------------------------------------------------
 if(ELYSIUMKV_BUILD_TESTS)
     enable_testing()
@@ -293,11 +301,4 @@ option(ELYSIUMKV_FUZZ "Build libFuzzer targets for the decoders (clang only)" OF
 if(ELYSIUMKV_FUZZ)
     enable_testing()
     add_subdirectory(fuzz)
-endif()
-
-# --- the operator CLI ---------------------------------------------------------
-# A shipped binary rather than a build-tree tool, so it is not gated on tests or benchmarks: it is
-# what you reach for when a store is misbehaving, which is when a release build is what you have.
-if(ELYSIUMKV_BUILD_CLI)
-    add_subdirectory(cli)
 endif()
