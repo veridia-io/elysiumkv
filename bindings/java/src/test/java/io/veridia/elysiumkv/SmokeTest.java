@@ -11,6 +11,35 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class SmokeTest {
+    /**
+     * Only one caller may destroy the database. The second sees the handle already taken and does
+     * nothing, which is what keeps a repeated or racing close from freeing it twice.
+     */
+    @Test
+    void closingTwiceDestroysOnce(@TempDir Path dir) throws Exception {
+        Path storeDir = dir.resolve("store");
+        java.nio.file.Files.createDirectories(storeDir);
+
+        try (DiskBlobStore store = new DiskBlobStore(storeDir.toString(), "store-0");
+             DiskManifestCatalog catalog = new DiskManifestCatalog(dir.toString());
+             ElysiumKVOptions options = new ElysiumKVOptions()
+                     .manifestCatalog(catalog)
+                     .paranoidChecks(true)
+                     .addTier(store, Durability.DURABLE, 0, 0, 0)
+                     .level(0, Compression.NONE, 0, 4, 8, 12, 0)
+                     .level(1, Compression.NONE, 0, 0, 0, 0, 0)) {
+
+            ElysiumKV db = ElysiumKV.open(options);
+            db.put(key(0), "v".getBytes(StandardCharsets.UTF_8));
+
+            assertEquals(0, db.closeReportingOutstanding(), "a clean close reports nothing held");
+            assertTrue(!db.isOpen());
+            assertEquals(0, db.closeReportingOutstanding(),
+                    "the handle is already taken, so the second close has nothing to destroy");
+            db.close();   // and the ordinary spelling is a no-op too
+        }
+    }
+
     @Test
     void openWriteReadClose(@TempDir Path dir) throws Exception {
         Path storeDir = dir.resolve("store");

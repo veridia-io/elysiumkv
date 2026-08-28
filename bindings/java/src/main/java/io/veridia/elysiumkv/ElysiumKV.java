@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Set;
 
 /**
@@ -45,16 +46,20 @@ public final class ElysiumKV implements ReadOnlyStore {
     private final Set<BatchedIterator> batchedIterators =
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
     /**
-     * Published, because {@link #close} zeroes it on one thread while another is still reading — a
-     * metrics thread in {@link #stats()}, or a caller parallelising its reads. Without this the
-     * closed check in {@link #handle()} has no visibility guarantee and the read is not atomic on a
-     * 32-bit JVM, so the race hands JNI a stale or torn pointer instead of throwing.
+     * Claimed exactly once, because {@link #close} takes it away on one thread while another may
+     * still be reading it — a metrics thread in {@link #stats()}, or a caller parallelising its
+     * reads.
+     *
+     * <p>Both halves matter. A plain field gives the closed check in {@link #handle()} no visibility
+     * guarantee and is not an atomic read on a 32-bit JVM, so the race hands JNI a stale or torn
+     * pointer instead of throwing; and a check-then-clear in close could let two threads both claim
+     * the same handle and free it twice. One {@code getAndSet} is both.
      */
-    private volatile long handle;
+    private final AtomicLong handle = new AtomicLong();
     private byte[] statsBuffer = new byte[256];
 
     private ElysiumKV(long handle, boolean checked) {
-        this.handle = handle;
+        this.handle.set(handle);
         this.checked = checked;
     }
 
@@ -458,9 +463,10 @@ public final class ElysiumKV implements ReadOnlyStore {
     }
 
     private long closeReportingOutstanding(boolean flushFirst) {
-        if (handle == 0) return 0;
-        long h = handle;
-        handle = 0;
+        // Exactly one caller wins the handle; a second concurrent close sees zero and does nothing
+        // rather than destroying a database this one is still closing.
+        long h = handle.getAndSet(0);
+        if (h == 0) return 0;
 
         // Close natively *first*: it is what counts the outstanding pins and
         // iterators, and tidying the Java wrappers beforehand would zero the
@@ -481,12 +487,13 @@ public final class ElysiumKV implements ReadOnlyStore {
 
     @Override
     public boolean isOpen() {
-        return handle != 0;
+        return handle.get() != 0;
     }
 
     long handle() {
-        if (handle == 0) throw new IllegalStateException("database is closed");
-        return handle;
+        long h = handle.get();
+        if (h == 0) throw new IllegalStateException("database is closed");
+        return h;
     }
 
     private ElysiumKVIterator track(ElysiumKVIterator iterator) {
