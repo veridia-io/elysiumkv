@@ -44,7 +44,13 @@ public final class ElysiumKV implements ReadOnlyStore {
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
     private final Set<BatchedIterator> batchedIterators =
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
-    private long handle;
+    /**
+     * Published, because {@link #close} zeroes it on one thread while another is still reading — a
+     * metrics thread in {@link #stats()}, or a caller parallelising its reads. Without this the
+     * closed check in {@link #handle()} has no visibility guarantee and the read is not atomic on a
+     * 32-bit JVM, so the race hands JNI a stale or torn pointer instead of throwing.
+     */
+    private volatile long handle;
     private byte[] statsBuffer = new byte[256];
 
     private ElysiumKV(long handle, boolean checked) {
