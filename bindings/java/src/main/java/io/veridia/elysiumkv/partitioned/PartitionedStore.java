@@ -10,7 +10,6 @@ import io.veridia.elysiumkv.WriteBatch;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -28,16 +27,16 @@ import java.util.function.IntFunction;
  * <blockquote>The log is authoritative. The store is derived. The store may only ever lag — and a
  * lagging partition may not be served.</blockquote>
  *
- * <p>The first clause is structural: {@link #stage} does not write. It stages, and
+ * <p>The first clause is structural: {@link #put} does not write. It stages, and
  * {@link #applyCommitted} applies the staged set as one batch after the caller's transaction has
  * committed, and no other path into the store exists. A process dying in between leaves the store
  * behind the log, which is the recoverable direction — the watermark did not advance, so the next
  * restore replays what was missed.
  *
- * <p>The second clause is why {@link #getCommittedBatch} and {@link #stage} reject a
- * {@linkplain #behind() behind} partition. Serving one would let a value derived from stale state be
- * produced back into the log and committed, at which point no restore can repair it: the wrong value
- * is in the log. The second clause is what keeps the first true.
+ * <p>The second clause is why every read and {@link #put} reject a {@linkplain #behind() behind}
+ * partition. Serving one would let a value derived from stale state be produced back into the log and
+ * committed, at which point no restore can repair it: the wrong value is in the log. The second
+ * clause is what keeps the first true.
  *
  * <pre>
  *    READY ---- an apply fails, or a commit outcome is unknown ----&gt; BEHIND
@@ -51,13 +50,17 @@ import java.util.function.IntFunction;
  * position in which to wrap its commit. {@link #commit} rebuilds the single-call form for callers
  * that do own their producer.
  *
+ * <p>{@link #put} and {@link #deleteRange} are named for what they mean rather than for when they
+ * happen: neither writes. Both stage, and {@link #applyCommitted} is what makes them real. Every read
+ * folds the staged set in, so a second fold over the same key sees the first one's output.
+ *
  * <p>Two checkpoints, and they never meet. The input checkpoint is the caller's and travels in its
  * transaction; the state checkpoint is this component's, taken from the {@link PendingPosition} each
  * changelog send returns, with the per-partition maximum becoming that partition's watermark after a
  * successful commit. There is one state record per changed key rather than per input record, so none
  * of the outcome calls takes a position and the caller never handles the second.
  *
- * <p>Threading: {@link #begin}, reads, {@link #stage} and the outcome call that follows belong to
+ * <p>Threading: {@link #begin}, reads, {@link #put} and the outcome call that follows belong to
  * the one thread that owns the caller's transaction. Nothing here checks it. {@link #behind()} and
  * {@link #assignment()} are safe to call from another.
  *
@@ -74,8 +77,8 @@ public final class PartitionedStore<K> implements AutoCloseable {
     /** Assigned partitions, sorted so that iteration order is the partition order. */
     private final Map<Integer, Partition> partitions = Collections.synchronizedMap(new TreeMap<>());
 
-    /** What {@link #stage} has accumulated since the last commit or discard. */
-    private final Map<Integer, Staged> staged = new TreeMap<>();
+    /** What {@link #put} has accumulated since the last commit or discard. */
+    private final Map<Integer, StagedOverlay> staged = new TreeMap<>();
 
     private PartitionedStore(Builder<K> builder) {
         this.options = builder.options;
@@ -244,7 +247,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
             if (partition == null) {
                 continue;
             }
-            dropStaged(id);
+            staged.remove(id);
             closeFlushing(partition.db);
         }
     }
@@ -296,7 +299,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
             if (partition == null) {
                 continue;
             }
-            dropStaged(id);
+            staged.remove(id);
             try {
                 partition.db.closeWithoutFlush();
             } catch (RuntimeException | Error failure) {
@@ -315,29 +318,84 @@ public final class PartitionedStore<K> implements AutoCloseable {
         if (lostFailure instanceof Error) throw (Error) lostFailure;
     }
 
-    // --- the transaction -----------------------------------------------------
+    // --- reading -------------------------------------------------------------
 
     /**
-     * Reads committed state for a set of keys at once.
+     * Reads this transaction's view of a key: what it has staged for that key, or committed state
+     * where it has staged nothing.
      *
-     * <p>It cannot be misunderstood the way a bare {@code get} can: it returns what the store holds,
-     * never what this transaction has staged. And it reads a <em>set</em> because that is what the
-     * work does — the keys for a batch are known before any of it is processed, so one call fetches
-     * the working set and the parallel phase touches no store at all.
+     * <p>Read-your-writes, and that is the point rather than a convenience. Two input records in one
+     * transaction may touch the same key, and the second fold has to see the first's output — reading
+     * committed state there would produce the pre-transaction value, derive an update from it and
+     * commit that to the log, which is a lost update no restore can repair.
      *
-     * @return the keys that are present, with absence expressed by omission
+     * @return the value, or {@code null} where the key is absent — and only then. Always a copy, so
+     *         a staged read and a committed read give the caller the same ownership
      */
-    public Map<K, byte[]> getCommittedBatch(int partition, Collection<K> keys) {
+    public byte[] get(int partition, K key) {
         Partition held = require(partition, true);
-        Map<K, byte[]> committed = new LinkedHashMap<>();
-        for (K key : Objects.requireNonNull(keys, "keys")) {
-            byte[] value = held.db.getCopy(keyBytes.apply(Objects.requireNonNull(key, "key")));
-            if (value != null) {
-                committed.put(key, value);
+        byte[] encoded = keyBytes.apply(Objects.requireNonNull(key, "key"));
+        StagedOverlay pending = staged.get(partition);
+        if (pending != null) {
+            StagedOverlay.Resolution resolved = pending.resolve(encoded);
+            if (resolved.staged) {
+                return resolved.value;
             }
         }
-        return committed;
+        return held.db.getCopy(encoded);
     }
+
+    // --- scanning ------------------------------------------------------------
+
+    /**
+     * Half-open range scan of this transaction's view; null bounds are unbounded.
+     *
+     * <p>Bounds are store bytes rather than {@code K}, because a bound need not be a whole key. So are
+     * the keys the scan delivers: the committed side supplies bytes and this component holds no
+     * decoder.
+     */
+    public StagedIterator iterator(int partition, byte[] lo, byte[] hi) {
+        Partition held = require(partition, true);
+        return new StagedIterator(held.db.iterator(lo, hi), snapshot(partition, lo, hi, false), false);
+    }
+
+    /** Prefix scan of this transaction's view. */
+    public StagedIterator prefixIterator(int partition, byte[] prefix) {
+        Partition held = require(partition, true);
+        Objects.requireNonNull(prefix, "prefix");
+        return new StagedIterator(held.db.prefixIterator(prefix),
+                prefixSnapshot(partition, prefix, false), false);
+    }
+
+    /**
+     * The same two scans, descending. Bounds keep their forward meaning — {@code lo} inclusive,
+     * {@code hi} exclusive — so a direction change reorders the answer without changing it.
+     */
+    public StagedIterator reverseIterator(int partition, byte[] lo, byte[] hi) {
+        Partition held = require(partition, true);
+        return new StagedIterator(held.db.reverseIterator(lo, hi), snapshot(partition, lo, hi, true),
+                true);
+    }
+
+    /** Prefix scan of this transaction's view, descending. */
+    public StagedIterator reversePrefixIterator(int partition, byte[] prefix) {
+        Partition held = require(partition, true);
+        Objects.requireNonNull(prefix, "prefix");
+        return new StagedIterator(held.db.reversePrefixIterator(prefix),
+                prefixSnapshot(partition, prefix, true), true);
+    }
+
+    private StagedSnapshot snapshot(int partition, byte[] lo, byte[] hi, boolean reverse) {
+        StagedOverlay pending = staged.get(partition);
+        return pending == null ? StagedSnapshot.EMPTY : pending.snapshot(lo, hi, reverse);
+    }
+
+    private StagedSnapshot prefixSnapshot(int partition, byte[] prefix, boolean reverse) {
+        StagedOverlay pending = staged.get(partition);
+        return pending == null ? StagedSnapshot.EMPTY : pending.prefixSnapshot(prefix, reverse);
+    }
+
+    // --- the transaction -----------------------------------------------------
 
     /**
      * Enqueues the changelog sends and appends to this partition's pending batch. Writes
@@ -351,13 +409,13 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * @param mutations a {@code null} value is rejected rather than guessed at; deletion is
      *                  {@link Mutation#delete()}, which reaches the log as a value the caller encodes
      */
-    public void stage(int partition, Map<K, Mutation> mutations) {
+    public void put(int partition, Map<K, Mutation> mutations) {
         Partition held = require(partition, true);
         Objects.requireNonNull(mutations, "mutations");
         if (mutations.isEmpty()) {
             return;
         }
-        Staged pending = staged.computeIfAbsent(partition, id -> new Staged());
+        StagedOverlay pending = staged.computeIfAbsent(partition, id -> new StagedOverlay());
         for (Map.Entry<K, Mutation> entry : mutations.entrySet()) {
             K key = Objects.requireNonNull(entry.getKey(), "key");
             Mutation mutation = entry.getValue();
@@ -367,14 +425,41 @@ public final class PartitionedStore<K> implements AutoCloseable {
             }
             PendingPosition position = Objects.requireNonNull(
                     changelog.send(held.id, key, mutation), "the changelog returned no position");
-            pending.positions.add(position);
-            byte[] encoded = keyBytes.apply(key);
-            if (mutation.isDelete()) {
-                pending.batch.delete(encoded);
-            } else {
-                pending.batch.put(encoded, mutation.value());
-            }
+            pending.put(keyBytes.apply(key), mutation, position);
         }
+    }
+
+    /**
+     * Enqueues one changelog record deleting every key in {@code [lower, upper)}, and appends the
+     * range to this partition's pending batch. Writes nothing.
+     *
+     * <p>One record rather than a tombstone per key, so the changelog's codec has to carry a range
+     * record: {@link Changelog#sendDeleteRange} and {@link WriteSink#deleteRange} are the two
+     * halves, and a codec that implements neither fails here, before the commit, where a failure is
+     * still abortable. The record must survive compaction under a log key nothing later supersedes —
+     * a rebuild that dropped it would resurrect every key the range covered.
+     *
+     * <p>The range lands in the same batch as the point mutations around it and in the order it was
+     * staged, so a put staged afterwards survives the delete and one staged before it does not.
+     *
+     * <p>Bounds are store bytes rather than {@code K}, because a bound need not be a whole key. An
+     * empty or inverted range stages nothing and is not an error, exactly as a scan over those bounds
+     * yields nothing.
+     */
+    public void deleteRange(int partition, byte[] lower, byte[] upper) {
+        Partition held = require(partition, true);
+        Objects.requireNonNull(lower, "lower");
+        Objects.requireNonNull(upper, "upper");
+        if (StagedOverlay.BY_KEY.compare(lower, upper) >= 0) {
+            return;
+        }
+        // Copied once and shared with the changelog, so a caller reusing its bound arrays cannot
+        // change what applies after the record has been sent.
+        byte[] from = lower.clone();
+        byte[] to = upper.clone();
+        PendingPosition position = Objects.requireNonNull(
+                changelog.sendDeleteRange(held.id, from, to), "the changelog returned no position");
+        staged.computeIfAbsent(partition, id -> new StagedOverlay()).deleteRange(from, to, position);
     }
 
     /**
@@ -429,15 +514,15 @@ public final class PartitionedStore<K> implements AutoCloseable {
         boolean terminal = false;
         RuntimeException first = null;
         try {
-            for (Map.Entry<Integer, Staged> entry : staged.entrySet()) {
+            for (Map.Entry<Integer, StagedOverlay> entry : staged.entrySet()) {
                 int id = entry.getKey();
-                Staged pending = entry.getValue();
+                StagedOverlay pending = entry.getValue();
                 try {
                     Partition partition = partitions.get(id);
                     if (partition == null) {
                         throw new PartitionNotAssignedException(id);
                     }
-                    partition.apply(pending.batch, maxPosition(pending.positions));
+                    partition.apply(pending);
                 } catch (RuntimeException failure) {
                     failed.add(id);
                     terminal |= !(failure instanceof RetryableException);
@@ -504,9 +589,6 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * can know which case it is in.
      */
     public void discard() {
-        for (Staged pending : staged.values()) {
-            pending.batch.close();
-        }
         staged.clear();
     }
 
@@ -535,22 +617,8 @@ public final class PartitionedStore<K> implements AutoCloseable {
 
     // --- internals -----------------------------------------------------------
 
-    private static long maxPosition(List<PendingPosition> positions) {
-        if (positions.isEmpty()) {
-            // Unreachable today — stage() returns before creating anything for an empty map — but the
-            // fallback would be to stamp Long.MIN_VALUE as a watermark, which is the kind of quiet
-            // catastrophe worth one branch.
-            throw new IllegalStateException("a staged batch with no changelog positions");
-        }
-        long highest = Long.MIN_VALUE;
-        for (PendingPosition position : positions) {
-            highest = Math.max(highest, position.position());
-        }
-        return highest;
-    }
-
     private void replay(Partition partition) {
-        restore.restore(partition.id, partition.materializedThrough(), partition::applyRestored);
+        restore.restore(partition.id, partition.materializedThrough(), partition);
         partition.behind = false;
     }
 
@@ -560,13 +628,6 @@ public final class PartitionedStore<K> implements AutoCloseable {
             if (partition != null) {
                 partition.behind = true;
             }
-        }
-    }
-
-    private void dropStaged(int id) {
-        Staged pending = staged.remove(id);
-        if (pending != null) {
-            pending.batch.close();
         }
     }
 
@@ -582,7 +643,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
     }
 
     /** One partition: its store, how far it has materialised, and whether it may be served. */
-    private final class Partition {
+    private final class Partition implements WriteSink<K> {
         final int id;
         final ElysiumKV db;
         volatile boolean behind;
@@ -601,19 +662,26 @@ public final class PartitionedStore<K> implements AutoCloseable {
             return hasWatermark ? OptionalLong.of(materialized) : OptionalLong.empty();
         }
 
-        /** Writes, then stamps. A failure between the two leaves the store ahead of its watermark,
-         * which replays harmlessly; the reverse would not. */
-        void apply(WriteBatch batch, long through) {
-            db.write(batch);
+        /**
+         * Writes, then stamps. A failure between the two leaves the store ahead of its watermark,
+         * which replays harmlessly; the reverse would not.
+         *
+         * <p>The position is read before anything is written, so a changelog that cannot resolve one
+         * fails with the store untouched.
+         */
+        void apply(StagedOverlay pending) {
+            long through = pending.maxPosition();
+            try (WriteBatch batch = new WriteBatch()) {
+                pending.into(batch);
+                db.write(batch);
+            }
             db.setWatermark(through);
             record(through);
         }
 
-        void applyRestored(long through, Map<K, Mutation> mutations) {
-            if (hasWatermark && through < materialized) {
-                throw new IllegalArgumentException("restore of partition " + id + " went backwards: "
-                        + through + " is below the materialised position " + materialized);
-            }
+        @Override
+        public void putBatch(long through, Map<K, Mutation> mutations) {
+            requireForward(through);
             Objects.requireNonNull(mutations, "mutations");
             try (WriteBatch batch = new WriteBatch()) {
                 for (Map.Entry<K, Mutation> entry : mutations.entrySet()) {
@@ -637,16 +705,26 @@ public final class PartitionedStore<K> implements AutoCloseable {
             record(through);
         }
 
+        @Override
+        public void deleteRange(long through, byte[] lower, byte[] upper) {
+            requireForward(through);
+            db.deleteRange(Objects.requireNonNull(lower, "lower"),
+                    Objects.requireNonNull(upper, "upper"));
+            db.setWatermark(through);
+            record(through);
+        }
+
+        private void requireForward(long through) {
+            if (hasWatermark && through < materialized) {
+                throw new IllegalArgumentException("restore of partition " + id + " went backwards: "
+                        + through + " is below the materialised position " + materialized);
+            }
+        }
+
         private void record(long through) {
             materialized = through;
             hasWatermark = true;
         }
-    }
-
-    /** A partition's pending writes, and where each of their log records landed. */
-    private static final class Staged {
-        final WriteBatch batch = new WriteBatch();
-        final List<PendingPosition> positions = new ArrayList<>();
     }
 
     /** @param <K> the key type */

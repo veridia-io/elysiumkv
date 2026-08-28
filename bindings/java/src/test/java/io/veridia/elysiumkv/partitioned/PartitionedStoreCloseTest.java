@@ -47,13 +47,23 @@ class PartitionedStoreCloseTest {
             PartitionedStore<String> store = PartitionedStore.<String>builder()
                     .options(partition -> fixture.optionsFor(partition).memoryBudget(budget))
                     .keyBytes(PartitionFixture.KEY_BYTES)
-                    .changelog((partition, key, mutation) -> () -> 0L)
+                    .changelog(new Changelog<String>() {
+                        @Override
+                        public PendingPosition send(int p, String key, Mutation mutation) {
+                            return () -> 0L;
+                        }
+
+                        @Override
+                        public PendingPosition sendDeleteRange(int p, byte[] lo, byte[] hi) {
+                            return () -> 0L;
+                        }
+                    })
                     // Nothing to replay: this test is about the way out, not the way in.
                     .restore((partition, materializedThrough, sink) -> { })
                     .build();
             store.assign(Set.of(0));
             store.begin();
-            store.stage(0, Map.of("k", Mutation.put("v".getBytes())));
+            store.put(0, Map.of("k", Mutation.put("v".getBytes())));
             store.applyCommitted();
 
             // The flush writes an object; a store directory it cannot write to is the simplest way

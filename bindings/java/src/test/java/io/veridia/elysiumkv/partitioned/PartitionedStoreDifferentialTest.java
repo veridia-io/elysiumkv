@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +21,7 @@ import java.util.TreeSet;
 import static io.veridia.elysiumkv.partitioned.InMemoryLog.bytes;
 import static io.veridia.elysiumkv.partitioned.InMemoryLog.string;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -54,6 +56,7 @@ class PartitionedStoreDifferentialTest {
     private PartitionedStore<String> store;
     private int poisoned = -1;
 
+
     @AfterEach
     void tearDown() {
         if (store != null) {
@@ -68,12 +71,26 @@ class PartitionedStoreDifferentialTest {
     @ValueSource(longs = {1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233})
     @DisplayName("a partition that is not behind matches its log, whatever the operation stream")
     void theStoreNeverDivergesFromTheLog(long seed) {
+        run(seed);
+    }
+
+    private void run(long seed) {
         fixture = new PartitionFixture(root);
         log = new InMemoryLog();
         store = PartitionedStore.<String>builder()
                 .options(fixture::optionsFor)
                 .keyBytes(PartitionFixture.KEY_BYTES)
-                .changelog(this::send)
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        return PartitionedStoreDifferentialTest.this.send(partition, key, mutation);
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lower, byte[] upper) {
+                        return poison(partition, log.sendDeleteRange(partition, lower, upper));
+                    }
+                })
                 .restore(log.restoreIn(16))
                 .build();
 
@@ -93,6 +110,25 @@ class PartitionedStoreDifferentialTest {
                         + divergence.getMessage());
             }
         }
+        assertRangeDeletesWereExercised();
+    }
+
+    /**
+     * The premise, asserted rather than hoped for: a random stream can leave a branch untaken, and a
+     * run that never issued a range delete would pass everything above while saying nothing about
+     * them. So the last step is one that is not optional.
+     */
+    private void assertRangeDeletesWereExercised() {
+        store.repair(store.behind());
+        store.deleteRange(0, bytes("k1"), bytes("k2"));
+        store.put(0, Collections.singletonMap("k1", Mutation.put(bytes("survivor"))));
+        store.commit(log::commitTransaction);
+        verify();
+        assertEquals("survivor", string(store.get(0, "k1")),
+                "a put staged after a range delete must survive the apply");
+        for (String covered : Arrays.asList("k10", "k11", "k12", "k13")) {
+            assertNull(store.get(0, covered), covered + " was covered by the band and must be gone");
+        }
     }
 
     // --- the operations ------------------------------------------------------
@@ -111,8 +147,11 @@ class PartitionedStoreDifferentialTest {
         if (roll < 75) {
             return commitWithAFailingApply(random);
         }
-        if (roll < 82) {
+        if (roll < 78) {
             return stageThenDiscard(random);
+        }
+        if (roll < 82) {
+            return commitARangeDelete(random);
         }
         if (roll < 90) {
             return repairEverythingBehind();
@@ -177,7 +216,7 @@ class PartitionedStoreDifferentialTest {
         try {
             stageInto(random);
             // Guarantee the poisoned partition is in this transaction rather than hoping.
-            store.stage(poisoned, Collections.singletonMap("k" + random.nextInt(KEYSPACE),
+            store.put(poisoned, Collections.singletonMap("k" + random.nextInt(KEYSPACE),
                     Mutation.put(bytes("v" + random.nextInt(1000)))));
             store.commit(log::commitTransaction);
             fail("partition " + poisoned + " was staged with a poisoned position and still applied");
@@ -202,6 +241,31 @@ class PartitionedStoreDifferentialTest {
             }
         }
         return ready;
+    }
+
+    /**
+     * A range delete over a slice of the keyspace, committed alongside whatever else is staged. The
+     * band is a key prefix rather than arbitrary bytes, so it collides with the keyspace constantly.
+     */
+    private String commitARangeDelete(Random random) {
+        List<Integer> ready = ready();
+        if (ready.isEmpty()) {
+            return "nothing ready for a range delete";
+        }
+        int partition = ready.get(random.nextInt(ready.size()));
+        int digit = random.nextInt(2);
+        byte[] lower = bytes("k" + digit);
+        byte[] upper = bytes("k" + (digit + 1));
+        stageInto(random);
+        store.deleteRange(partition, lower, upper);
+        // Staged after the range on purpose: the apply has to keep that order, and a stream that only
+        // ever staged the range last could not tell the difference.
+        if (random.nextBoolean()) {
+            store.put(partition, Collections.singletonMap("k" + digit,
+                    Mutation.put(bytes("v" + random.nextInt(1000)))));
+        }
+        store.commit(log::commitTransaction);
+        return "range delete [k" + digit + ", k" + (digit + 1) + ") on " + partition;
     }
 
     private String stageThenDiscard(Random random) {
@@ -247,14 +311,17 @@ class PartitionedStoreDifferentialTest {
                         ? Mutation.delete()
                         : Mutation.put(bytes("v" + random.nextInt(1000))));
             }
-            store.stage(partition, mutations);
+            store.put(partition, mutations);
             staged = true;
         }
         return staged;
     }
 
     private PendingPosition send(int partition, String key, Mutation mutation) {
-        PendingPosition real = log.send(partition, key, mutation);
+        return poison(partition, log.send(partition, key, mutation));
+    }
+
+    private PendingPosition poison(int partition, PendingPosition real) {
         return partition == poisoned
                 ? () -> {
                     throw new IllegalStateException("differential: injected apply failure");
@@ -269,8 +336,11 @@ class PartitionedStoreDifferentialTest {
             if (store.behind().contains(partition) || !store.assignment().contains(partition)) {
                 continue;
             }
-            assertEquals(replayed(partition), held(partition),
+            Map<String, String> expected = replayed(partition);
+            assertEquals(expected, held(partition),
                     "partition " + partition + " does not match its log");
+            assertEquals(expected, scanned(partition),
+                    "partition " + partition + " scans differently from how it reads");
         }
     }
 
@@ -278,6 +348,10 @@ class PartitionedStoreDifferentialTest {
     private Map<String, String> replayed(int partition) {
         Map<String, String> state = new TreeMap<>();
         for (InMemoryLog.Record record : log.committed(partition)) {
+            if (record.isRangeDelete()) {
+                state.keySet().removeIf(key -> covered(key, record.lower, record.upper));
+                continue;
+            }
             Mutation mutation = InMemoryLog.decode(record.value);
             if (mutation.isDelete()) {
                 state.remove(record.key);
@@ -288,15 +362,37 @@ class PartitionedStoreDifferentialTest {
         return state;
     }
 
+    /** Half-open over the store's own key order, which is what the engine's range delete uses. */
+    private static boolean covered(String key, byte[] lower, byte[] upper) {
+        byte[] encoded = bytes(key);
+        return Arrays.compareUnsigned(encoded, lower) >= 0 && Arrays.compareUnsigned(encoded, upper) < 0;
+    }
+
+    /** The same state reached by a scan rather than by point reads. */
+    private Map<String, String> scanned(int partition) {
+        Map<String, String> state = new TreeMap<>();
+        try (StagedIterator scan = store.iterator(partition, null, null)) {
+            while (scan.next()) {
+                String key = string(scan.key());
+                assertTrue(state.put(key, string(scan.value())) == null,
+                        "the scan delivered " + key + " twice");
+            }
+            scan.status();
+        }
+        return state;
+    }
+
     private Map<String, String> held(int partition) {
         Set<String> keys = new TreeSet<>();
         for (int i = 0; i < KEYSPACE; ++i) {
             keys.add("k" + i);
         }
         Map<String, String> state = new TreeMap<>();
-        for (Map.Entry<String, byte[]> entry
-                : store.getCommittedBatch(partition, new ArrayList<>(keys)).entrySet()) {
-            state.put(entry.getKey(), string(entry.getValue()));
+        for (String key : keys) {
+            byte[] value = store.get(partition, key);
+            if (value != null) {
+                state.put(key, string(value));
+            }
         }
         return state;
     }

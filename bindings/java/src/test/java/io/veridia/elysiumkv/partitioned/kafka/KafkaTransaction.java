@@ -56,13 +56,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * PartitionedStore<Bytes> store = PartitionedStore.<Bytes>builder()
  *         .options(config::optionsFor)
  *         .keyBytes(Bytes::get)
- *         .changelog((partition, key, mutation) ->
- *                 tx.send(STATE_TOPIC, partition, key.get(), codec.encode(mutation)))
+ *         .changelog(myChangelog)   // send() and sendDeleteRange() over tx.send(STATE_TOPIC, ...)
  *         .restore(myReplay)
  *         .build();
  *
  * tx.begin();
- * // ... getCommittedBatch, fold, stage ...
+ * // ... get, fold, put ...
  * store.commit(() -> tx.commit(polled.nextOffsets(), consumer.groupMetadata()));
  * }</pre>
  */
