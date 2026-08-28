@@ -20,7 +20,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
 import java.util.function.IntFunction;
@@ -566,6 +565,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
         SortedSet<Integer> failed = new TreeSet<>();
         boolean terminal = false;
         RuntimeException first = null;
+        requireQuiet("applyCommitted");
         try {
             for (Map.Entry<Integer, StagedOverlay> entry : staged.entrySet()) {
                 int id = entry.getKey();
@@ -575,7 +575,14 @@ public final class PartitionedStore<K> implements AutoCloseable {
                     if (partition == null) {
                         throw new PartitionNotAssignedException(id);
                     }
-                    partition.apply(pending);
+                    // Under the write lock: the apply reads the overlay and then it is dropped, which
+                    // makes this a writer under the same discipline as staging.
+                    partition.stageLock.writeLock().lock();
+                    try {
+                        partition.apply(pending);
+                    } finally {
+                        partition.stageLock.writeLock().unlock();
+                    }
                 } catch (RuntimeException failure) {
                     failed.add(id);
                     terminal |= !(failure instanceof RetryableException);
@@ -585,7 +592,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
                 }
             }
         } finally {
-            discard();
+            dropStaged();
         }
         if (!failed.isEmpty()) {
             markBehind(failed);
@@ -642,6 +649,16 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * can know which case it is in.
      */
     public void discard() {
+        requireQuiet("discard");
+        dropStaged();
+    }
+
+    /**
+     * Drops the staged set without checking or locking, for the paths that must not fail: the
+     * {@code finally} of an apply, where a refusal would mask the failure being reported, and
+     * {@link #close}, which has to release the partitions whatever the caller's threads are doing.
+     */
+    private void dropStaged() {
         staged.clear();
     }
 
@@ -657,14 +674,37 @@ public final class PartitionedStore<K> implements AutoCloseable {
      * the transaction manager surfaces that from, it belongs here.
      */
     public void discardUnknown() {
+        requireQuiet("discardUnknown");
         markBehind(staged.keySet());
-        discard();
+        dropStaged();
+    }
+
+    /**
+     * Refuses a transaction boundary while a thread is still reading or staging, which is a caller
+     * that has not joined its parallel phase.
+     *
+     * <p>Read from the lock's own counters, so it costs nothing on the paths it guards. Best-effort by
+     * nature — a thread can begin a moment after the check — and worth having anyway, because the
+     * failure it replaces is a write that quietly never lands.
+     */
+    private void requireQuiet(String boundary) {
+        for (Integer id : staged.keySet()) {
+            Partition partition = partitions.get(id);
+            if (partition == null) {
+                continue;
+            }
+            if (partition.stageLock.isWriteLocked() || partition.stageLock.getReadLockCount() > 0) {
+                throw new IllegalStateException(boundary + " ran while partition " + id
+                        + " was still being read or staged; join the parallel phase before a"
+                        + " transaction boundary");
+            }
+        }
     }
 
     /** Flushes and closes every partition still held. */
     @Override
     public void close() {
-        discard();
+        dropStaged();
         revoke(assignment());
     }
 
@@ -709,7 +749,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
          * a read can see a point mutation and miss a range delete staged between the two lookups that
          * resolve it, and answer with a value that never existed.
          */
-        final ReadWriteLock stageLock = new ReentrantReadWriteLock();
+        final ReentrantReadWriteLock stageLock = new ReentrantReadWriteLock();
 
         /** The materialised position, or -1 for none — one field, because two cannot be read atomically. */
         private volatile long materialized;

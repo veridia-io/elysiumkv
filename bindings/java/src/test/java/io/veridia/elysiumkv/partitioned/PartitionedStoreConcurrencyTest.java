@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.veridia.elysiumkv.partitioned.InMemoryLog.bytes;
 import static io.veridia.elysiumkv.partitioned.InMemoryLog.string;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -159,6 +160,52 @@ class PartitionedStoreConcurrencyTest {
         assertEquals(replayed(0), held(0),
                 "the band and the points must resolve the way the log orders them");
         assertTrue(store.behind().isEmpty());
+    }
+
+    @Test
+    @DisplayName("a commit while a thread is still staging is refused, not silently half-applied")
+    void aBoundaryDuringTheParallelPhaseIsRefused() throws Exception {
+        java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+
+        // A changelog that parks inside send, so the staging thread is provably holding the write
+        // lock when the boundary is attempted — counted, not timed.
+        store = PartitionedStore.<String>builder()
+                .options(fixture::optionsFor)
+                .keyBytes(PartitionFixture.KEY_BYTES)
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        inside.countDown();
+                        try {
+                            release.await();
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                        }
+                        synchronized (log) {
+                            return log.send(partition, key, mutation);
+                        }
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lo, byte[] hi) {
+                        throw new UnsupportedOperationException();
+                    }
+                })
+                .restore(log.restoreIn(64))
+                .build();
+        store.assign(Collections.singletonList(0));
+
+        java.util.concurrent.Future<?> staging = pool.submit(
+                () -> store.put(0, Collections.singletonMap("k", Mutation.put(bytes("v")))));
+        assertTrue(inside.await(5, java.util.concurrent.TimeUnit.SECONDS), "the stage never started");
+
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> store.applyCommitted());
+        assertTrue(refused.getMessage().contains("still being read or staged"), refused.getMessage());
+
+        release.countDown();
+        staging.get();
     }
 
     // --- support -------------------------------------------------------------
