@@ -68,7 +68,8 @@ import java.util.function.IntFunction;
  * carries a read-write lock, held for writing across a changelog send and the staging that records it
  * so that the order two threads reach the log is the order the store applies, and held for reading by
  * every read so that a point mutation and a range delete cannot be seen half-applied. Threads staging
- * into different partitions never contend.
+ * into different partitions never contend. A {@link Changelog} send runs under that write lock and
+ * may read its own partition from the same thread, which {@link Changelog} states as a guarantee.
  *
  * <p>The other half is exclusive, and unchecked. {@link #begin}, {@link #applyCommitted},
  * {@link #commit}, {@link #discard}, {@link #discardUnknown} and {@link #close} are transaction

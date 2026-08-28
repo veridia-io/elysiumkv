@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -206,6 +207,55 @@ class PartitionedStoreConcurrencyTest {
 
         release.countDown();
         staging.get();
+    }
+
+    // Pins the visibility half of the guarantee — what a send sees — which is what an assertion can
+    // reach. The re-entrancy half has no fail-fast control: a read path that stopped being re-entrant
+    // with the stage lock deadlocks here, and @Timeout does not preempt a blocked thread.
+    @Test
+    @DisplayName("a changelog send may read the partition it is staging into, and sees what came before it")
+    void aSendMayReadItsOwnPartition() {
+        List<String> seen = new ArrayList<>();
+        store = PartitionedStore.<String>builder()
+                .options(fixture::optionsFor)
+                .keyBytes(PartitionFixture.KEY_BYTES)
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        // Re-entrant on purpose: this thread holds the partition's write lock, and a
+                        // hook that must choose a mechanism has to see what it is about to change.
+                        seen.add("get=" + string(store.get(partition, "before")));
+                        try (StagedIterator scan = store.iterator(partition, null, null)) {
+                            int rows = 0;
+                            while (scan.next()) {
+                                ++rows;
+                            }
+                            seen.add("rows=" + rows);
+                        }
+                        return log.send(partition, key, mutation);
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lo, byte[] hi) {
+                        throw new UnsupportedOperationException();
+                    }
+                })
+                .restore(log.restoreIn(64))
+                .build();
+        store.assign(Collections.singletonList(0));
+
+        store.put(0, Collections.singletonMap("before", Mutation.put(bytes("v"))));
+        store.commit(log::commitTransaction);
+        seen.clear();
+
+        Map<String, Mutation> two = new java.util.LinkedHashMap<>();
+        two.put("k1", Mutation.put(bytes("1")));
+        two.put("k2", Mutation.put(bytes("2")));
+        store.put(0, two);
+
+        // The second send sees the first already staged; neither sees the mutation it is sending,
+        // which is recorded only after the send returns.
+        assertEquals(Arrays.asList("get=v", "rows=1", "get=v", "rows=2"), seen);
     }
 
     // --- support -------------------------------------------------------------
