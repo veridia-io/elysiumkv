@@ -263,6 +263,22 @@ class PartitionedStoreStagedViewTest {
         }
     }
 
+    @Test
+    @DisplayName("a scan's status can be asked after it is closed")
+    void aScanStatusOutlivesTheIterator() {
+        open();
+        commit(put("a", "1"));
+        store.put(0, put("b", "2"));
+
+        StagedIterator scan = store.iterator(0, null, null);
+        try (StagedIterator drained = scan) {
+            while (drained.next()) {
+                drained.key();
+            }
+        }
+        scan.status();   // the whole point: no "iterator is closed" from a drained scan
+    }
+
     // --- range deletes -------------------------------------------------------
 
     @Test

@@ -44,6 +44,8 @@ public final class StagedIterator implements AutoCloseable {
     private byte[] key;
     private byte[] value;
     private boolean committedDone;
+    private boolean closed;
+    private RuntimeException committedFailure;
     private boolean exhausted;
 
     StagedIterator(ElysiumKVIterator committed, StagedSnapshot staged, boolean reverse) {
@@ -93,13 +95,26 @@ public final class StagedIterator implements AutoCloseable {
         return positioned(value);
     }
 
-    /** Throws if the committed side stopped because of a failure rather than exhaustion. */
+    /**
+     * Throws if the committed side stopped because of a failure rather than exhaustion. Answers after
+     * {@link #close} as well as before: the reason is captured where the scan stops, so a caller can
+     * drain inside a try-with-resources and ask afterwards.
+     *
+     * <p>Silent for a scan abandoned before the committed side ran out, which has no exhaustion to
+     * explain.
+     */
     public void status() {
-        committed.status();
+        if (committedFailure != null) {
+            throw committedFailure;
+        }
+        if (!committedDone && !closed) {
+            committed.status();
+        }
     }
 
     @Override
     public void close() {
+        closed = true;
         committed.close();
     }
 
@@ -115,6 +130,13 @@ public final class StagedIterator implements AutoCloseable {
             return;
         }
         committedDone = true;
+        // Asked here, while the iterator is certainly open: exhaustion and failure look identical from
+        // next() alone, and this is the moment the difference is still available.
+        try {
+            committed.status();
+        } catch (RuntimeException failure) {
+            committedFailure = failure;
+        }
     }
 
     private boolean precedes(byte[] a, byte[] b) {
