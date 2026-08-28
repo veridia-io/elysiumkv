@@ -12,12 +12,17 @@ package io.veridia.elysiumkv.partitioned;
  * transaction understands, and an unclassified throw escaping the caller's catch blocks leaves a
  * transaction open with batches staged.
  *
- * <p>Reading the partition from inside a send is supported, and is a guarantee rather than an
- * accident of the implementation. A send runs while {@link PartitionedStore} holds that partition's
- * write lock, and the store's read paths take its read lock, which the same thread may acquire while
- * holding the write one. So {@link PartitionedStore#get} and the scans may be called here — for a
- * hook that wants to know what it is about to change, such as one choosing between a range record
- * and per-key tombstones by counting the band.
+ * <p>Reading the partition from inside a send works today, and is deliberately not promised. A send
+ * runs while {@link PartitionedStore} holds that partition's write lock, and the store's read paths
+ * take its read lock, which the same thread may acquire while holding the write one — so
+ * {@link PartitionedStore#get} and the scans do return here, for a hook that wants to know what it is
+ * about to change.
+ *
+ * <p>Not a compatibility guarantee, because promising it would pin the read path to a lock re-entrant
+ * with the stage lock, and the read lock is a contended write to one cacheline on every read — which
+ * a store folding many keys of one partition at once may well want to replace with a snapshot nothing
+ * locks to read. Ask if you need it guaranteed; it is one edit and no consumer currently relies on
+ * it.
  *
  * <p>Three conditions on that. It must be <em>this</em> thread: handing the read to another one
  * deadlocks, because that thread's read lock waits on the write lock this one holds. What it sees is

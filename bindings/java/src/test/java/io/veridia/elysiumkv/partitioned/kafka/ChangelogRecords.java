@@ -11,12 +11,21 @@ import java.util.Arrays;
  * band would come back, silently. So every record key carries a tag and the two kinds live in
  * separate key spaces.
  *
- * <p>A range record's key is the bounds themselves rather than a hash or a counter, and both of those
- * alternatives are wrong in ways worth stating. A counter is never superseded, so every range delete
- * ever issued is retained and replayed on every cold rebuild. A hash — or the lower bound alone —
- * lets two different bands collide, and the later record then supersedes a deletion it does not
- * cover. Keying by the exact pair means only a repeat of the <em>same</em> band supersedes, which is
- * safe: the surviving record sits at the later offset and covers exactly what the dropped one did.
+ * <p>A range record's key is the bounds themselves, which is the encoding that is safe for
+ * <em>arbitrary</em> bands. A counter is never superseded, so every range delete ever issued is
+ * retained and replayed on every cold rebuild. A hash lets two unrelated bands collide, and the later
+ * record then supersedes a deletion it does not cover. Keying by the exact pair means only a repeat of
+ * the same band supersedes, which is safe: the survivor sits at the later offset and covers exactly
+ * what the dropped record did.
+ *
+ * <p>Keying by the lower bound alone is the better encoding where it applies, and it applies more
+ * often than the paragraph above suggests. Dropping {@code [l, u1)} in favour of {@code [l, u2)} is
+ * lossless exactly when {@code u2 >= u1}: the survivor is then a superset at a later offset, so it
+ * covers everything the dropped record did, including anything rewritten in between. A retention
+ * sweep over a window derived from a monotonic clock satisfies that by construction — constant lower
+ * bound, upper bound that only moves forward — and it is the case where the pair-keyed encoding hurts
+ * most, because every sweep produces a distinct key that nothing ever supersedes. A band whose upper
+ * bound can move backwards must use the pair.
  *
  * <p>The tag costs a byte on every point record, so adopting this on a topic that already holds
  * untagged records means a re-key or a fresh topic. A caller whose key schema has a provably unused

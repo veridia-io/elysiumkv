@@ -209,9 +209,9 @@ class PartitionedStoreConcurrencyTest {
         staging.get();
     }
 
-    // Pins the visibility half of the guarantee — what a send sees — which is what an assertion can
-    // reach. The re-entrancy half has no fail-fast control: a read path that stopped being re-entrant
-    // with the stage lock deadlocks here, and @Timeout does not preempt a blocked thread.
+    // Pins what a send sees, which is contractual. That it can read at all is not promised — see
+    // Changelog — and could not be pinned anyway: a read path that stopped being re-entrant with the
+    // stage lock deadlocks here rather than failing, and @Timeout does not preempt a blocked thread.
     @Test
     @DisplayName("a changelog send may read the partition it is staging into, and sees what came before it")
     void aSendMayReadItsOwnPartition() {
