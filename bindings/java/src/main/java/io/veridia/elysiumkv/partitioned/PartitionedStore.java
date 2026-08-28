@@ -18,6 +18,10 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 
@@ -60,9 +64,19 @@ import java.util.function.IntFunction;
  * successful commit. There is one state record per changed key rather than per input record, so none
  * of the outcome calls takes a position and the caller never handles the second.
  *
- * <p>Threading: {@link #begin}, reads, {@link #put} and the outcome call that follows belong to
- * the one thread that owns the caller's transaction. Nothing here checks it. {@link #behind()} and
- * {@link #assignment()} are safe to call from another.
+ * <p>Threading, in two halves. {@link #get}, {@link #put} and {@link #deleteRange} may be called
+ * from several threads at once, which is what lets a fold parallelise over its keys: each partition
+ * carries a read-write lock, held for writing across a changelog send and the staging that records it
+ * so that the order two threads reach the log is the order the store applies, and held for reading by
+ * every read so that a point mutation and a range delete cannot be seen half-applied. Threads staging
+ * into different partitions never contend.
+ *
+ * <p>The other half is exclusive, and unchecked. {@link #begin}, {@link #applyCommitted},
+ * {@link #commit}, {@link #discard}, {@link #discardUnknown} and {@link #close} are transaction
+ * boundaries: they resolve everything staged, so the caller must have joined its parallel phase
+ * before calling one. {@link #assign}, {@link #repair}, {@link #revoke} and {@link #lost} are the
+ * same. A {@link StagedIterator} belongs to the thread that created it, as the engine's own iterators
+ * do. {@link #behind()}, {@link #assignment()} and {@link #stats()} are safe from any thread.
  *
  * @param <K> the key type. Not {@code byte[]}: Java arrays use identity equality, so two separately
  *            deserialised arrays holding the same bytes are different map keys.
@@ -77,8 +91,13 @@ public final class PartitionedStore<K> implements AutoCloseable {
     /** Assigned partitions, sorted so that iteration order is the partition order. */
     private final Map<Integer, Partition> partitions = Collections.synchronizedMap(new TreeMap<>());
 
-    /** What {@link #put} has accumulated since the last commit or discard. */
-    private final Map<Integer, StagedOverlay> staged = new TreeMap<>();
+    /**
+     * What {@link #put} has accumulated since the last commit or discard, in partition order.
+     *
+     * <p>Concurrent because several threads may stage at once; ordered because {@link #applyCommitted}
+     * walks it. Each entry's contents are guarded by that partition's {@code stageLock}.
+     */
+    private final ConcurrentNavigableMap<Integer, StagedOverlay> staged = new ConcurrentSkipListMap<>();
 
     private PartitionedStore(Builder<K> builder) {
         this.options = builder.options;
@@ -337,9 +356,14 @@ public final class PartitionedStore<K> implements AutoCloseable {
         byte[] encoded = keyBytes.apply(Objects.requireNonNull(key, "key"));
         StagedOverlay pending = staged.get(partition);
         if (pending != null) {
-            StagedOverlay.Resolution resolved = pending.resolve(encoded);
-            if (resolved.staged) {
-                return resolved.value;
+            held.stageLock.readLock().lock();
+            try {
+                StagedOverlay.Resolution resolved = pending.resolve(encoded);
+                if (resolved.staged) {
+                    return resolved.value;
+                }
+            } finally {
+                held.stageLock.readLock().unlock();
             }
         }
         return held.db.getCopy(encoded);
@@ -356,7 +380,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
      */
     public StagedIterator iterator(int partition, byte[] lo, byte[] hi) {
         Partition held = require(partition, true);
-        return new StagedIterator(held.db.iterator(lo, hi), snapshot(partition, lo, hi, false), false);
+        return new StagedIterator(held.db.iterator(lo, hi), snapshot(held, lo, hi, false), false);
     }
 
     /** Prefix scan of this transaction's view. */
@@ -364,7 +388,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
         Partition held = require(partition, true);
         Objects.requireNonNull(prefix, "prefix");
         return new StagedIterator(held.db.prefixIterator(prefix),
-                prefixSnapshot(partition, prefix, false), false);
+                prefixSnapshot(held, prefix, false), false);
     }
 
     /**
@@ -373,7 +397,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
      */
     public StagedIterator reverseIterator(int partition, byte[] lo, byte[] hi) {
         Partition held = require(partition, true);
-        return new StagedIterator(held.db.reverseIterator(lo, hi), snapshot(partition, lo, hi, true),
+        return new StagedIterator(held.db.reverseIterator(lo, hi), snapshot(held, lo, hi, true),
                 true);
     }
 
@@ -382,17 +406,33 @@ public final class PartitionedStore<K> implements AutoCloseable {
         Partition held = require(partition, true);
         Objects.requireNonNull(prefix, "prefix");
         return new StagedIterator(held.db.reversePrefixIterator(prefix),
-                prefixSnapshot(partition, prefix, true), true);
+                prefixSnapshot(held, prefix, true), true);
     }
 
-    private StagedSnapshot snapshot(int partition, byte[] lo, byte[] hi, boolean reverse) {
-        StagedOverlay pending = staged.get(partition);
-        return pending == null ? StagedSnapshot.EMPTY : pending.snapshot(lo, hi, reverse);
+    private StagedSnapshot snapshot(Partition held, byte[] lo, byte[] hi, boolean reverse) {
+        StagedOverlay pending = staged.get(held.id);
+        if (pending == null) {
+            return StagedSnapshot.EMPTY;
+        }
+        held.stageLock.readLock().lock();
+        try {
+            return pending.snapshot(lo, hi, reverse);
+        } finally {
+            held.stageLock.readLock().unlock();
+        }
     }
 
-    private StagedSnapshot prefixSnapshot(int partition, byte[] prefix, boolean reverse) {
-        StagedOverlay pending = staged.get(partition);
-        return pending == null ? StagedSnapshot.EMPTY : pending.prefixSnapshot(prefix, reverse);
+    private StagedSnapshot prefixSnapshot(Partition held, byte[] prefix, boolean reverse) {
+        StagedOverlay pending = staged.get(held.id);
+        if (pending == null) {
+            return StagedSnapshot.EMPTY;
+        }
+        held.stageLock.readLock().lock();
+        try {
+            return pending.prefixSnapshot(prefix, reverse);
+        } finally {
+            held.stageLock.readLock().unlock();
+        }
     }
 
     // --- the transaction -----------------------------------------------------
@@ -416,16 +456,23 @@ public final class PartitionedStore<K> implements AutoCloseable {
             return;
         }
         StagedOverlay pending = staged.computeIfAbsent(partition, id -> new StagedOverlay());
-        for (Map.Entry<K, Mutation> entry : mutations.entrySet()) {
-            K key = Objects.requireNonNull(entry.getKey(), "key");
-            Mutation mutation = entry.getValue();
-            if (mutation == null) {
-                throw new NullPointerException("null value for key " + key
-                        + "; use Mutation.delete(), which survives log compaction");
+        // One critical section for the whole map, so its records are contiguous in the log and it
+        // lands as a unit against a concurrent stage.
+        held.stageLock.writeLock().lock();
+        try {
+            for (Map.Entry<K, Mutation> entry : mutations.entrySet()) {
+                K key = Objects.requireNonNull(entry.getKey(), "key");
+                Mutation mutation = entry.getValue();
+                if (mutation == null) {
+                    throw new NullPointerException("null value for key " + key
+                            + "; use Mutation.delete(), which survives log compaction");
+                }
+                PendingPosition position = Objects.requireNonNull(
+                        changelog.send(held.id, key, mutation), "the changelog returned no position");
+                pending.put(keyBytes.apply(key), mutation, position);
             }
-            PendingPosition position = Objects.requireNonNull(
-                    changelog.send(held.id, key, mutation), "the changelog returned no position");
-            pending.put(keyBytes.apply(key), mutation, position);
+        } finally {
+            held.stageLock.writeLock().unlock();
         }
     }
 
@@ -457,9 +504,15 @@ public final class PartitionedStore<K> implements AutoCloseable {
         // change what applies after the record has been sent.
         byte[] from = lower.clone();
         byte[] to = upper.clone();
-        PendingPosition position = Objects.requireNonNull(
-                changelog.sendDeleteRange(held.id, from, to), "the changelog returned no position");
-        staged.computeIfAbsent(partition, id -> new StagedOverlay()).deleteRange(from, to, position);
+        StagedOverlay pending = staged.computeIfAbsent(partition, id -> new StagedOverlay());
+        held.stageLock.writeLock().lock();
+        try {
+            PendingPosition position = Objects.requireNonNull(
+                    changelog.sendDeleteRange(held.id, from, to), "the changelog returned no position");
+            pending.deleteRange(from, to, position);
+        } finally {
+            held.stageLock.writeLock().unlock();
+        }
     }
 
     /**
@@ -647,19 +700,29 @@ public final class PartitionedStore<K> implements AutoCloseable {
         final int id;
         final ElysiumKV db;
         volatile boolean behind;
-        long materialized;
-        boolean hasWatermark;
+
+        /**
+         * Held for writing across a changelog send and the staging it records, and for reading by
+         * every read. Both halves are load-bearing. Without the write half two threads staging the
+         * same key can land in the overlay in the opposite order to the one their records took in the
+         * log, and the store then applies a value the log says was superseded. Without the read half
+         * a read can see a point mutation and miss a range delete staged between the two lookups that
+         * resolve it, and answer with a value that never existed.
+         */
+        final ReadWriteLock stageLock = new ReentrantReadWriteLock();
+
+        /** The materialised position, or -1 for none — one field, because two cannot be read atomically. */
+        private volatile long materialized;
 
         Partition(int id, ElysiumKV db) {
             this.id = id;
             this.db = db;
-            OptionalLong recovered = db.recoveredWatermark();
-            this.hasWatermark = recovered.isPresent();
-            this.materialized = recovered.orElse(0L);
+            this.materialized = db.recoveredWatermark().orElse(-1L);
         }
 
         OptionalLong materializedThrough() {
-            return hasWatermark ? OptionalLong.of(materialized) : OptionalLong.empty();
+            long through = materialized;
+            return through < 0 ? OptionalLong.empty() : OptionalLong.of(through);
         }
 
         /**
@@ -715,7 +778,7 @@ public final class PartitionedStore<K> implements AutoCloseable {
         }
 
         private void requireForward(long through) {
-            if (hasWatermark && through < materialized) {
+            if (materialized >= 0 && through < materialized) {
                 throw new IllegalArgumentException("restore of partition " + id + " went backwards: "
                         + through + " is below the materialised position " + materialized);
             }
@@ -723,7 +786,6 @@ public final class PartitionedStore<K> implements AutoCloseable {
 
         private void record(long through) {
             materialized = through;
-            hasWatermark = true;
         }
     }
 
