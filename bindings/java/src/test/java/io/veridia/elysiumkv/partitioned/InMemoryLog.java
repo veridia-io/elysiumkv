@@ -25,10 +25,26 @@ final class InMemoryLog {
     static final class Record {
         final String key;
         final byte[] value;
+        final byte[] lower;
+        final byte[] upper;
 
         Record(String key, byte[] value) {
             this.key = key;
             this.value = value;
+            this.lower = null;
+            this.upper = null;
+        }
+
+        Record(byte[] lower, byte[] upper) {
+            this.key = null;
+            this.value = null;
+            this.lower = lower;
+            this.upper = upper;
+        }
+
+        /** A range delete carries bounds instead of a key, which is how the two kinds are told apart. */
+        boolean isRangeDelete() {
+            return key == null;
         }
     }
 
@@ -40,6 +56,14 @@ final class InMemoryLog {
         List<Record> pending = open.computeIfAbsent(partition, id -> new ArrayList<>());
         long offset = size(partition) + pending.size();
         pending.add(new Record(key, encode(mutation)));
+        return () -> offset;
+    }
+
+    /** The range-delete record kind, without which {@code deleteRange} has nothing to travel on. */
+    PendingPosition sendDeleteRange(int partition, byte[] lower, byte[] upper) {
+        List<Record> pending = open.computeIfAbsent(partition, id -> new ArrayList<>());
+        long offset = size(partition) + pending.size();
+        pending.add(new Record(lower, upper));
         return () -> offset;
     }
 
@@ -72,14 +96,33 @@ final class InMemoryLog {
         return (partition, materializedThrough, sink) -> {
             List<Record> records = committed(partition);
             int from = materializedThrough.isPresent() ? (int) materializedThrough.getAsLong() + 1 : 0;
-            for (int start = from; start < records.size(); start += batchSize) {
-                int end = Math.min(start + batchSize, records.size());
-                Map<String, Mutation> batch = new LinkedHashMap<>();
-                for (int i = start; i < end; ++i) {
-                    Record record = records.get(i);
-                    batch.put(record.key, decode(record.value));
+            Map<String, Mutation> batch = new LinkedHashMap<>();
+            int through = -1;
+            for (int i = from; i < records.size(); ++i) {
+                Record record = records.get(i);
+                if (record.isRangeDelete()) {
+                    // Flushed first: the range covers what exists at its own position, so everything
+                    // below it has to be applied before it.
+                    if (through >= 0) {
+                        sink.putBatch(through, batch);
+                        batch = new LinkedHashMap<>();
+                        through = -1;
+                    }
+                    sink.deleteRange(i, record.lower, record.upper);
+                    from = i + 1;
+                    continue;
                 }
-                sink.putBatch(end - 1, batch);
+                batch.put(record.key, decode(record.value));
+                through = i;
+                if (i - from + 1 >= batchSize) {
+                    sink.putBatch(through, batch);
+                    batch = new LinkedHashMap<>();
+                    through = -1;
+                    from = i + 1;
+                }
+            }
+            if (through >= 0) {
+                sink.putBatch(through, batch);
             }
         };
     }

@@ -15,7 +15,6 @@ import java.util.Map;
  *
  * @param <K> the key type, whose equality the caller supplies
  */
-@FunctionalInterface
 public interface WriteSink<K> {
     /**
      * Applies a batch and records that the store now holds everything through {@code throughOffset}.
@@ -25,4 +24,20 @@ public interface WriteSink<K> {
      *                      durable together
      */
     void putBatch(long throughOffset, Map<K, Mutation> mutations);
+
+    /**
+     * Applies a range delete and records that the store now holds everything through
+     * {@code throughOffset}.
+     *
+     * <p>Precondition: called in log order, so a replay that batches must flush what it holds first.
+     * A range delete covers what exists at its own position, and a mutation from an earlier position
+     * applied after it resurrects a key the range removed.
+     *
+     * <p>Abstract rather than defaulted, so that a sink decorating another has to forward this as
+     * well as {@link #putBatch}. Inheriting a throw here meant a decorator dropped range replay and
+     * only found out when a log first carried one.
+     *
+     * @param lower included, {@code upper} excluded — the convention the iterators' bounds use
+     */
+    void deleteRange(long throughOffset, byte[] lower, byte[] upper);
 }

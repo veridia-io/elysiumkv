@@ -15,7 +15,7 @@ import java.util.Objects;
  * <p>That splits along the serialisation boundary: this component speaks {@code Mutation} and applies
  * a delete as a store delete; the caller encodes {@link #delete()} into whatever non-null marker its
  * topic uses and decodes it back on restore. Nothing here ever hands {@code null} to a changelog
- * callback, and {@link PartitionedStore#stage} rejects a {@code null} value rather than guessing
+ * callback, and {@link PartitionedStore#put} rejects a {@code null} value rather than guessing
  * which of the two was meant.
  */
 public final class Mutation {
@@ -27,7 +27,12 @@ public final class Mutation {
         this.value = value;
     }
 
-    /** A put. The value may be empty but not {@code null} — use {@link #delete()} for absence. */
+    /**
+     * A put. The value may be empty but not {@code null} — use {@link #delete()} for absence.
+     *
+     * <p>The array is not copied: it belongs to the mutation from here on. Mutating it afterwards
+     * changes what a pending apply writes without changing what the changelog already sent.
+     */
     public static Mutation put(byte[] value) {
         return new Mutation(Objects.requireNonNull(value, "value; use Mutation.delete() to delete"));
     }

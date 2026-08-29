@@ -5,8 +5,10 @@ import io.veridia.elysiumkv.DiskBlobStore;
 import io.veridia.elysiumkv.DiskManifestCatalog;
 import io.veridia.elysiumkv.Durability;
 import io.veridia.elysiumkv.ElysiumKVOptions;
+import io.veridia.elysiumkv.partitioned.Changelog;
 import io.veridia.elysiumkv.partitioned.Mutation;
 import io.veridia.elysiumkv.partitioned.PartitionedStore;
+import io.veridia.elysiumkv.partitioned.PendingPosition;
 import io.veridia.elysiumkv.partitioned.Restore;
 
 import java.io.IOException;
@@ -112,8 +114,19 @@ final class KafkaStoreFixture implements AutoCloseable {
         return own(PartitionedStore.<String>builder()
                 .options(partition -> optionsFor(base, partition))
                 .keyBytes(KafkaStoreFixture::bytes)
-                .changelog((partition, key, mutation) ->
-                        tx.send(changelogTopic, partition, bytes(key), codec.encode(mutation)))
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        return tx.send(changelogTopic, partition, ChangelogRecords.pointKey(bytes(key)),
+                                codec.encode(mutation));
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lo, byte[] hi) {
+                        return tx.send(changelogTopic, partition,
+                                ChangelogRecords.rangeKey(lo, hi), ChangelogRecords.RANGE_VALUE);
+                    }
+                })
                 .restore(restore)
                 .build());
     }
@@ -179,7 +192,8 @@ final class KafkaStoreFixture implements AutoCloseable {
     void appendToChangelog(int partition, String key, String value) {
         Producer<byte[], byte[]> producer = producer("direct-" + UUID.randomUUID());
         producer.beginTransaction();
-        producer.send(new ProducerRecord<>(changelogTopic, partition, bytes(key),
+        producer.send(new ProducerRecord<>(changelogTopic, partition,
+                ChangelogRecords.pointKey(bytes(key)),
                 codec.encode(Mutation.put(bytes(value)))));
         producer.commitTransaction();
     }

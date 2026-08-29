@@ -1,19 +1,20 @@
 package io.veridia.elysiumkv.partitioned.kafka;
 
+import io.veridia.elysiumkv.Compression;
+import io.veridia.elysiumkv.DiskBlobStore;
+import io.veridia.elysiumkv.Durability;
+import io.veridia.elysiumkv.DynamoManifestCatalog;
+import io.veridia.elysiumkv.ElysiumKVOptions;
+import io.veridia.elysiumkv.RemoteEnvironment;
+import io.veridia.elysiumkv.S3BlobStore;
+import io.veridia.elysiumkv.partitioned.Changelog;
+import io.veridia.elysiumkv.partitioned.Mutation;
+import io.veridia.elysiumkv.partitioned.PartitionedStore;
+import io.veridia.elysiumkv.partitioned.PendingPosition;
 import static io.veridia.elysiumkv.partitioned.kafka.KafkaStoreFixture.bytes;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import io.veridia.elysiumkv.Compression;
-import io.veridia.elysiumkv.DiskBlobStore;
-import io.veridia.elysiumkv.DynamoManifestCatalog;
-import io.veridia.elysiumkv.Durability;
-import io.veridia.elysiumkv.ElysiumKVOptions;
-import io.veridia.elysiumkv.RemoteEnvironment;
-import io.veridia.elysiumkv.S3BlobStore;
-import io.veridia.elysiumkv.partitioned.Mutation;
-import io.veridia.elysiumkv.partitioned.PartitionedStore;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -129,8 +130,19 @@ class PartitionedStoreRemoteKafkaTest {
         PartitionedStore<String> store = fixture.own(PartitionedStore.<String>builder()
                 .options(this::optionsFor)
                 .keyBytes(KafkaStoreFixture::bytes)
-                .changelog((partition, key, mutation) -> tx.send(
-                        fixture.changelogTopic, partition, bytes(key), fixture.codec.encode(mutation)))
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        return tx.send(fixture.changelogTopic, partition,
+                                ChangelogRecords.pointKey(bytes(key)), fixture.codec.encode(mutation));
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lo, byte[] hi) {
+                        return tx.send(fixture.changelogTopic, partition,
+                                ChangelogRecords.rangeKey(lo, hi), ChangelogRecords.RANGE_VALUE);
+                    }
+                })
                 .restore(fixture.restoreFromTheChangelog())
                 .build());
         transactions.add(tx);
@@ -150,7 +162,7 @@ class PartitionedStoreRemoteKafkaTest {
 
     private void commitBatch(PartitionedStore<String> store, KafkaTransaction tx, int batch) {
         tx.begin();
-        store.stage(PARTITION, Collections.singletonMap("key" + batch,
+        store.put(PARTITION, Collections.singletonMap("key" + batch,
                 Mutation.put(payload(batch))));
         try (Consumer<byte[], byte[]> group = fixture.consumer(fixture.groupId)) {
             store.commit(() -> tx.commit(Collections.emptyMap(), group.groupMetadata()));
@@ -209,9 +221,8 @@ class PartitionedStoreRemoteKafkaTest {
         for (int batch = 0; batch < BATCHES; batch++) {
             keys.add("key" + batch);
         }
-        Map<String, byte[]> found = restarted.getCommittedBatch(PARTITION, keys);
         for (int batch = 0; batch < BATCHES; batch++) {
-            assertArrayEquals(payload(batch), found.get("key" + batch),
+            assertArrayEquals(payload(batch), restarted.get(PARTITION, "key" + batch),
                     "key" + batch + " did not survive the wipe — the replay resumed past it");
         }
     }
@@ -244,9 +255,8 @@ class PartitionedStoreRemoteKafkaTest {
         for (int batch = 0; batch < BATCHES + 4; batch++) {
             keys.add("key" + batch);
         }
-        Map<String, byte[]> found = restarted.getCommittedBatch(PARTITION, keys);
         for (int batch = 0; batch < BATCHES + 4; batch++) {
-            assertArrayEquals(payload(batch), found.get("key" + batch),
+            assertArrayEquals(payload(batch), restarted.get(PARTITION, "key" + batch),
                     "key" + batch + " is missing after a wipe followed by more writes");
         }
 
@@ -255,8 +265,6 @@ class PartitionedStoreRemoteKafkaTest {
         restarted.close();
         PartitionedStore<String> again = open();
         again.assign(Collections.singletonList(PARTITION));
-        assertArrayEquals(payload(BATCHES + 3),
-                again.getCommittedBatch(PARTITION,
-                        Collections.singletonList("key" + (BATCHES + 3))).get("key" + (BATCHES + 3)));
+        assertArrayEquals(payload(BATCHES + 3), again.get(PARTITION, "key" + (BATCHES + 3)));
     }
 }

@@ -1,6 +1,7 @@
 package io.veridia.elysiumkv.partitioned.kafka;
 
 import io.veridia.elysiumkv.partitioned.Mutation;
+import io.veridia.elysiumkv.partitioned.WriteSink;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.MockConsumer;
@@ -55,7 +56,7 @@ class ExampleStateRestoreTest {
         consumer.updateEndOffsets(Collections.singletonMap(PARTITION, endOffset));
         for (int offset = 0; offset < records; ++offset) {
             consumer.addRecord(new ConsumerRecord<>(TOPIC, 0, offset,
-                    ("k" + offset).getBytes(StandardCharsets.UTF_8),
+                    ChangelogRecords.pointKey(("k" + offset).getBytes(StandardCharsets.UTF_8)),
                     CODEC.encode(Mutation.put(("v" + offset).getBytes(StandardCharsets.UTF_8)))));
         }
         return consumer;
@@ -68,8 +69,17 @@ class ExampleStateRestoreTest {
                 partition -> consumer, TOPIC,
                 key -> new String(key, StandardCharsets.UTF_8), CODEC,
                 Duration.ofMillis(10), batchSize);
-        restore.restore(0, from, (through, mutations) ->
-                applied.add(new Applied(through, new LinkedHashMap<>(mutations))));
+        restore.restore(0, from, new WriteSink<String>() {
+            @Override
+            public void putBatch(long through, Map<String, Mutation> mutations) {
+                applied.add(new Applied(through, new LinkedHashMap<>(mutations)));
+            }
+
+            @Override
+            public void deleteRange(long through, byte[] lower, byte[] upper) {
+                throw new UnsupportedOperationException("this replay carries no range records");
+            }
+        });
         return applied;
     }
 

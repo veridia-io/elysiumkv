@@ -94,7 +94,7 @@ class PartitionedStoreKafkaLifecycleTest {
             mutations.put(key, Mutation.put(bytes("state-" + key)));
             lastOffset = record.offset();
         }
-        store.stage(PARTITION, mutations);
+        store.put(PARTITION, mutations);
 
         Map<TopicPartition, OffsetAndMetadata> offsets =
                 Collections.singletonMap(topicPartition, new OffsetAndMetadata(lastOffset + 1));
@@ -110,8 +110,8 @@ class PartitionedStoreKafkaLifecycleTest {
         return consumer;
     }
 
-    private static byte[] committed(PartitionedStore<String> store, String key) {
-        return store.getCommittedBatch(PARTITION, Collections.singletonList(key)).get(key);
+    private static byte[] read(PartitionedStore<String> store, String key) {
+        return store.get(PARTITION, key);
     }
 
     // --- 3. the input offsets are part of the transaction ---------------------------------
@@ -130,7 +130,7 @@ class PartitionedStoreKafkaLifecycleTest {
         store.assign(Collections.singletonList(PARTITION));
 
         assertEquals(3, processOneBatch(store, tx, assignedInput(fixture.groupId)));
-        assertArrayEquals(bytes("state-a"), committed(store, "a"));
+        assertArrayEquals(bytes("state-a"), read(store, "a"));
 
         // A fresh consumer in the same group, starting from the committed position.
         try (Consumer<byte[], byte[]> resumed = fixture.consumer(fixture.groupId)) {
@@ -154,7 +154,7 @@ class PartitionedStoreKafkaLifecycleTest {
 
         Consumer<byte[], byte[]> input = assignedInput(fixture.groupId);
         tx.begin();
-        store.stage(PARTITION, Collections.singletonMap("a", Mutation.put(bytes("state-a"))));
+        store.put(PARTITION, Collections.singletonMap("a", Mutation.put(bytes("state-a"))));
         producer.abortTransaction();
         store.discard();
 
@@ -164,7 +164,7 @@ class PartitionedStoreKafkaLifecycleTest {
             assertNull(resumed.committed(Collections.singleton(tp)).get(tp),
                     "an aborted transaction must not advance the input offset");
         }
-        assertNull(committed(store, "a"));
+        assertNull(read(store, "a"));
         assertTrue(input.assignment().contains(new TopicPartition(fixture.inputTopic, PARTITION)));
     }
 
@@ -189,16 +189,20 @@ class PartitionedStoreKafkaLifecycleTest {
 
         // One batch that completes normally, so there is a watermark to resume from.
         tx.begin();
-        store.stage(PARTITION, Collections.singletonMap("first", Mutation.put(bytes("one"))));
+        store.put(PARTITION, Collections.singletonMap("first", Mutation.put(bytes("one"))));
         try (Consumer<byte[], byte[]> group = fixture.consumer(fixture.groupId)) {
             store.commit(() -> tx.commit(Collections.emptyMap(), group.groupMetadata()));
         }
 
         // The second batch reaches the log and the process dies before applyCommitted().
         tx.begin();
-        store.stage(PARTITION, Collections.singletonMap("second", Mutation.put(bytes("two"))));
+        store.put(PARTITION, Collections.singletonMap("second", Mutation.put(bytes("two"))));
         producer.commitTransaction();
-        assertNull(committed(store, "second"), "the apply never ran, by construction");
+        // The premise, and stronger than reading the key: begin() is what notices an unresolved
+        // staged set, so a partition it marks behind proves the apply never ran.
+        store.begin();
+        assertEquals(Collections.singleton(PARTITION), store.behind(),
+                "the apply never ran, by construction");
         store.close();
 
         KafkaTransaction after = new KafkaTransaction(fixture.producer("tx-" + UUID.randomUUID()));
@@ -206,9 +210,9 @@ class PartitionedStoreKafkaLifecycleTest {
                 fixture.storeOver(root, after, fixture.restoreFromTheChangelog());
         restarted.assign(Collections.singletonList(PARTITION));
 
-        assertArrayEquals(bytes("two"), committed(restarted, "second"),
+        assertArrayEquals(bytes("two"), read(restarted, "second"),
                 "a commit the store never applied must be recovered by the replay");
-        assertArrayEquals(bytes("one"), committed(restarted, "first"));
+        assertArrayEquals(bytes("one"), read(restarted, "first"));
     }
 
     // --- 2. a partition changing hands -----------------------------------------------------
@@ -230,7 +234,7 @@ class PartitionedStoreKafkaLifecycleTest {
 
         for (int i = 0; i < 3; i++) {
             first.begin();
-            outgoing.stage(PARTITION,
+            outgoing.put(PARTITION,
                     Collections.singletonMap("key" + i, Mutation.put(bytes("value" + i))));
             try (Consumer<byte[], byte[]> group = fixture.consumer(fixture.groupId)) {
                 outgoing.commit(() -> first.commit(Collections.emptyMap(), group.groupMetadata()));
@@ -240,7 +244,7 @@ class PartitionedStoreKafkaLifecycleTest {
         // Handover: flush and give it up.
         outgoing.revoke(Collections.singletonList(PARTITION));
         assertTrue(outgoing.assignment().isEmpty());
-        assertThrows(PartitionNotAssignedException.class, () -> outgoing.stage(PARTITION,
+        assertThrows(PartitionNotAssignedException.class, () -> outgoing.put(PARTITION,
                 Collections.singletonMap("late", Mutation.put(bytes("nope")))));
 
         // The new owner starts cold and rebuilds from the changelog alone.
@@ -250,7 +254,7 @@ class PartitionedStoreKafkaLifecycleTest {
         incoming.assign(Collections.singletonList(PARTITION));
 
         for (int i = 0; i < 3; i++) {
-            assertArrayEquals(bytes("value" + i), committed(incoming, "key" + i),
+            assertArrayEquals(bytes("value" + i), read(incoming, "key" + i),
                     "the new owner did not rebuild key" + i);
         }
 
@@ -290,13 +294,13 @@ class PartitionedStoreKafkaLifecycleTest {
 
         // A committed batch first, so the replay after the repair has a watermark to resume from.
         tx.begin();
-        store.stage(PARTITION, Collections.singletonMap("before", Mutation.put(bytes("kept"))));
+        store.put(PARTITION, Collections.singletonMap("before", Mutation.put(bytes("kept"))));
         try (Consumer<byte[], byte[]> group = fixture.consumer(fixture.groupId)) {
             store.commit(() -> tx.commit(Collections.emptyMap(), group.groupMetadata()));
         }
 
         tx.begin();
-        store.stage(PARTITION, Collections.singletonMap("during", Mutation.put(bytes("unknown"))));
+        store.put(PARTITION, Collections.singletonMap("during", Mutation.put(bytes("unknown"))));
 
         // The metadata is captured while the broker still answers, and it is a local read
         // afterwards. Passing null here instead would throw an unclassified exception, which
@@ -315,10 +319,10 @@ class PartitionedStoreKafkaLifecycleTest {
 
         assertEquals(Collections.singleton(PARTITION), store.behind(),
                 "an indeterminate commit must leave the partition behind");
-        assertThrows(IllegalStateException.class, () -> committed(store, "before"));
+        assertThrows(IllegalStateException.class, () -> read(store, "before"));
 
         store.repair(Collections.singletonList(PARTITION));
         assertTrue(store.behind().isEmpty(), "a repaired partition returns to service");
-        assertArrayEquals(bytes("kept"), committed(store, "before"));
+        assertArrayEquals(bytes("kept"), read(store, "before"));
     }
 }

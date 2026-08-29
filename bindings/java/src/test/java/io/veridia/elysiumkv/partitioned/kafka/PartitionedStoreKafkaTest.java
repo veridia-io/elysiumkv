@@ -1,22 +1,23 @@
 package io.veridia.elysiumkv.partitioned.kafka;
 
+import io.veridia.elysiumkv.Compression;
+import io.veridia.elysiumkv.DiskBlobStore;
+import io.veridia.elysiumkv.DiskManifestCatalog;
+import io.veridia.elysiumkv.Durability;
+import io.veridia.elysiumkv.ElysiumKVOptions;
+import io.veridia.elysiumkv.partitioned.Changelog;
+import io.veridia.elysiumkv.partitioned.Mutation;
+import io.veridia.elysiumkv.partitioned.PartitionedStore;
+import io.veridia.elysiumkv.partitioned.PendingPosition;
+import io.veridia.elysiumkv.partitioned.ProducerDead;
+import io.veridia.elysiumkv.partitioned.Restore;
+import io.veridia.elysiumkv.partitioned.WriteSink;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import io.veridia.elysiumkv.Compression;
-import io.veridia.elysiumkv.DiskBlobStore;
-import io.veridia.elysiumkv.DiskManifestCatalog;
-import io.veridia.elysiumkv.Durability;
-import io.veridia.elysiumkv.ElysiumKVOptions;
-import io.veridia.elysiumkv.partitioned.Mutation;
-import io.veridia.elysiumkv.partitioned.PartitionedStore;
-import io.veridia.elysiumkv.partitioned.ProducerDead;
-import io.veridia.elysiumkv.partitioned.Restore;
-import io.veridia.elysiumkv.partitioned.WriteSink;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -127,8 +128,20 @@ class PartitionedStoreKafkaTest {
         PartitionedStore<String> store = PartitionedStore.<String>builder()
                 .options(partition -> optionsFor(base, partition))
                 .keyBytes(key -> key.getBytes(StandardCharsets.UTF_8))
-                .changelog((partition, key, mutation) -> tx.send(
-                        topic, partition, key.getBytes(StandardCharsets.UTF_8), codec.encode(mutation)))
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        return tx.send(topic, partition,
+                                ChangelogRecords.pointKey(key.getBytes(StandardCharsets.UTF_8)),
+                                codec.encode(mutation));
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lo, byte[] hi) {
+                        return tx.send(topic, partition, ChangelogRecords.rangeKey(lo, hi),
+                                ChangelogRecords.RANGE_VALUE);
+                    }
+                })
                 .restore(restore)
                 .build();
         return own(store);
@@ -178,7 +191,8 @@ class PartitionedStoreKafkaTest {
                 ConsumerRecords<byte[], byte[]> polled = consumer.poll(POLL);
                 if (polled.isEmpty()) break;
                 for (ConsumerRecord<byte[], byte[]> record : polled.records(tp)) {
-                    keys.add(new String(record.key(), StandardCharsets.UTF_8));
+                    keys.add(new String(ChangelogRecords.entityKey(record.key()),
+                            StandardCharsets.UTF_8));
                 }
             }
         }
@@ -196,7 +210,8 @@ class PartitionedStoreKafkaTest {
         Producer<byte[], byte[]> producer = producer("tx-direct-" + UUID.randomUUID());
         producer.beginTransaction();
         producer.send(new org.apache.kafka.clients.producer.ProducerRecord<>(
-                topic, 0, bytes(key), codec.encode(Mutation.put(bytes(value)))));
+                topic, 0, ChangelogRecords.pointKey(bytes(key)),
+                codec.encode(Mutation.put(bytes(value)))));
         producer.commitTransaction();
     }
 
@@ -219,14 +234,14 @@ class PartitionedStoreKafkaTest {
         store.assign(Arrays.asList(0, 1));
 
         tx.begin();
-        store.stage(0, put("alpha", "one"));
-        store.stage(1, put("beta", "two"));
+        store.put(0, put("alpha", "one"));
+        store.put(1, put("beta", "two"));
         commitThrough(store, tx);
 
         assertArrayEquals(bytes("one"),
-                store.getCommittedBatch(0, Collections.singletonList("alpha")).get("alpha"));
+                store.get(0, "alpha"));
         assertArrayEquals(bytes("two"),
-                store.getCommittedBatch(1, Collections.singletonList("beta")).get("beta"));
+                store.get(1, "beta"));
         assertEquals(Collections.singletonList("alpha"), committedKeys(0));
         assertEquals(Collections.singletonList("beta"), committedKeys(1));
         assertTrue(store.behind().isEmpty(), "a committed transaction leaves nothing behind");
@@ -245,15 +260,62 @@ class PartitionedStoreKafkaTest {
         store.assign(Collections.singletonList(0));
 
         tx.begin();
-        store.stage(0, put("alpha", "one"));
+        store.put(0, put("alpha", "one"));
         producer.abortTransaction();
         store.discard();
 
-        assertNull(store.getCommittedBatch(0, Collections.singletonList("alpha")).get("alpha"),
+        assertNull(store.get(0, "alpha"),
                 "an aborted transaction must not materialise");
         assertEquals(Collections.emptyList(), committedKeys(0),
                 "read_committed must not surface an aborted record");
         assertTrue(store.behind().isEmpty(), "an abort is definite, so nothing is behind");
+    }
+
+    /**
+     * The range record's whole reason for existing, end to end: it has to survive a real topic and be
+     * replayed into a store that has never seen the band. A record keyed so that a later write
+     * supersedes it would pass every local test and fail exactly here.
+     */
+    @Test
+    void aRangeDeleteTravelsTheTopicAndReplaysIntoAFreshStore(@TempDir Path second) {
+        Producer<byte[], byte[]> producer = producer("tx-" + UUID.randomUUID());
+        KafkaTransaction tx = new KafkaTransaction(producer);
+        PartitionedStore<String> store = storeOver(root, tx, restoreFromTheLog());
+        store.assign(Collections.singletonList(0));
+
+        tx.begin();
+        store.put(0, put("tenant-a:1", "keep"));
+        store.put(0, put("tenant-b:1", "evict"));
+        store.put(0, put("tenant-b:2", "evict"));
+        store.put(0, put("tenant-c:1", "keep"));
+        commitThrough(store, tx);
+
+        tx.begin();
+        store.deleteRange(0, bytes("tenant-b:"), bytes("tenant-c:"));
+        commitThrough(store, tx);
+
+        assertNull(store.get(0, "tenant-b:1"));
+        assertNull(store.get(0, "tenant-b:2"));
+        assertArrayEquals(bytes("keep"), store.get(0, "tenant-a:1"));
+        assertArrayEquals(bytes("keep"), store.get(0, "tenant-c:1"),
+                "the upper bound is exclusive, so tenant-c survives");
+
+        // A write into the band after the delete lives, which is what separates a range delete from a
+        // truncation point and is the reason this store has no truncation point.
+        tx.begin();
+        store.put(0, put("tenant-b:3", "re-seeded"));
+        commitThrough(store, tx);
+
+        KafkaTransaction other = new KafkaTransaction(producer("tx-" + UUID.randomUUID()));
+        PartitionedStore<String> rebuilt = storeOver(second, other, restoreFromTheLog());
+        rebuilt.assign(Collections.singletonList(0));
+
+        assertNull(rebuilt.get(0, "tenant-b:1"), "the replayed range delete must cover the band again");
+        assertNull(rebuilt.get(0, "tenant-b:2"));
+        assertArrayEquals(bytes("re-seeded"), rebuilt.get(0, "tenant-b:3"),
+                "a record after the range delete is not covered by it");
+        assertArrayEquals(bytes("keep"), rebuilt.get(0, "tenant-a:1"));
+        assertArrayEquals(bytes("keep"), rebuilt.get(0, "tenant-c:1"));
     }
 
     @Test
@@ -264,7 +326,7 @@ class PartitionedStoreKafkaTest {
 
         for (int i = 0; i < 3; i++) {
             tx.begin();
-            store.stage(0, put("key" + i, "value" + i));
+            store.put(0, put("key" + i, "value" + i));
             commitThrough(store, tx);
         }
         store.close();
@@ -274,10 +336,8 @@ class PartitionedStoreKafkaTest {
         PartitionedStore<String> rebuilt = storeOver(second, other, restoreFromTheLog());
         rebuilt.assign(Collections.singletonList(0));
 
-        Map<String, byte[]> found =
-                rebuilt.getCommittedBatch(0, Arrays.asList("key0", "key1", "key2"));
         for (int i = 0; i < 3; i++) {
-            assertArrayEquals(bytes("value" + i), found.get("key" + i),
+            assertArrayEquals(bytes("value" + i), rebuilt.get(0, "key" + i),
                     "key" + i + " did not survive the rebuild");
         }
     }
@@ -295,7 +355,7 @@ class PartitionedStoreKafkaTest {
 
         for (int i = 0; i < 4; i++) {
             tx.begin();
-            store.stage(0, put("key" + i, "value" + i));
+            store.put(0, put("key" + i, "value" + i));
             commitThrough(store, tx);
         }
 
@@ -310,9 +370,17 @@ class PartitionedStoreKafkaTest {
 
         AtomicInteger delivered = new AtomicInteger();
         Restore<String> counting = (partition, materializedThrough, sink) -> {
-            WriteSink<String> counted = (through, mutations) -> {
-                delivered.addAndGet(mutations.size());
-                sink.putBatch(through, mutations);
+            WriteSink<String> counted = new WriteSink<String>() {
+                @Override
+                public void putBatch(long through, Map<String, Mutation> mutations) {
+                    delivered.addAndGet(mutations.size());
+                    sink.putBatch(through, mutations);
+                }
+
+                @Override
+                public void deleteRange(long through, byte[] lo, byte[] hi) {
+                    sink.deleteRange(through, lo, hi);
+                }
             };
             restoreFromTheLog().restore(partition, materializedThrough, counted);
         };
@@ -325,9 +393,9 @@ class PartitionedStoreKafkaTest {
         assertEquals(2, delivered.get(),
                 "the replay should cover the gap after the watermark, not the whole partition");
         assertArrayEquals(bytes("value5"),
-                reopened.getCommittedBatch(0, Collections.singletonList("key5")).get("key5"));
+                reopened.get(0, "key5"));
         assertArrayEquals(bytes("value0"),
-                reopened.getCommittedBatch(0, Collections.singletonList("key0")).get("key0"),
+                reopened.get(0, "key0"),
                 "the records the watermark covered must still be there");
     }
 
@@ -344,7 +412,7 @@ class PartitionedStoreKafkaTest {
         store.assign(Collections.singletonList(0));
 
         first.begin();
-        store.stage(0, put("alpha", "one"));
+        store.put(0, put("alpha", "one"));
 
         // Claiming the id fences the first producer's epoch.
         producer(transactionalId);
@@ -352,7 +420,7 @@ class PartitionedStoreKafkaTest {
         assertThrows(ProducerDead.class, () -> commitThrough(store, first));
         assertTrue(store.behind().isEmpty(),
                 "a fenced producer definitely did not commit, so nothing may be marked behind");
-        assertNull(store.getCommittedBatch(0, Collections.singletonList("alpha")).get("alpha"),
+        assertNull(store.get(0, "alpha"),
                 "the fenced transaction must not have materialised");
         assertFalse(committedKeys(0).contains("alpha"),
                 "read_committed must not surface a fenced producer's record");

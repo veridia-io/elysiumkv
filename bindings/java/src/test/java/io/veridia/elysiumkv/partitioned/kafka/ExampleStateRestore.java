@@ -92,15 +92,29 @@ final class ExampleStateRestore<K> implements Restore<K> {
                     if (record.offset() >= end) {
                         break;
                     }
-                    batch.put(keyFrom.apply(record.key()), codec.decode(record.value()));
+                    if (ChangelogRecords.isRange(record.key())) {
+                        // Flushed first: a range delete covers what exists at its own position, so
+                        // everything below it has to be applied before it.
+                        if (through >= 0) {
+                            sink.putBatch(through, batch);
+                            batch = new LinkedHashMap<>();
+                            through = -1L;
+                        }
+                        sink.deleteRange(record.offset(), ChangelogRecords.lowerBound(record.key()),
+                                ChangelogRecords.upperBound(record.key()));
+                        continue;
+                    }
+                    batch.put(keyFrom.apply(ChangelogRecords.entityKey(record.key())),
+                            codec.decode(record.value()));
                     through = record.offset();
                     if (batch.size() >= batchSize) {
                         sink.putBatch(through, batch);
                         batch = new LinkedHashMap<>();
+                        through = -1L;
                     }
                 }
             }
-            if (!batch.isEmpty()) {
+            if (through >= 0) {
                 sink.putBatch(through, batch);
             }
         }

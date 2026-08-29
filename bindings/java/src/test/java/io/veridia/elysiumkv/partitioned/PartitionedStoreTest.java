@@ -65,7 +65,7 @@ class PartitionedStoreTest {
         return PartitionedStore.<String>builder()
                 .options(fixture::optionsFor)
                 .keyBytes(PartitionFixture.KEY_BYTES)
-                .changelog(this::send)
+                .changelog(changelog())
                 .restore((partition, materializedThrough, sink) -> {
                     resumePoints.add(materializedThrough);
                     restore.restore(partition, materializedThrough, sink);
@@ -91,26 +91,41 @@ class PartitionedStoreTest {
         return real;
     }
 
+    /** Both record kinds, over the injecting {@link #send}. */
+    private Changelog<String> changelog() {
+        return new Changelog<String>() {
+            @Override
+            public PendingPosition send(int partition, String key, Mutation mutation) {
+                return PartitionedStoreTest.this.send(partition, key, mutation);
+            }
+
+            @Override
+            public PendingPosition sendDeleteRange(int partition, byte[] lower, byte[] upper) {
+                return log.sendDeleteRange(partition, lower, upper);
+            }
+        };
+    }
+
     private static Map<String, Mutation> put(String key, String value) {
         return Collections.singletonMap(key, Mutation.put(bytes(value)));
     }
 
     private String read(int partition, String key) {
-        return string(store.getCommittedBatch(partition, Collections.singletonList(key)).get(key));
+        return string(store.get(partition, key));
     }
 
     // --- staging -------------------------------------------------------------
 
     @Test
-    @DisplayName("getCommittedBatch does not see staged writes")
-    void stagedWritesAreInvisibleUntilTheCommit() {
+    @DisplayName("a staged write is readable in its own transaction, and survives the commit")
+    void aStagedWriteIsReadableBeforeItIsApplied() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "first"));
+        store.put(0, put("k", "first"));
         store.commit(log::commitTransaction);
 
-        store.stage(0, put("k", "second"));
-        assertEquals("first", read(0, "k"), "a staged write must not be readable in its own transaction");
+        store.put(0, put("k", "second"));
+        assertEquals("second", read(0, "k"), "a fold must see what its own transaction staged");
         store.commit(log::commitTransaction);
         assertEquals("second", read(0, "k"));
     }
@@ -125,7 +140,7 @@ class PartitionedStoreTest {
         Map<String, Mutation> updates = new LinkedHashMap<>();
         updates.put("a", Mutation.put(bytes("1")));
         updates.put("b", Mutation.put(bytes("2")));
-        store.stage(0, updates);
+        store.put(0, updates);
         store.commit(log::commitTransaction);
 
         store.revoke(Collections.singletonList(0));
@@ -144,7 +159,7 @@ class PartitionedStoreTest {
         Map<String, Mutation> withNull = new LinkedHashMap<>();
         withNull.put("k", null);
         NullPointerException failure =
-                assertThrows(NullPointerException.class, () -> store.stage(0, withNull));
+                assertThrows(NullPointerException.class, () -> store.put(0, withNull));
         assertTrue(failure.getMessage().contains("Mutation.delete()"),
                 "the message should point at the delete that survives compaction");
     }
@@ -156,7 +171,7 @@ class PartitionedStoreTest {
     void anAbortableFailureAppliesNothing() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
 
         assertThrows(AbortableNotCommitted.class, () -> store.commit(() -> {
             log.abortTransaction();
@@ -172,7 +187,7 @@ class PartitionedStoreTest {
     void anUnknownOutcomeMarksThePartitionsBehind() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
 
         assertThrows(OutcomeUnknown.class, () -> store.commit(() -> {
             log.commitTransaction();   // it did commit; this side just cannot know that
@@ -181,8 +196,8 @@ class PartitionedStoreTest {
 
         assertEquals(Collections.singleton(0), store.behind());
         assertThrows(PartitionBehindException.class,
-                () -> store.getCommittedBatch(0, Collections.singletonList("k")));
-        assertThrows(PartitionBehindException.class, () -> store.stage(0, put("k", "again")));
+                () -> store.get(0, "k"));
+        assertThrows(PartitionBehindException.class, () -> store.put(0, put("k", "again")));
 
         // The repair replays what the transaction turned out to have committed.
         store.repair(Collections.singletonList(0));
@@ -195,7 +210,7 @@ class PartitionedStoreTest {
     void anUnclassifiedExceptionIsTreatedAsUnknown() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
 
         OutcomeUnknown failure = assertThrows(OutcomeUnknown.class, () -> store.commit(() -> {
             throw new IllegalArgumentException("something nobody enumerated");
@@ -210,14 +225,14 @@ class PartitionedStoreTest {
     void nothingRemainsStagedAfterAFailedCommit() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         assertThrows(OutcomeUnknown.class, () -> store.commit(() -> {
             throw new IllegalStateException("injected");
         }));
 
         store.repair(Collections.singletonList(0));
         // If the batch had survived, this commit would apply it as well as the new one.
-        store.stage(0, put("other", "w"));
+        store.put(0, put("other", "w"));
         store.commit(log::commitTransaction);
         assertNull(read(0, "k"), "the discarded batch must not resurface in a later commit");
         assertEquals("w", read(0, "other"));
@@ -228,7 +243,7 @@ class PartitionedStoreTest {
     void discardIsIdempotent() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.commit(log::commitTransaction);
 
         store.discard();
@@ -241,7 +256,7 @@ class PartitionedStoreTest {
     void aProducerDeadFailureAppliesNothing() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
 
         assertThrows(ProducerDead.class, () -> store.commit(() -> {
             throw new ProducerDead(new RuntimeException("injected fencing"));
@@ -251,7 +266,7 @@ class PartitionedStoreTest {
         // not behind and must stay in service.
         assertNull(read(0, "k"));
         assertTrue(store.behind().isEmpty(), "a dead producer is not a lagging store");
-        store.stage(0, put("k", "w"));
+        store.put(0, put("k", "w"));
         store.commit(log::commitTransaction);
         assertEquals("w", read(0, "k"), "nothing from the failed attempt survived into this one");
     }
@@ -261,8 +276,8 @@ class PartitionedStoreTest {
     void anUnknownOutcomeMarksAllStagedPartitions() {
         store = open(8);
         store.assign(Arrays.asList(0, 1, 2));
-        store.stage(0, put("k", "v"));
-        store.stage(2, put("k", "v"));
+        store.put(0, put("k", "v"));
+        store.put(2, put("k", "v"));
 
         assertThrows(OutcomeUnknown.class, () -> store.commit(() -> {
             log.commitTransaction();
@@ -300,7 +315,7 @@ class PartitionedStoreTest {
     void aContainerDrivenCommitAppliesThroughTheHook() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
 
         log.commitTransaction();     // the container commits; the store is not involved
         store.applyCommitted();      // ... and then tells the store, from its afterCommit hook
@@ -314,7 +329,7 @@ class PartitionedStoreTest {
     void aContainerDrivenRollbackDiscards() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
 
         log.abortTransaction();
         store.discard();
@@ -328,8 +343,8 @@ class PartitionedStoreTest {
     void aContainerDrivenUnknownOutcomeMarksBehind() {
         store = open(8);
         store.assign(Arrays.asList(0, 1));
-        store.stage(0, put("k", "v"));
-        store.stage(1, put("k", "v"));
+        store.put(0, put("k", "v"));
+        store.put(1, put("k", "v"));
 
         // The commit did reach the broker; the container's doCommit threw anyway, so neither the
         // afterCommit nor the afterRollback hook can be the right one to fire.
@@ -338,7 +353,7 @@ class PartitionedStoreTest {
 
         assertEquals(new TreeSet<>(Arrays.asList(0, 1)), new TreeSet<>(store.behind()));
         assertThrows(PartitionBehindException.class,
-                () -> store.getCommittedBatch(0, Collections.singletonList("k")));
+                () -> store.get(0, "k"));
 
         store.repair(store.behind());
         assertEquals("v", read(0, "k"), "the repair replays what the transaction turned out to commit");
@@ -402,7 +417,7 @@ class PartitionedStoreTest {
         Container container = new Container();
         container.register(store::applyCommitted, store::discard, store::discardUnknown);
 
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         assertThrows(RuntimeException.class, () -> container.commit(() -> {
             log.commitTransaction();      // it did reach the broker
             throw new IllegalStateException("injected: the commit timed out");
@@ -423,7 +438,7 @@ class PartitionedStoreTest {
         // The usual wiring, and the one that looks complete: afterCommit and afterRollback.
         container.register(store::applyCommitted, store::discard, null);
 
-        store.stage(0, put("k", "first"));
+        store.put(0, put("k", "first"));
         assertThrows(RuntimeException.class, () -> container.commit(() -> {
             log.commitTransaction();
             throw new IllegalStateException("injected: the commit timed out");
@@ -436,7 +451,7 @@ class PartitionedStoreTest {
 
         // The cost, made concrete: the abandoned batch is still staged, so the *next* commit applies
         // writes from a transaction whose outcome was never established.
-        store.stage(0, put("other", "second"));
+        store.put(0, put("other", "second"));
         store.applyCommitted();
         assertEquals("first", read(0, "k"),
                 "a write from the abandoned transaction reached the store on a later commit");
@@ -451,7 +466,7 @@ class PartitionedStoreTest {
         container.register(store::applyCommitted, store::discard, null);   // the two-hook wiring
 
         store.begin();
-        store.stage(0, put("k", "first"));
+        store.put(0, put("k", "first"));
         assertThrows(RuntimeException.class, () -> container.commit(() -> {
             log.commitTransaction();
             throw new IllegalStateException("injected: the commit timed out");
@@ -466,7 +481,7 @@ class PartitionedStoreTest {
         // And the partition is unreadable before anything in this batch can fold against it, which
         // is the whole point of catching it here rather than one commit later.
         assertThrows(PartitionBehindException.class,
-                () -> store.getCommittedBatch(0, Collections.singletonList("k")));
+                () -> store.get(0, "k"));
 
         store.repair(Collections.singletonList(0));
         assertEquals("first", read(0, "k"), "the repair replays what the log turned out to hold");
@@ -478,7 +493,7 @@ class PartitionedStoreTest {
         store = open(8);
         store.assign(Collections.singletonList(0));
         store.begin();
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         log.commitTransaction();
         store.applyCommitted();
 
@@ -497,9 +512,9 @@ class PartitionedStoreTest {
         store.assign(Arrays.asList(0, 1, 2));
         poisoned.set(1);
 
-        store.stage(0, put("k", "zero"));
-        store.stage(1, put("k", "one"));
-        store.stage(2, put("k", "two"));
+        store.put(0, put("k", "zero"));
+        store.put(1, put("k", "one"));
+        store.put(2, put("k", "two"));
 
         ApplyFailed failure =
                 assertThrows(ApplyFailed.class, () -> store.commit(log::commitTransaction));
@@ -516,19 +531,19 @@ class PartitionedStoreTest {
     void aBehindPartitionIsNotServed() {
         store = open(8);
         store.assign(Arrays.asList(0, 1));
-        store.stage(0, put("k", "before"));
-        store.stage(1, put("k", "before"));
+        store.put(0, put("k", "before"));
+        store.put(1, put("k", "before"));
         store.commit(log::commitTransaction);
 
         poisoned.set(1);
-        store.stage(0, put("k", "after"));
-        store.stage(1, put("k", "after"));
+        store.put(0, put("k", "after"));
+        store.put(1, put("k", "after"));
         assertThrows(ApplyFailed.class, () -> store.commit(log::commitTransaction));
 
         // The whole point: the stale value is not served, so no fold can derive from it.
         assertThrows(PartitionBehindException.class,
-                () -> store.getCommittedBatch(1, Collections.singletonList("k")));
-        assertThrows(PartitionBehindException.class, () -> store.stage(1, put("k", "later")));
+                () -> store.get(1, "k"));
+        assertThrows(PartitionBehindException.class, () -> store.put(1, put("k", "later")));
         assertEquals("after", read(0, "k"), "an independent partition is unaffected");
 
         poisoned.set(-1);
@@ -545,13 +560,13 @@ class PartitionedStoreTest {
         Map<String, Mutation> first = new LinkedHashMap<>();
         first.put("k", Mutation.put(bytes("first")));
         first.put("j", Mutation.put(bytes("first")));   // two records, so the watermark reaches 1
-        store.stage(0, first);
+        store.put(0, first);
         store.commit(log::commitTransaction);
 
         // A position below the watermark: the engine rejects it, so the write lands and the stamp
         // does not. The store is ahead of its watermark, which is the harmless direction.
         stale.set(0);
-        store.stage(0, put("k", "second"));
+        store.put(0, put("k", "second"));
         ApplyFailed failure =
                 assertThrows(ApplyFailed.class, () -> store.commit(log::commitTransaction));
         assertEquals(Collections.singleton(0), failure.partitions());
@@ -567,7 +582,7 @@ class PartitionedStoreTest {
     void applyingIntoARevokedPartitionFails() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.revoke(Collections.singletonList(0));   // drops the staged batch with it
 
         store.assign(Collections.singletonList(0));
@@ -583,7 +598,7 @@ class PartitionedStoreTest {
         PartitionedStore<String> writer = open(8);
         writer.assign(Collections.singletonList(0));
         for (int i = 0; i < 5; ++i) {
-            writer.stage(0, put("k" + i, "v" + i));
+            writer.put(0, put("k" + i, "v" + i));
             writer.commit(log::commitTransaction);
         }
         writer.close();
@@ -594,7 +609,7 @@ class PartitionedStoreTest {
             store = PartitionedStore.<String>builder()
                     .options(second::optionsFor)
                     .keyBytes(PartitionFixture.KEY_BYTES)
-                    .changelog(this::send)
+                    .changelog(changelog())
                     .restore((partition, through, sink) -> {
                         resumePoints.add(through);
                         log.restoreIn(2).restore(partition, through, sink);
@@ -622,7 +637,7 @@ class PartitionedStoreTest {
         PartitionedStore<String> writer = open(1);
         writer.assign(Collections.singletonList(0));
         for (int i = 0; i < 6; ++i) {
-            writer.stage(0, put("k" + i, "v" + i));
+            writer.put(0, put("k" + i, "v" + i));
             writer.commit(log::commitTransaction);
         }
         writer.close();
@@ -635,18 +650,26 @@ class PartitionedStoreTest {
             // Fails once, after two batches of two: four records land and then the replay dies.
             Restore<String> flaky = (partition, through, sink) -> {
                 resumePoints.add(through);
-                log.restoreIn(2).restore(partition, through, (offset, mutations) -> {
-                    if (armed.get() && batches.getAndIncrement() >= 2) {
-                        armed.set(false);
-                        throw new IllegalStateException("injected: the replay died");
+                log.restoreIn(2).restore(partition, through, new WriteSink<String>() {
+                    @Override
+                    public void putBatch(long offset, Map<String, Mutation> mutations) {
+                        if (armed.get() && batches.getAndIncrement() >= 2) {
+                            armed.set(false);
+                            throw new IllegalStateException("injected: the replay died");
+                        }
+                        sink.putBatch(offset, mutations);
                     }
-                    sink.putBatch(offset, mutations);
+
+                    @Override
+                    public void deleteRange(long offset, byte[] lo, byte[] hi) {
+                        sink.deleteRange(offset, lo, hi);
+                    }
                 });
             };
             store = PartitionedStore.<String>builder()
                     .options(second::optionsFor)
                     .keyBytes(PartitionFixture.KEY_BYTES)
-                    .changelog(this::send)
+                    .changelog(changelog())
                     .restore(flaky)
                     .build();
 
@@ -674,7 +697,7 @@ class PartitionedStoreTest {
         assertThrows(IllegalStateException.class, () -> store.assign(Collections.singletonList(0)));
         assertTrue(store.assignment().isEmpty());
         assertThrows(PartitionNotAssignedException.class,
-                () -> store.getCommittedBatch(0, Collections.singletonList("k")));
+                () -> store.get(0, "k"));
     }
 
     @Test
@@ -682,9 +705,9 @@ class PartitionedStoreTest {
     void aDeleteSurvivesARestore() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.commit(log::commitTransaction);
-        store.stage(0, Collections.singletonMap("k", Mutation.delete()));
+        store.put(0, Collections.singletonMap("k", Mutation.delete()));
         store.commit(log::commitTransaction);
         assertNull(read(0, "k"), "a staged delete applies locally");
 
@@ -698,7 +721,7 @@ class PartitionedStoreTest {
             store = PartitionedStore.<String>builder()
                     .options(second::optionsFor)
                     .keyBytes(PartitionFixture.KEY_BYTES)
-                    .changelog(this::send)
+                    .changelog(changelog())
                     .restore(log.restoreIn(8))
                     .build();
             store.assign(Collections.singletonList(0));
@@ -728,11 +751,11 @@ class PartitionedStoreTest {
     void revokingABehindPartitionIsSafe() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "first"));
+        store.put(0, put("k", "first"));
         store.commit(log::commitTransaction);
 
         poisoned.set(0);
-        store.stage(0, put("k", "second"));
+        store.put(0, put("k", "second"));
         assertThrows(ApplyFailed.class, () -> store.commit(log::commitTransaction));
         assertEquals(Collections.singleton(0), store.behind());
 
@@ -753,7 +776,7 @@ class PartitionedStoreTest {
     void repairingAReadyPartitionIsHarmless() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.commit(log::commitTransaction);
 
         store.repair(Collections.singletonList(0));
@@ -767,7 +790,7 @@ class PartitionedStoreTest {
     void revokeFlushes() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.commit(log::commitTransaction);
 
         store.revoke(Collections.singletonList(0));
@@ -781,7 +804,7 @@ class PartitionedStoreTest {
     void lostDoesNotFlush() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.commit(log::commitTransaction);
 
         store.lost(Collections.singletonList(0));
@@ -796,7 +819,7 @@ class PartitionedStoreTest {
     @DisplayName("an unassigned partition is reported rather than opened on demand")
     void unassignedPartitionsAreRejected() {
         store = open(8);
-        assertThrows(PartitionNotAssignedException.class, () -> store.stage(0, put("k", "v")));
+        assertThrows(PartitionNotAssignedException.class, () -> store.put(0, put("k", "v")));
         assertFalse(store.assignment().contains(0));
     }
 
@@ -808,7 +831,7 @@ class PartitionedStoreTest {
         assertTrue(store.stats().get(0).materializedThrough().isEmpty(),
                 "nothing applied yet, so there is no position to report");
 
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.commit(log::commitTransaction);
 
         PartitionedStore.PartitionStats zero = store.stats().get(0);
@@ -828,7 +851,7 @@ class PartitionedStoreTest {
     void statsReportAPartitionThatIsBehind() {
         store = open(8);
         store.assign(Collections.singletonList(0));
-        store.stage(0, put("k", "v"));
+        store.put(0, put("k", "v"));
         store.discardUnknown();
 
         assertTrue(store.stats().get(0).behind());

@@ -21,6 +21,7 @@ import static io.veridia.elysiumkv.partitioned.InMemoryLog.bytes;
 import static io.veridia.elysiumkv.partitioned.InMemoryLog.string;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -63,7 +64,17 @@ class PartitionedStoreDurabilityTest {
         return PartitionedStore.<String>builder()
                 .options(options)
                 .keyBytes(PartitionFixture.KEY_BYTES)
-                .changelog(log::send)
+                .changelog(new Changelog<String>() {
+                    @Override
+                    public PendingPosition send(int partition, String key, Mutation mutation) {
+                        return log.send(partition, key, mutation);
+                    }
+
+                    @Override
+                    public PendingPosition sendDeleteRange(int partition, byte[] lo, byte[] hi) {
+                        return log.sendDeleteRange(partition, lo, hi);
+                    }
+                })
                 .restore((partition, materializedThrough, sink) -> {
                     resumePoints.add(materializedThrough);
                     if (replay) {
@@ -88,15 +99,71 @@ class PartitionedStoreDurabilityTest {
                 expected.put(key, truncated);
             }
         }
-        store.stage(0, updates);
+        store.put(0, updates);
         store.commit(log::commitTransaction);
     }
 
     private String read(String key) {
-        return string(store.getCommittedBatch(0, Collections.singletonList(key)).get(key));
+        return string(store.get(0, key));
     }
 
     // -------------------------------------------------------------------------
+
+    /**
+     * A range delete is a tombstone that every read in the band consults until compaction resolves
+     * it, and on a tiered store the files it covers are migrating while that happens. This is the one
+     * interaction the single-tier tests cannot reach: the band spans a durable tier holding migrated
+     * files and a transient tier holding the newest ones.
+     */
+    @Test
+    @DisplayName("a range delete covering both tiers stays deleted, and stays deleted through a rebuild")
+    void aRangeDeleteSpanningBothTiersSurvivesARebuild() {
+        store = open(fixture::tieredOptionsFor, true);
+        store.assign(Collections.singletonList(0));
+
+        Map<String, String> expected = new LinkedHashMap<>();
+        Path hot = fixture.hotDir(0);
+        Path cold = fixture.coldDir(0);
+
+        // Driven by volume rather than by a sleep: migration is a consequence of capacity here.
+        int batch = 0;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (PartitionFixture.sstCount(cold) == 0 && System.nanoTime() < deadline) {
+            commitBatch(batch++, expected);
+        }
+        assertTrue(PartitionFixture.sstCount(cold) > 0,
+                "nothing migrated, so the band would span a single tier and this asserts nothing");
+
+        // Two more, which stay on the transient tier as the newest files.
+        commitBatch(batch++, expected);
+        commitBatch(batch++, expected);
+        assertTrue(PartitionFixture.sstCount(hot) > 0,
+                "nothing on the transient tier for the band to cover");
+
+        // Every key written so far sorts inside this band, on both tiers.
+        store.deleteRange(0, bytes("b"), bytes("c"));
+        store.commit(log::commitTransaction);
+
+        for (String key : expected.keySet()) {
+            assertNull(read(key), key + " is inside the deleted band");
+        }
+
+        // And the band does not come back when the whole log is replayed into a fresh store.
+        store.close();
+        store = null;
+        PartitionFixture replica = new PartitionFixture(root.resolve("replica"));
+        try {
+            resumePoints.clear();
+            store = open(replica::tieredOptionsFor, true);
+            store.assign(Collections.singletonList(0));
+            assertEquals(OptionalLong.empty(), resumePoints.get(0), "a cold store asks for everything");
+            for (String key : expected.keySet()) {
+                assertNull(read(key), key + " must not be resurrected by the replay");
+            }
+        } finally {
+            replica.close();
+        }
+    }
 
     @Test
     @DisplayName("a lost transient file is not hidden behind a newer file's bigger watermark")
