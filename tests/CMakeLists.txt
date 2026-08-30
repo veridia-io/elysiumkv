@@ -130,6 +130,33 @@ add_test(NAME CApi.TheExportGateRejectsAStraySymbol
         -DLIBRARY=$<TARGET_FILE:elysiumkv_export_fixture>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/capi/check_exports_control.cmake)
 
+# The export gates above ask what the library exposes. This asks the opposite: whether anything the
+# C++ API can configure is unreachable from a binding. `Options::ttl` shipped that way — a documented
+# feature no binding could set — and nothing noticed, because the Java coverage test compares the ABI
+# against its Java bindings and there was no ABI symbol to be missing.
+add_test(NAME CApi.EveryOptionIsReachableThroughTheAbi
+    COMMAND ${CMAKE_COMMAND}
+        -DHEADER=${CMAKE_CURRENT_SOURCE_DIR}/../include/elysiumkv/options.hpp
+        -DCAPI=${CMAKE_CURRENT_SOURCE_DIR}/../src/capi/elysiumkv_c.cpp
+        # background: BackgroundMode::Inline is what makes a differential run a pure function of its
+        # seed; an embedder handed it gets a store that does no background work.
+        # restart_interval: the SST block restart interval, fixed rather than published.
+        "-DALLOWED=background$<SEMICOLON>restart_interval"
+        -DMINIMUM=30
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/capi/check_option_coverage.cmake)
+
+# ARCHITECTURE.md "Negative controls" — the control on the gate above, against both ways it could
+# silently pass: a field it fails to notice, and a parse that matches less than it reports.
+add_test(NAME CApi.TheOptionGateRejectsAnUnreachableField
+    COMMAND ${CMAKE_COMMAND}
+        -DGATE=${CMAKE_CURRENT_SOURCE_DIR}/capi/check_option_coverage.cmake
+        -DHEADER=${CMAKE_CURRENT_SOURCE_DIR}/../include/elysiumkv/options.hpp
+        -DCAPI=${CMAKE_CURRENT_SOURCE_DIR}/../src/capi/elysiumkv_c.cpp
+        "-DALLOWED=background$<SEMICOLON>restart_interval"
+        -DMINIMUM=30
+        -DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/option_coverage
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/capi/check_option_coverage_control.cmake)
+
 # The glue is dlopened into a JVM that may already have its own zstd, so the same
 # rule applies to it. RegisterNatives means it needs no exported Java_* symbols at
 # all — JNI_OnLoad hands the JVM function pointers — so the whole surface is two.
