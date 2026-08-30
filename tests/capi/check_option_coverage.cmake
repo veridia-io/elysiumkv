@@ -11,6 +11,13 @@
 #
 # Inputs: HEADER (options.hpp), CAPI (the C ABI translation unit), ALLOWED (a ;-list of field names).
 
+# Script mode does not inherit the project's policy settings, so this has to state them itself —
+# without it CMP0057 is unset and `IN_LIST` is a stray argument rather than an operator. It fails on
+# the project's own floor and passes under CMake 4, which treats the policy as NEW, so a laptop on 4
+# cannot see the break at all.
+cmake_minimum_required(VERSION 3.25)
+
+
 if(NOT EXISTS "${HEADER}")
     message(FATAL_ERROR "check_option_coverage: no such header: ${HEADER}")
 endif()

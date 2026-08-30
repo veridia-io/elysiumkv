@@ -4,6 +4,13 @@
 #
 # Inputs: GATE (the gate script), HEADER, CAPI, ALLOWED, MINIMUM, SCRATCH (a writable directory).
 
+# Script mode does not inherit the project's policy settings, so this has to state them itself —
+# without it CMP0057 is unset and `IN_LIST` is a stray argument rather than an operator. It fails on
+# the project's own floor and passes under CMake 4, which treats the policy as NEW, so a laptop on 4
+# cannot see the break at all.
+cmake_minimum_required(VERSION 3.25)
+
+
 if(NOT DEFINED SCRATCH)
     # Required rather than defaulted: in script mode CMAKE_CURRENT_BINARY_DIR is the working
     # directory, so a default would write fixtures into whatever tree the caller happened to be in.
