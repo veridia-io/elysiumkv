@@ -197,6 +197,9 @@ class AbiCoverageTest {
             support.options().geometricLevels(64L << 10, 10, 4);
             exercise("optionsSetGeometricLevels");
 
+            support.options().ttlMs(java.util.concurrent.TimeUnit.DAYS.toMillis(7));
+            exercise("optionsSetTtl");
+
             // Registering a KMS manager performs no I/O, so a dead endpoint is enough to reach the
             // native call — which is the point here. Without the AWS build it must refuse and say
             // which build option is missing, exactly as the remote constructors do.

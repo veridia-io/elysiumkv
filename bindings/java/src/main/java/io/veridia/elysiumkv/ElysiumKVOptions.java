@@ -103,6 +103,30 @@ public final class ElysiumKVOptions implements AutoCloseable {
     }
 
     /**
+     * How long data lives before the engine drops it, measured from when it was written. Zero — the
+     * default — never expires anything.
+     *
+     * <p>Expiry by manifest edit: a file whose every write has outlived this is unlinked whole,
+     * nothing read and nothing rewritten. That is cheap, and it is why the three limits below are
+     * part of what the option means rather than caveats on it.
+     *
+     * <p><b>The granularity is the file, not the key.</b> The manifest names files, so reaching
+     * inside one means rewriting it. This buys "data older than this disappears", not "this key
+     * expires at this time" — a key written a second before its file's newest write outlives the
+     * limit by as long as that file survives.
+     *
+     * <p>At or after, never before: a file is dropped when the sweep next finds it expired, so data
+     * may outlive the limit by up to one {@link #orphanSweepIntervalMs(long)}. And a file expires only once
+     * no older file overlaps its range, because dropping one that shadows an older version of the
+     * same key would uncover that version rather than remove the key.
+     */
+    public ElysiumKVOptions ttlMs(long millis) {
+        if (millis < 0) throw new IllegalArgumentException("ttl must not be negative: " + millis);
+        Native.optionsSetTtl(handle(), millis);
+        return this;
+    }
+
+    /**
      * How often the maintenance coordinator reconciles: it evaluates every background policy —
      * flush, compaction, migration off a transient tier, capacity eviction, obsolete-object
      * collection — against current state and the clock, and dispatches what is due. Zero (the

@@ -111,6 +111,18 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options*, vo
  * `multiplier` times the capacity above it, and the last carrying none because it absorbs
  * everything. Choose `count` against expected total size; configured levels sitting empty cost
  * nothing. */
+/* How long data lives before the engine drops it, measured from when it was written. Zero — the
+ * default — never expires anything.
+ *
+ * Expiry by manifest edit: a file whose every write has outlived this is unlinked whole, nothing read
+ * and nothing rewritten. Three limits follow from that and none of them is a detail. The granularity
+ * is the file, not the key, so this buys "data older than X disappears" and not "this key expires at
+ * X". A file is dropped when the sweep next finds it expired, so data may outlive the limit by up to
+ * one `orphan_sweep_interval`. And a file expires only once no older file overlaps its range —
+ * dropping one that shadows an older version of the same key would uncover that version rather than
+ * remove the key. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_ttl(elysiumkv_options*, uint64_t ttl_ms);
+
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_geometric_levels(elysiumkv_options*,
                                                                      uint64_t base,
                                                                      int multiplier, int count);

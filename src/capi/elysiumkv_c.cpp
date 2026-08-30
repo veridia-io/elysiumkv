@@ -604,6 +604,22 @@ elysiumkv_status elysiumkv_options_add_tier(elysiumkv_options* options, void* st
     });
 }
 
+elysiumkv_status elysiumkv_options_set_ttl(elysiumkv_options* options, uint64_t ttl_ms) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config, "elysiumkv_options_set_ttl: null options");
+        }
+        // Zero clears rather than meaning "expire immediately", which matches every other duration
+        // crossing here and is the only reading that lets a caller pass a variable it has not set.
+        if (ttl_ms == 0) {
+            options->options.ttl.reset();
+        } else {
+            options->options.ttl = std::chrono::milliseconds(ttl_ms);
+        }
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_options_set_geometric_levels(elysiumkv_options* options, uint64_t base,
                                                        int multiplier, int count) {
     return guard([&]() -> elysiumkv_status {
