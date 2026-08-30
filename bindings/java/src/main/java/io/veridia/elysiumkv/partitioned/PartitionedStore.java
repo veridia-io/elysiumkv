@@ -1,5 +1,6 @@
 package io.veridia.elysiumkv.partitioned;
 
+import io.veridia.elysiumkv.BatchedIterator;
 import io.veridia.elysiumkv.ElysiumKV;
 import io.veridia.elysiumkv.ElysiumKVOptions;
 import io.veridia.elysiumkv.ElysiumKVStats;
@@ -54,8 +55,15 @@ import java.util.function.IntFunction;
  * that do own their producer.
  *
  * <p>{@link #put} and {@link #deleteRange} are named for what they mean rather than for when they
- * happen: neither writes. Both stage, and {@link #applyCommitted} is what makes them real. Every read
- * folds the staged set in, so a second fold over the same key sees the first one's output.
+ * happen: neither writes. Both stage, and {@link #applyCommitted} is what makes them real. {@link #get}
+ * and the four scans fold the staged set in, so a second fold over the same key sees the first one's
+ * output.
+ *
+ * <p>The methods that name the committed view — {@link #getCommitted} and the batched scans — do not,
+ * and they exist for a reader outside the fold. An interactive query wants exactly that: a row this
+ * transaction staged belongs to a transaction that may abort, so serving it would publish state that
+ * never existed. They take no part in the staged set, so a query thread neither sees it nor waits on
+ * a thread writing it.
  *
  * <p>Two checkpoints, and they never meet. The input checkpoint is the caller's and travels in its
  * transaction; the state checkpoint is this component's, taken from the {@link PendingPosition} each
@@ -369,6 +377,23 @@ public final class PartitionedStore<K> implements AutoCloseable {
         return held.db.getCopy(encoded);
     }
 
+    /**
+     * Committed state for one key, ignoring whatever this transaction has staged — for a reader
+     * outside the fold, where staged rows are the wrong answer because the transaction holding them
+     * may still abort.
+     *
+     * <p>Takes no part in the staged set: it neither sees it nor contends with a thread writing it, so
+     * it is safe from any thread and never waits on a fold. It still rejects an unassigned or
+     * {@linkplain #behind() behind} partition — the invariant's second clause is about who may be
+     * served, and a query is being served.
+     *
+     * @return the value, or {@code null} where the key is absent — and only then
+     */
+    public byte[] getCommitted(int partition, K key) {
+        Partition held = require(partition, true);
+        return held.db.getCopy(keyBytes.apply(Objects.requireNonNull(key, "key")));
+    }
+
     // --- scanning ------------------------------------------------------------
 
     /**
@@ -407,6 +432,39 @@ public final class PartitionedStore<K> implements AutoCloseable {
         Objects.requireNonNull(prefix, "prefix");
         return new StagedIterator(held.db.reversePrefixIterator(prefix),
                 prefixSnapshot(held, prefix, true), true);
+    }
+
+    /**
+     * Half-open range scan of committed state, batched; null bounds are unbounded. The bulk path, and
+     * the one for a query served from outside the fold. Borrows the engine's own batches rather than
+     * copying, which a staged scan cannot — there is no merge here to draw from two sources. Close it.
+     *
+     * <p>Not a snapshot, and which half is fixed matters. The file set is taken when the scan is
+     * created, so compaction, migration and a truncation cannot disturb it. The memtable is live: a
+     * key deleted before the scan reaches it is skipped, one already yielded stays yielded, and a scan
+     * running while {@link #applyCommitted} writes can observe part of that batch. A concurrent range
+     * delete is invisible, its tombstones having been copied when the scan started, where a point
+     * delete may not be — so the two shapes of eviction do not look alike to a scan in flight.
+     */
+    public BatchedIterator committedBatchedIterator(int partition, byte[] lo, byte[] hi) {
+        return require(partition, true).db.batchedIterator(lo, hi);
+    }
+
+    /** Prefix scan of committed state, batched. Same guarantees as {@link #committedBatchedIterator}. */
+    public BatchedIterator committedBatchedPrefixIterator(int partition, byte[] prefix) {
+        return require(partition, true).db
+                .batchedPrefixIterator(Objects.requireNonNull(prefix, "prefix"));
+    }
+
+    /** The same batched range scan, descending. Bounds keep their forward meaning. */
+    public BatchedIterator committedBatchedReverseIterator(int partition, byte[] lo, byte[] hi) {
+        return require(partition, true).db.batchedReverseIterator(lo, hi);
+    }
+
+    /** The same batched prefix scan, descending. */
+    public BatchedIterator committedBatchedReversePrefixIterator(int partition, byte[] prefix) {
+        return require(partition, true).db
+                .batchedReversePrefixIterator(Objects.requireNonNull(prefix, "prefix"));
     }
 
     private StagedSnapshot snapshot(Partition held, byte[] lo, byte[] hi, boolean reverse) {
