@@ -88,8 +88,9 @@ endforeach()
 
 list(LENGTH exported exported_count)
 
-# The ABI in elysiumkv.h is ~43 entry points; anything near
-# zero means visibility swallowed the export list rather than applying it.
+# Anything near zero means visibility swallowed the export list rather than applying it. The default
+# below is only a floor for a caller that passes none; the ABI's own count is passed at its call
+# site, because a default that drifts behind the header checks less than it appears to.
 if(exported_count LESS MINIMUM)
     message(FATAL_ERROR
         "${LIBRARY} exports only ${exported_count} symbols, fewer than the ${MINIMUM} expected "

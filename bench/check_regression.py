@@ -26,6 +26,19 @@ import sys
 
 THRESHOLD = 0.10  # fail on a >10% regression
 
+# The counters `bench_main.cpp` labels "The gate": round trips per lookup, readers opened per lookup,
+# round trips per scan, and bytes compaction rewrote per byte written. They are properties of the
+# read path and the picker rather than of the machine, so they are the half of this file that ought
+# to be comparable at all — and until they were compared here, a change doubling the round trips per
+# lookup passed whenever wall time happened to hold.
+STRUCTURAL = ("gets_per_op", "opens_per_op", "gets_per_scan", "write_amp")
+
+# Tight, but not zero. These are ratios over however many iterations google-benchmark chose, and a
+# faster machine amortises the fixed cost of opening readers over more of them, so the quotient moves
+# a little without the structure moving at all. Five times tighter than the wall-clock band, which is
+# enough to catch a round trip appearing and nowhere near loose enough to hide one.
+COUNTER_THRESHOLD = 0.02
+
 # How noisy a measurement may be before a comparison against it means nothing.
 #
 # **A ratchet that cannot tell a regression from a bad afternoon on a shared runner is worse than no
@@ -53,6 +66,38 @@ def measurements(report: dict) -> dict:
             continue
         out[name] = entry["real_time"]
     return out
+
+
+def structural(report: dict) -> dict:
+    """"name::counter" -> value, for the counters in STRUCTURAL.
+
+    Keyed into the same flat baseline as the times, so a baseline recorded before these were
+    compared still loads: its counter keys are simply absent and report as new.
+    """
+    out = {}
+    for entry in report.get("benchmarks", []):
+        if entry.get("run_type") == "aggregate" and entry.get("aggregate_name") != "median":
+            continue
+        name = entry["name"].removesuffix("_median")
+        for counter in STRUCTURAL:
+            if counter not in entry:
+                continue
+            key = f"{name}::{counter}"
+            if key in out and entry.get("run_type") != "aggregate":
+                continue
+            out[key] = float(entry[counter])
+    return out
+
+
+def relative_change(reference: float, measured: float) -> float:
+    """Signed change, defined when the reference is zero.
+
+    A counter legitimately sits at zero — a lookup that opens no reader — and a ratio against it is
+    not a small number, it is a new cost appearing where there was none.
+    """
+    if abs(reference) < 1e-12:
+        return 0.0 if abs(measured) < 1e-12 else float("inf")
+    return (measured - reference) / reference
 
 
 def dispersion(report: dict) -> dict:
@@ -84,13 +129,14 @@ def main() -> int:
     if not current:
         print("no benchmark results found", file=sys.stderr)
         return 1
+    current_counters = structural(report)
 
     path = baseline_path(args.baselines)
     os.makedirs(args.baselines, exist_ok=True)
 
     if args.update or not os.path.exists(path):
         with open(path, "w") as f:
-            json.dump(current, f, indent=2, sort_keys=True)
+            json.dump({**current, **current_counters}, f, indent=2, sort_keys=True)
             f.write("\n")
         action = "updated" if args.update else "bootstrapped"
         print(f"{action} baseline {path} with {len(current)} benchmarks")
@@ -118,6 +164,19 @@ def main() -> int:
         elif change < -THRESHOLD:
             improvements.append((name, reference, time_ns, change))
 
+    # No dispersion escape here, deliberately. A counter that has become noisy has itself changed —
+    # the structure it measures is not supposed to vary between repetitions — so declining to judge
+    # it would be declining to report the finding.
+    counter_regressions = []
+    for key, value in sorted(current_counters.items()):
+        if key not in baseline:
+            missing.append(key)
+            continue
+        reference = baseline[key]
+        change = relative_change(reference, value)
+        if change > COUNTER_THRESHOLD:
+            counter_regressions.append((key, reference, value, change))
+
     for name, reference, time_ns, change in improvements:
         print(f"IMPROVED  {name}: {reference:.1f}ns -> {time_ns:.1f}ns ({change:+.1%}) "
               f"— rerun with --update to ratchet the baseline down")
@@ -129,10 +188,17 @@ def main() -> int:
     for name, reference, time_ns, change in regressions:
         print(f"REGRESSED {name}: {reference:.1f}ns -> {time_ns:.1f}ns ({change:+.1%})",
               file=sys.stderr)
+    for key, reference, value, change in counter_regressions:
+        print(f"STRUCTURE {key}: {reference:.4g} -> {value:.4g} ({change:+.1%}) "
+              f"— the work done per operation changed, not the speed of it", file=sys.stderr)
 
-    if regressions:
-        print(f"\n{len(regressions)} benchmark(s) regressed by more than "
-              f"{THRESHOLD:.0%}.", file=sys.stderr)
+    if regressions or counter_regressions:
+        if regressions:
+            print(f"\n{len(regressions)} benchmark(s) regressed by more than "
+                  f"{THRESHOLD:.0%}.", file=sys.stderr)
+        if counter_regressions:
+            print(f"{len(counter_regressions)} structural counter(s) rose by more than "
+                  f"{COUNTER_THRESHOLD:.0%}.", file=sys.stderr)
         return 1
 
     judged = len(current) - len(noisy) - len(missing)
@@ -141,6 +207,9 @@ def main() -> int:
         summary += f", {len(noisy)} too noisy to judge"
     if missing:
         summary += f", {len(missing)} new"
+    counters_judged = len(current_counters) - sum(1 for k in current_counters if k not in baseline)
+    if counters_judged:
+        summary += f"; {counters_judged} structural counter(s) within {COUNTER_THRESHOLD:.0%}"
     print(summary)
     return 0
 

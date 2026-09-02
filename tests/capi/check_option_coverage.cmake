@@ -28,6 +28,12 @@ endif()
 file(READ "${HEADER}" header_text)
 file(READ "${CAPI}" capi_text)
 
+# The reachability search below is a substring match, so a field named only in a comment — including
+# one explaining why it is *not* wired up — would count as reached. Strip them first, for the same
+# reason the header's are stripped.
+string(REGEX REPLACE "//[^\n]*" "" capi_text "${capi_text}")
+string(REGEX REPLACE "/\\*([^*]|\\*[^/])*\\*/" "" capi_text "${capi_text}")
+
 # Bounded to `struct Options` so members of Tier, LevelOptions and the rest are not swept in: they
 # are configured through their own entry points and would each need an allowlist entry otherwise.
 string(FIND "${header_text}" "struct Options {" options_start)
@@ -45,7 +51,11 @@ string(REGEX REPLACE "/\\*([^*]|\\*[^/])*\\*/" "" options_body "${options_body}"
 # A brace initialiser may contain parentheses — `Duration orphan_retention{hours(24)}` — so parens
 # are admitted inside braces and refused outside them. Refusing them everywhere silently skips every
 # brace-initialised field; admitting them everywhere picks up member functions as fields.
-string(REGEX MATCHALL "\n    [A-Za-z_][A-Za-z_0-9:<>, ]*[ >]([a-z_][a-z_0-9]*)({[^;]*})?[^;(]*;"
+#
+# Parentheses are admitted in the *type* for the same reason: `std::function<uint64_t()> clock` is a
+# field, and a type pattern that cannot spell it skips the field silently rather than reporting it.
+# Member functions are still refused by the tail, which admits no `(` between the name and the `;`.
+string(REGEX MATCHALL "\n    [A-Za-z_][A-Za-z_0-9:<>(), ]*[ >]([a-z_][a-z_0-9]*)({[^;]*})?[^;(]*;"
        declarations "${options_body}")
 
 set(unreachable "")

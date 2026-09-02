@@ -113,9 +113,14 @@ add_test(NAME CApi.SharedLibraryExportsEnoughToLinkAgainst COMMAND elysiumkv_cap
 
 # Linking proves the symbols a binding needs are *present*; this proves nothing
 # else is. Neither check subsumes the other.
+#
+# MINIMUM is the ABI's size, not a token floor. The default of 25 would pass a version script that
+# dropped two thirds of the entry points, which the link test above cannot catch either: it links
+# only the handful the smoke test calls. Raise this when the ABI grows.
 add_test(NAME CApi.SharedLibraryExportsNothingBesidesTheAbi
     COMMAND ${CMAKE_COMMAND}
         -DLIBRARY=$<TARGET_FILE:elysiumkv_shared>
+        -DMINIMUM=73
         -P ${CMAKE_CURRENT_SOURCE_DIR}/capi/check_exports.cmake)
 
 # ARCHITECTURE.md "Negative controls" — the control on the gate above. The fixture exports one symbol that
@@ -141,8 +146,10 @@ add_test(NAME CApi.EveryOptionIsReachableThroughTheAbi
         # background: BackgroundMode::Inline is what makes a differential run a pure function of its
         # seed; an embedder handed it gets a store that does no background work.
         # restart_interval: the SST block restart interval, fixed rather than published.
-        "-DALLOWED=background$<SEMICOLON>restart_interval"
-        -DMINIMUM=30
+        # clock: a test seam. Every age-driven predicate reads it, so a binding able to set it could
+        # stop time on a live store; there is also no C spelling of std::function worth having.
+        "-DALLOWED=background$<SEMICOLON>restart_interval$<SEMICOLON>clock"
+        -DMINIMUM=31
         -P ${CMAKE_CURRENT_SOURCE_DIR}/capi/check_option_coverage.cmake)
 
 # ARCHITECTURE.md "Negative controls" — the control on the gate above, against both ways it could
@@ -152,8 +159,8 @@ add_test(NAME CApi.TheOptionGateRejectsAnUnreachableField
         -DGATE=${CMAKE_CURRENT_SOURCE_DIR}/capi/check_option_coverage.cmake
         -DHEADER=${CMAKE_CURRENT_SOURCE_DIR}/../include/elysiumkv/options.hpp
         -DCAPI=${CMAKE_CURRENT_SOURCE_DIR}/../src/capi/elysiumkv_c.cpp
-        "-DALLOWED=background$<SEMICOLON>restart_interval"
-        -DMINIMUM=30
+        "-DALLOWED=background$<SEMICOLON>restart_interval$<SEMICOLON>clock"
+        -DMINIMUM=31
         -DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/option_coverage
         -P ${CMAKE_CURRENT_SOURCE_DIR}/capi/check_option_coverage_control.cmake)
 

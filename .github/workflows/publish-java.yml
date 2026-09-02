@@ -19,6 +19,14 @@ on:
       - 'bindings/java/**'
       - 'bindings/kafka-streams-v3/**'
       - '.github/workflows/publish-java.yml'
+      # The build system and the AWS component, because this is the only job that builds the SDK
+      # from source against musl. `src/**` is deliberately still absent: the ci workflow's musl job
+      # builds the glue on every push, so an engine change that breaks that libc is caught there,
+      # and listing it here would run three native builds on every engine pull request.
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'vcpkg.json'
+      - 'aws/**'
   # **published, not created.** A draft is provisional — it can be edited or deleted — and Maven
   # Central is not: a version pushed there cannot be replaced. Publishing is the point at which the
   # release stops being a draft, so it is the point at which the artifact should go out. It also

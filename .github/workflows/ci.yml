@@ -274,10 +274,16 @@ jobs:
           cat > musl-ci.sh <<'SCRIPT'
           set -eux
           apk add --no-cache build-base cmake ninja git zstd-dev lz4-dev openssl-dev \
-              gtest-dev linux-headers pkgconf
+              gtest-dev linux-headers pkgconf openjdk17-jdk
+          # The glue too, not only the engine. The jar carries a musl native library, and whether
+          # that library *builds* against musl was previously answered for the first time by the
+          # release workflow — on release day, which is the failure that workflow exists to prevent.
+          # Its export gate runs here as well, so the visibility rules are checked on this libc.
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
           cmake -S . -B build/musl -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                 -DELYSIUMKV_BUILD_TESTS=ON -DELYSIUMKV_WERROR=ON \
-                -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF
+                -DELYSIUMKV_BUILD_BENCH=OFF -DELYSIUMKV_BUILD_CLI=OFF \
+                -DELYSIUMKV_BUILD_JNI=ON
           cmake --build build/musl
           cd build/musl && ctest --output-on-failure -j"$(nproc)"
           SCRIPT
