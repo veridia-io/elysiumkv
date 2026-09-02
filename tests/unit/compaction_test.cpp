@@ -224,6 +224,46 @@ TEST_F(CompactionTest, TombstonesAreDroppedWhereTheyAreBottommost) {
     EXPECT_EQ(engine().check_invariants(), Status::Ok);
 }
 
+/// The resurrection this exists to prevent, end to end. A compaction rewrites its output-level
+/// overlaps *whole*, so it writes wherever their spans reach — past the keys its own inputs hold.
+/// Deciding "bottommost" on the inputs' span alone therefore asks the question about less than is
+/// written, and a tombstone dropped over the difference uncovers the value it was shadowing.
+TEST_F(CompactionTest, ATombstoneIsKeptWhenTheOverlapReachesPastTheInputs) {
+    Options options = make_options(store_, Compression::None, 1u << 20);
+    options.levels[0].max_files = 100;   // nothing fires on its own; every step is driven below
+    open(options);
+
+    const std::string deep = key_at(500);
+
+    // L2: the value that must stay buried.
+    ASSERT_EQ(db_->put(Slice::from(deep), Slice::from(std::string("old"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+    ASSERT_EQ(db_->compact_level(1), Status::Ok);
+
+    // L1: a file spanning [200, 600] whose tombstone shadows it. Its own span covers the deep key,
+    // so this step keeps the tombstone whichever way the question is asked.
+    ASSERT_EQ(db_->put(Slice::from(key_at(200)), Slice::from(std::string("x"))), Status::Ok);
+    ASSERT_EQ(db_->remove(Slice::from(deep)), Status::Ok);
+    ASSERT_EQ(db_->put(Slice::from(key_at(600)), Slice::from(std::string("y"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+    ASSERT_FALSE(db_->get(Slice::from(deep)).has_value()) << "premise: the delete took effect";
+
+    // L0: keys strictly below the deep one, overlapping the L1 file but stopping short of it.
+    ASSERT_EQ(db_->put(Slice::from(key_at(100)), Slice::from(std::string("a"))), Status::Ok);
+    ASSERT_EQ(db_->put(Slice::from(key_at(300)), Slice::from(std::string("b"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+
+    auto found = db_->get_copy(Slice::from(deep));
+    EXPECT_FALSE(found.has_value())
+        << "the deleted key came back as \""
+        << (found.has_value() ? std::string(found->begin(), found->end()) : std::string())
+        << "\": its tombstone was dropped over a range the compaction had not asked about";
+    EXPECT_EQ(engine().check_invariants(), Status::Ok);
+}
+
 // ARCHITECTURE.md "Compaction" — the dynamic condition, end to end. Deeper levels are configured but
 // will never be reached by a store this small; a static last-level rule would
 // accumulate deletions forever.

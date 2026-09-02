@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace elysiumkv {
@@ -49,6 +50,16 @@ struct Compaction {
     /// Every input and overlap, oldest-source-last: the order the merging
     /// iterator needs, since recency is positional (ARCHITECTURE.md "Positional recency").
     std::vector<FileMetadata> all_inputs() const;
+
+    /// The effective key span this compaction rewrites, over inputs and overlaps together.
+    ///
+    /// Wider than the inputs' span, and the difference is load-bearing. Overlaps are selected by
+    /// intersecting the inputs' span, but each is then rewritten *whole*, so the output reaches
+    /// wherever the overlap reached. Anything decided from the narrower span is being asked about
+    /// less than the compaction writes: the bottommost test can call a range clear while a deeper
+    /// file sits under the part of an overlap the inputs never touched, and a tombstone dropped
+    /// there uncovers it.
+    std::pair<std::string, std::string> effective_hull() const;
     /// min() over inputs — a compaction output inherits the oldest write it
     /// contains (ARCHITECTURE.md "The manifest is snapshots plus edits"), which is also what places it on a tier (ARCHITECTURE.md "A tier is not a level").
     uint64_t min_write_time_ms() const;
