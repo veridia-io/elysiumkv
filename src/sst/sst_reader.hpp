@@ -79,6 +79,14 @@ public:
     Result<std::shared_ptr<const Block>> load_block(const BlockHandle& handle,
                                                     Slice prefetched = {});
 
+    /// Fetch, bounds-check, verify and unframe one handle, repairing a rotted cache on the way.
+    ///
+    /// Shared with the filter, which is not a block: it needs the same fetch and the same repair
+    /// but a different ceiling, because it is framed uncompressed and is sized by the file's key
+    /// count rather than by `block_bytes`.
+    Result<Buffer> fetch_content(const BlockHandle& handle, Slice prefetched,
+                                 size_t max_uncompressed_bytes);
+
     /// Resident bytes: the index block and the bloom filter, which are what a reader
     /// keeps alive. The filter dominates — 10 bits per key is ~1.25 MB for a
     /// million-entry file, which is why the reader cache is bounded by bytes rather

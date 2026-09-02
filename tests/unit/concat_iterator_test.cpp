@@ -7,7 +7,14 @@
 // configurations produce — so every case here forces several.
 
 #include "db/db_impl.hpp"
+#include "sst/concat_iterator.hpp"
+#include "sst/sst_reader.hpp"
+#include "sst/sst_writer.hpp"
+
+#include "fault/fault_injecting_blob_store.hpp"
+#include "support/temp_dir.hpp"
 #include "support/test_db.hpp"
+#include "elysiumkv/disk_blob_store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -154,6 +161,77 @@ TEST_F(ConcatIteration, ARangeDeleteAcrossManyFilesStillReadsCorrectly) {
     ASSERT_EQ(seen.size(), static_cast<size_t>(kKeys - 1200));
     for (const std::string& key : seen) {
         EXPECT_TRUE(key < key_at(300) || !(key < key_at(1500))) << key << " is inside the range";
+    }
+}
+
+/// A file that cannot be read is not a file that holds nothing.
+///
+/// Positioning walks forward past a file whose seek left the child invalid, which is right for a
+/// file a truncating compaction emptied and wrong for one the store could not answer for. The two
+/// are distinguishable only by the child's status, and both `enter` and `leave` overwrite the
+/// child — so a status not taken at the point of failure is gone. Reported as absence, an
+/// unreachable file becomes missing keys with an Ok scan, which is the one confusion
+/// ARCHITECTURE.md "Immutable named objects" forbids everywhere.
+TEST(ConcatIteratorFault, AnUnreadableFileIsNotReportedAsAnEmptyOne) {
+    TempDir dir;
+    auto disk = std::make_shared<DiskBlobStore>(dir.path());
+    auto store = std::make_shared<FaultInjectingBlobStore>(disk);
+
+    // Three disjoint, sorted files, as a level below L0 always is.
+    std::vector<FileMetadata> files;
+    std::vector<std::shared_ptr<SstReader>> readers;
+    for (int f = 0; f < 3; ++f) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "%012d.sst", f + 1);
+        SstWriter writer({.compression = Compression::None});
+        for (int i = f * 100; i < (f + 1) * 100; ++i) {
+            writer.add(Slice::from(key_at(i)), ValueType::Put, Slice::from(std::string("v")));
+        }
+        auto built = writer.finish();
+        ASSERT_TRUE(built.has_value());
+        ASSERT_EQ(store->put(name, Slice::from(built->bytes)).get(), Status::Ok);
+
+        files.push_back(FileMetadata{.level = 1,
+                                     .file_number = static_cast<uint64_t>(f + 1),
+                                     .store_id = store->id(),
+                                     .smallest_key = built->smallest_key,
+                                     .largest_key = built->largest_key,
+                                     .file_bytes = built->bytes.size(),
+                                     .num_entries = built->num_entries,
+                                     .compression = Compression::None,
+                                     .min_write_time_ms = 1000});
+        // Opened before the fault is armed, so the failure below lands on reading a block rather
+        // than on opening the file — the path where a status has somewhere to be lost.
+        auto reader = SstReader::open(*store, name, built->bytes.size(), {});
+        ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+        readers.emplace_back(std::move(*reader));
+    }
+
+    VersionEdit edit;
+    edit.added = files;
+    auto version = Version::apply(Version(), edit);
+
+    // Every read of the middle file fails from here on.
+    store->add_rule({.op = FaultInjectingBlobStore::Op::Get,
+                     .name_contains = "000000000002.sst",
+                     .first_match = 0,
+                     .match_count = 0,
+                     .status = Status::Io});
+
+    auto it = make_concat_iterator(version, 1, 0, 3,
+                                   [&](const FileMetadata& file) -> Result<std::shared_ptr<SstReader>> {
+                                       return readers[file.file_number - 1];
+                                   });
+
+    // A key inside the unreadable file. The answer may not be a key from the file after it.
+    it->seek(Slice::from(key_at(150)));
+
+    EXPECT_NE(it->status(), Status::Ok)
+        << "the unreadable file was walked past as though it held nothing";
+    if (it->valid()) {
+        const std::string landed(reinterpret_cast<const char*>(it->key().data()), it->key().size());
+        EXPECT_LT(landed, key_at(200))
+            << "positioning skipped the unreadable file and answered from the next one";
     }
 }
 

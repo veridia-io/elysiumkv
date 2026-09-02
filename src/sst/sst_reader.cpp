@@ -10,6 +10,15 @@
 namespace elysiumkv {
 namespace {
 
+/// Whether a handle lies wholly inside the file, without overflowing.
+///
+/// `offset + length` is not the test: both come from the file, a v1 or v2 footer carries no
+/// checksum, and a wrapped sum passes an unsigned comparison against the file size while naming
+/// bytes nowhere near it.
+bool handle_fits(const BlockHandle& handle, uint64_t file_size) {
+    return handle.length <= file_size && handle.offset <= file_size - handle.length;
+}
+
 /// Index values are `(offset varint, length varint)`.
 bool decode_handle(Slice encoded, BlockHandle& out) {
     const uint8_t* p = encoded.data();
@@ -162,7 +171,14 @@ size_t SstReader::max_uncompressed() const {
     // Whichever is larger: sixteen configured blocks, or the largest block a
     // writer is permitted to emit. The second term is what keeps the bound and
     // the write-side limit from drifting apart — they now share one constant.
-    return std::max<size_t>(16 * options_.block_bytes, kMaxEntryBlockBytes);
+    //
+    // `kMaxEntryBlockBytes` budgets one maximal entry and nothing else, and a block is not one
+    // entry. `SstWriter::add` appends first and tests the size afterwards, so a block may carry
+    // nearly `block_bytes` of earlier entries *plus* a maximal one — which at the default block
+    // size is larger than the constant alone. A writer permitted to emit a block this reader
+    // refuses is a store that accepts a write it cannot read back.
+    return std::max<size_t>(16 * options_.block_bytes,
+                            kMaxEntryBlockBytes + options_.block_bytes);
 }
 
 Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::string name,
@@ -218,8 +234,7 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::str
     // The index is inside the tail whenever the guess was long enough, which is the whole point.
     const BlockHandle& index_handle = reader->footer_.index;
     Slice index_bytes;
-    if (index_handle.offset >= tail_start &&
-        index_handle.offset + index_handle.length <= file_size) {
+    if (index_handle.offset >= tail_start && handle_fits(index_handle, file_size)) {
         index_bytes = Slice(tail->data() + (index_handle.offset - tail_start), index_handle.length);
     }
 
@@ -233,14 +248,9 @@ Result<std::unique_ptr<SstReader>> SstReader::open(BlobStore& incoming, std::str
     return reader;
 }
 
-Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& handle,
-                                                          Slice prefetched) {
-    if (options_.block_cache != nullptr) {
-        if (auto cached = options_.block_cache->get(options_.file_number, handle.offset)) {
-            return cached;
-        }
-    }
-    if (handle.length < kBlockTrailerLength || handle.offset + handle.length > file_size_) {
+Result<Buffer> SstReader::fetch_content(const BlockHandle& handle, Slice prefetched,
+                                        size_t max_uncompressed_bytes) {
+    if (handle.length < kBlockTrailerLength || !handle_fits(handle, file_size_)) {
         return std::unexpected(Status::Corrupt);
     }
 
@@ -254,7 +264,7 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
     }
 
     auto content = framed.size() == handle.length
-                       ? unframe_block(framed, max_uncompressed())
+                       ? unframe_block(framed, max_uncompressed_bytes)
                        : Result<Buffer>(std::unexpected(Status::Corrupt));
     if (!content) {
         // A rotted cache file is not a corrupt store. The bytes may have come from a disk
@@ -277,12 +287,25 @@ Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& ha
 
             auto retried = authority.get_sync(name_, handle.offset, handle.length);
             if (retried && retried->size() == handle.length) {
-                auto fresh = unframe_block(Slice::from(*retried), max_uncompressed());
+                auto fresh = unframe_block(Slice::from(*retried), max_uncompressed_bytes);
                 if (fresh) content = std::move(fresh);
             }
         }
         if (!content) return std::unexpected(content.error());
     }
+    return std::move(*content);
+}
+
+Result<std::shared_ptr<const Block>> SstReader::load_block(const BlockHandle& handle,
+                                                          Slice prefetched) {
+    if (options_.block_cache != nullptr) {
+        if (auto cached = options_.block_cache->get(options_.file_number, handle.offset)) {
+            return cached;
+        }
+    }
+
+    auto content = fetch_content(handle, prefetched, max_uncompressed());
+    if (!content) return std::unexpected(content.error());
 
     auto block = std::make_shared<const Block>(std::move(*content));
     if (options_.block_cache != nullptr) {
@@ -297,9 +320,14 @@ Status SstReader::ensure_filter() {
     std::lock_guard<std::mutex> lock(lazy_mutex_);
     if (filter_loaded_.load(std::memory_order_relaxed)) return Status::Ok;
 
-    auto filter = store_.get_sync(name_, footer_.filter.offset, footer_.filter.length);
-    if (!filter) return filter.error();
-    auto content = unframe_block(Slice::from(*filter), max_uncompressed());
+    // Through the same path as a data block, for two reasons. The filter is bounded by its own
+    // recorded length rather than by a data block's ceiling: it is always framed uncompressed, so
+    // its content is exactly what the footer says, and a file with enough keys has a filter larger
+    // than any block is allowed to be — bounding it as a block makes every lookup on such a file
+    // report `Corrupt`. And a filter fetched through a cache gets the same invalidate-and-retry a
+    // rotted data block gets, instead of turning one damaged cache chunk into a permanently
+    // unreadable file.
+    auto content = fetch_content(footer_.filter, Slice(), footer_.filter.length);
     if (!content) return content.error();
 
     filter_ = std::move(*content);
