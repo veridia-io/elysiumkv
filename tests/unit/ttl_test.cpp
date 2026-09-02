@@ -118,15 +118,19 @@ TEST_F(Ttl, AFileWithSomethingOlderBeneathItIsNotDropped) {
     put(key_at(0), "second");
     ASSERT_EQ(db_->flush(), Status::Ok);            // the newer version sits above it
 
+    ASSERT_EQ(live_files(), 2);                     // the premise: two files, one above the other
+
     now_ += kLifetime + 1;                          // both are past the limit
     sweep();
 
-    // Whatever survives, the one thing that must never happen is the key reading as "first" again.
+    // The older file has nothing beneath it and goes; the newer one is held back by it, so the
+    // sweep is not a no-op and the key must still answer. Asserting only "never reads as first"
+    // would also pass if both files went, which is the state this test exists to rule out.
+    ASSERT_EQ(live_files(), 1);
     auto found = db_->get_copy(Slice::from(key_at(0)));
-    if (found.has_value()) {
-        EXPECT_EQ(std::string(found->begin(), found->end()), "second")
-            << "dropping the newer file uncovered the older value";
-    }
+    ASSERT_TRUE(found.has_value()) << "the newer file went while an older one sat beneath it";
+    EXPECT_EQ(std::string(found->begin(), found->end()), "second")
+        << "dropping the newer file uncovered the older value";
 }
 
 /// A file carrying range tombstones is left alone: they would go with it, and they shadow files the
@@ -140,12 +144,15 @@ TEST_F(Ttl, AFileCarryingRangeTombstonesIsNotExpired) {
     now_ += kLifetime + 1;
     sweep();
 
+    // Returning early on finding the carrier would skip everything below it, and the carrier is
+    // always there — so the assertions this test is named for would never run.
+    bool carrier_survives = false;
     for (const auto& level : {0, 1, 2}) {
         for (const FileMetadata& file : engine().current_version()->files_at(level)) {
-            if (file.num_range_tombstones != 0) return;   // still here, which is the point
+            if (file.num_range_tombstones != 0) carrier_survives = true;
         }
     }
-    // Reaching here means it went; the keys it covered must not have come back.
+    EXPECT_TRUE(carrier_survives) << "the file carrying the range tombstones was expired";
     for (int i = 2; i < 5; ++i) {
         EXPECT_EQ(db_->get(Slice::from(key_at(i))).error(), Status::NotFound) << i;
     }

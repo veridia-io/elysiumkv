@@ -5,6 +5,8 @@
  * buffer the input sized is the shape worth exploring here. */
 #include "sst/footer.hpp"
 
+#include "repair.hpp"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -12,5 +14,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     const elysiumkv::Slice bytes(data, size);
     (void)elysiumkv::Footer::footer_length_from_trailer(bytes);
     (void)elysiumkv::Footer::decode(bytes);
+    const auto repaired = elysiumkv::fuzz::repair_footer_crc(data, size);
+    (void)elysiumkv::Footer::decode(elysiumkv::Slice(repaired.data(), repaired.size()));
     return 0;
 }

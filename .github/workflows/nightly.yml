@@ -63,8 +63,10 @@ jobs:
           status=0
           for target in edit snapshot block footer; do
             mkdir -p "/tmp/found/$target"
+            # The generated seeds, not just the regression corpus. Without them the run starts from
+            # nothing and spends its budget rediscovering the frame — see seed_corpus.cpp.
             ./build/fuzz/fuzz/elysiumkv_fuzz_$target \
-              "/tmp/found/$target" "fuzz/corpus/$target" \
+              "/tmp/found/$target" "build/fuzz/fuzz/seeds/$target" "fuzz/corpus/$target" \
               -max_total_time=600 -print_final_stats=1 || status=1
           done
           exit $status
@@ -172,7 +174,7 @@ jobs:
       # into this file, where it would drift from the C++ one. `--output-on-failure` is what
       # names the failing config.
       - run: |
-          ctest --preset release -R 'Diff|Fault|KillPoint|Soak|Migration' \
+          ctest --preset release -R 'Diff|Fault|KillPoint|Soak|Migration|Tombstone' \
             --parallel "$(getconf _NPROCESSORS_ONLN)" --output-on-failure
         env:
           ELYSIUMKV_DIFF_FULL: '1'
