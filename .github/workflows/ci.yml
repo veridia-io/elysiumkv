@@ -392,7 +392,7 @@ jobs:
   # ARCHITECTURE.md "Dependencies and artifacts" step 10 — the Java binding. Its native half is built by CMake, so this
   # needs the same toolchain as the engine legs; only the test runner differs.
   java:
-    name: java ${{ matrix.jdk }} / ${{ matrix.os }}
+    name: java ${{ matrix.jdk }} / ${{ matrix.os }}${{ matrix.check_jni && ' / checked JNI' || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -403,10 +403,11 @@ jobs:
         # --enable-native-access warns on every startup, and older JVMs refuse
         # the flag outright, so both ends of that range need exercising.
         include:
-          - {os: ubuntu-latest,    jdk: '11'}
-          - {os: ubuntu-24.04-arm, jdk: '11'}
-          - {os: macos-latest,     jdk: '11'}
-          - {os: ubuntu-latest,    jdk: '25'}
+          - {os: ubuntu-latest,    jdk: '11', check_jni: false}
+          - {os: ubuntu-24.04-arm, jdk: '11', check_jni: false}
+          - {os: macos-latest,     jdk: '11', check_jni: false}
+          - {os: ubuntu-latest,    jdk: '25', check_jni: false}
+          - {os: ubuntu-latest,    jdk: '25', check_jni: true}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -476,7 +477,15 @@ jobs:
           cmake --build --preset release --target elysiumkv_jni
 
       - name: Test the binding
-        run: mvn -B -f bindings/java verify -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/release
+        run: |
+          set -o pipefail
+          CHECK_JNI=${{ matrix.check_jni && '-Xcheck:jni' || '' }}
+          mvn -B -f bindings/java verify \
+            -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/release \
+            -Delysiumkv.check.jni="$CHECK_JNI" 2>&1 | tee checked-jni.log
+          if grep -E 'JNI local refs|FATAL ERROR in native method' checked-jni.log; then
+            exit 1
+          fi
 
       # **The Kafka Streams adapter runs here, on every push and every pull request**, rather than
       # only where it is published. An engine change that breaks the adapter is the case worth
@@ -488,6 +497,7 @@ jobs:
       # be the one just built from this checkout, not whatever a repository happens to hold. Tests
       # are skipped on that install only because the step above just ran them.
       - name: Test the Kafka Streams adapter
+        if: ${{ !matrix.check_jni }}
         run: |
           mvn -B -f bindings/java install -DskipTests \
             -Delysiumkv.native.dir=$GITHUB_WORKSPACE/build/release
@@ -499,6 +509,7 @@ jobs:
       # that the artifact was *packaged*: a resources misconfiguration would
       # leave a jar that works on the build machine and nowhere else.
       - name: Check the jar carries a native library for this platform
+        if: ${{ !matrix.check_jni }}
         run: |
           # Select the main jar explicitly. `elysiumkv-*.jar` used to match one file; since the pom
           # attaches sources and javadoc jars for Maven Central it matches three, and `jar t` treats

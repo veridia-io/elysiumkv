@@ -325,6 +325,60 @@ TEST_F(CApiTest, StatusCodesAreDistinctAndCarryDetail) {
     elysiumkv_options_destroy(options);
 }
 
+TEST_F(CApiTest, IteratorStatusReplacesAnUnrelatedErrorMessage) {
+    ASSERT_EQ(elysiumkv_options_configure(nullptr, nullptr, nullptr, 0, 0, 0, 0, 0, 0, 0, 0,
+                                         -1, -1, -1, 0, 0, 0, 0, 0),
+              ELYSIUMKV_CONFIG);
+    const std::string stale = elysiumkv_last_error();
+
+    EXPECT_EQ(elysiumkv_iter_status(nullptr), ELYSIUMKV_CONFIG);
+    const std::string current = elysiumkv_last_error();
+    EXPECT_NE(current, stale);
+    EXPECT_NE(current.find("iter_status"), std::string::npos) << current;
+}
+
+TEST_F(CApiTest, LoggerContextIsReleasedWithTheOptions) {
+    int destroys = 0;
+    elysiumkv_logger_vtable logger{};
+    logger.context = &destroys;
+    logger.write = [](void*, int, int, const char*, size_t) {};
+    logger.destroy = [](void* context) { ++*static_cast<int*>(context); };
+
+    elysiumkv_options* options = elysiumkv_options_create();
+    ASSERT_EQ(elysiumkv_options_set_logger(options, &logger, ELYSIUMKV_LOG_INFO), ELYSIUMKV_OK);
+    EXPECT_EQ(destroys, 0);
+    elysiumkv_options_destroy(options);
+    EXPECT_EQ(destroys, 1);
+}
+
+TEST_F(CApiTest, KeyManagerContextIsReleasedWhenRegistrationFails) {
+    int destroys = 0;
+    elysiumkv_encryption_key_manager keys{};
+    keys.context = &destroys;
+    keys.new_data_key = [](void*, uint8_t*, size_t, uint8_t*, size_t, size_t*) {
+        return ELYSIUMKV_OK;
+    };
+    keys.open_data_key = [](void*, const uint8_t*, size_t, uint8_t*, size_t) {
+        return ELYSIUMKV_OK;
+    };
+    keys.destroy = [](void* context) { ++*static_cast<int*>(context); };
+
+    EXPECT_EQ(elysiumkv_options_add_aes256_gcm_encryption(nullptr, "keys", &keys, 0),
+              ELYSIUMKV_CONFIG);
+    EXPECT_EQ(destroys, 1);
+}
+
+TEST_F(CApiTest, ReadOnlyOpenReportsWhyTheManifestIsMissing) {
+    elysiumkv_options* options = make_options();
+    elysiumkv_db* reader = nullptr;
+
+    EXPECT_EQ(elysiumkv_open_read_only(options, &reader), ELYSIUMKV_NOT_FOUND);
+    EXPECT_EQ(reader, nullptr);
+    const std::string message = elysiumkv_last_error();
+    EXPECT_NE(message.find("read-only open found no manifest"), std::string::npos) << message;
+    elysiumkv_options_destroy(options);
+}
+
 // ARCHITECTURE.md "A tier is not a level" — the guarded open refuses a transient configuration outright, and the
 // reporting form accepts it.
 TEST_F(CApiTest, GuardedOpenRefusesATransientTier) {

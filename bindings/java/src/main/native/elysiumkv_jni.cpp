@@ -856,6 +856,18 @@ private:
     bool attached_ = false;
 };
 
+void release_global_ref(void* context) {
+    if (context == nullptr || g_vm == nullptr) return;
+    void* raw = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv(&raw, JNI_VERSION_1_8) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&raw, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+    static_cast<JNIEnv*>(raw)->DeleteGlobalRef(static_cast<jobject>(context));
+    if (attached) g_vm->DetachCurrentThread();
+}
+
 void logger_write(void* context, int level, int event, const char* message, size_t len) {
     static thread_local AttachedThread attached;
     JNIEnv* env = attached.env();
@@ -905,19 +917,27 @@ elysiumkv_status keys_new_data_key(void* context, uint8_t* key_out, size_t key_c
     static thread_local AttachedThread attached;
     JNIEnv* env = attached.env();
     if (env == nullptr || g_keys_new_data_key == nullptr) return ELYSIUMKV_IO;
-
+    if (env->PushLocalFrame(3) != JNI_OK) {
+        env->ExceptionClear();
+        return ELYSIUMKV_IO;
+    }
     jobjectArray pair = static_cast<jobjectArray>(
         env->CallObjectMethod(static_cast<jobject>(context), g_keys_new_data_key));
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
         return ELYSIUMKV_IO;
     }
-    if (pair == nullptr || env->GetArrayLength(pair) != 2) return ELYSIUMKV_CONFIG;
+    if (pair == nullptr || env->GetArrayLength(pair) != 2) {
+        env->PopLocalFrame(nullptr);
+        return ELYSIUMKV_CONFIG;
+    }
 
     auto key = static_cast<jbyteArray>(env->GetObjectArrayElement(pair, 0));
     auto envelope = static_cast<jbyteArray>(env->GetObjectArrayElement(pair, 1));
     const bool ok = copy_bytes(env, key, key_out, key_cap, nullptr) &&
                     copy_bytes(env, envelope, envelope_out, envelope_cap, envelope_len);
+    env->PopLocalFrame(nullptr);
     return ok ? ELYSIUMKV_OK : ELYSIUMKV_CONFIG;
 }
 
@@ -926,22 +946,31 @@ elysiumkv_status keys_open_data_key(void* context, const uint8_t* envelope, size
     static thread_local AttachedThread attached;
     JNIEnv* env = attached.env();
     if (env == nullptr || g_keys_open_data_key == nullptr) return ELYSIUMKV_IO;
-
+    if (env->PushLocalFrame(2) != JNI_OK) {
+        env->ExceptionClear();
+        return ELYSIUMKV_IO;
+    }
     jbyteArray wrapped = env->NewByteArray(static_cast<jsize>(envelope_len));
-    if (wrapped == nullptr) return ELYSIUMKV_IO;
+    if (wrapped == nullptr) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return ELYSIUMKV_IO;
+    }
     env->SetByteArrayRegion(wrapped, 0, static_cast<jsize>(envelope_len),
                             reinterpret_cast<const jbyte*>(envelope));
 
     auto key = static_cast<jbyteArray>(
         env->CallObjectMethod(static_cast<jobject>(context), g_keys_open_data_key, wrapped));
-    env->DeleteLocalRef(wrapped);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         // The manager refusing is a configuration answer, not damage: the remedy is a key it can
         // unwrap, which is not something a restore provides.
+        env->PopLocalFrame(nullptr);
         return ELYSIUMKV_CONFIG;
     }
-    return copy_bytes(env, key, key_out, key_cap, nullptr) ? ELYSIUMKV_OK : ELYSIUMKV_CORRUPT;
+    const bool ok = copy_bytes(env, key, key_out, key_cap, nullptr);
+    env->PopLocalFrame(nullptr);
+    return ok ? ELYSIUMKV_OK : ELYSIUMKV_CORRUPT;
 }
 
 void JNICALL options_add_aes256_gcm_encryption(JNIEnv* env, jclass, jlong options, jstring id,
@@ -967,6 +996,7 @@ void JNICALL options_add_aes256_gcm_encryption(JNIEnv* env, jclass, jlong option
         vtable.context = global;
         vtable.new_data_key = keys_new_data_key;
         vtable.open_data_key = keys_open_data_key;
+        vtable.destroy = release_global_ref;
         check(env, elysiumkv_options_add_aes256_gcm_encryption(as_options(options), id_chars, &vtable,
                                                          static_cast<size_t>(chunk_bytes)));
         env->ReleaseStringUTFChars(id, id_chars);
@@ -1100,17 +1130,15 @@ void JNICALL options_set_logger(JNIEnv* env, jclass, jlong options, jobject sink
             check(env, elysiumkv_options_set_logger(as_options(options), nullptr, min_level));
             return;
         }
-        // A global ref: the sink outlives this call by the lifetime of the store. Deliberately
-        // never released — options are configured once per store and the alternative is a
-        // registry keyed on a handle the C ABI does not hand back.
         jobject global = env->NewGlobalRef(sink);
         if (global == nullptr) {
             throw_glue(env, "elysiumkv JNI: could not retain the logger");
             return;
         }
-        elysiumkv_logger_vtable vtable;
+        elysiumkv_logger_vtable vtable{};
         vtable.context = global;
         vtable.write = logger_write;
+        vtable.destroy = release_global_ref;
         check(env, elysiumkv_options_set_logger(as_options(options), &vtable, min_level));
     });
 }

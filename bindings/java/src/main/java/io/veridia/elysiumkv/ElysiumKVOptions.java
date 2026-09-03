@@ -407,6 +407,7 @@ public final class ElysiumKVOptions implements AutoCloseable {
     public ElysiumKVOptions logger(ElysiumKVLogger sink, ElysiumKVLogger.Level minLevel) {
         loggerBridge = sink == null ? null : new LoggerBridge(sink);
         minLogLevel = minLevel == null ? ElysiumKVLogger.Level.INFO.ordinal() : minLevel.ordinal();
+        Native.optionsSetLogger(handle(), loggerBridge, minLogLevel);
         return this;
     }
 
@@ -488,7 +489,6 @@ public final class ElysiumKVOptions implements AutoCloseable {
         Native.optionsConfigureJitter(handle(), ageJitter, flushIntervalJitter);
         Native.optionsConfigureCompaction(handle(), tombstoneDensityTrigger,
                                           tombstoneDensityMinEntries);
-        Native.optionsSetLogger(handle(), loggerBridge, minLogLevel);
         return handle();
     }
 
