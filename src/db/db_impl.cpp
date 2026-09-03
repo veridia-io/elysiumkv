@@ -882,26 +882,9 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
     // an engine mutex held, and every exit below is inside the critical section.
     struct Deferred {
         const DbImpl* self;
-        Status retried_from = Status::Ok;
-        Status gave_up_with = Status::Ok;
-        uint64_t stalled_ms = 0;
-        bool rejected = false;
+        StallLog log;
         ~Deferred() try {
-            if (retried_from != Status::Ok) {
-                self->log_event(LogLevel::Warn, LogEvent::BackgroundRetry,
-                                "retrying a flush that failed with ", status_name(retried_from));
-            }
-            if (gave_up_with != Status::Ok) {
-                self->log_event(LogLevel::Error, LogEvent::BackgroundFailure,
-                                "a write is failing on ", status_name(gave_up_with));
-            }
-            if (rejected) {
-                self->log_event(LogLevel::Warn, LogEvent::StallEntered,
-                                "write rejected: a flush is still in flight");
-            } else if (stalled_ms != 0) {
-                self->log_event(LogLevel::Warn, LogEvent::StallLeft, "writer blocked ", stalled_ms,
-                                " ms waiting for a flush");
-            }
+            self->report_stall(log);
         } catch (...) {
         }
     } deferred{this};
@@ -911,36 +894,17 @@ Status DbImpl::maybe_freeze_memtable(bool force) {
     if (!memtable_flush_due(force)) return Status::Ok;
     if (mem_->empty() && imm_ == nullptr) return Status::Ok;
 
+    // A non-forced freeze is opportunistic: the write it follows has already landed, so there is
+    // nothing left to refuse and nothing a wait here would protect. `await_rotation_slot` is the
+    // valve, and it runs before the insert; this rotation falls to the next writer or, on an idle
+    // store, to the coordinator.
+    if (!force && imm_ != nullptr) return Status::Ok;
+
     // Backpressure: one memtable may be in flight. Without a WAL there is
     // nowhere else to put writes, so the writer waits.
-    bool retried = false;
-    while (imm_ != nullptr && !shutting_down_) {
-        if (bg_error_ != Status::Ok) {
-            // Io means "ask again later" (ARCHITECTURE.md "Immutable named objects"), so a failed flush must not
-            // leave the instance permanently unable to flush. One retry per
-            // call; if it fails again the caller hears about it.
-            if (!is_retryable(bg_error_) || retried) {
-                deferred.gave_up_with = bg_error_;
-                return bg_error_;
-            }
-            deferred.retried_from = bg_error_;
-            bg_error_ = Status::Ok;
-            retried = true;
-            flush_scheduled_.notify_one();
-        }
-        if (!options_.block_on_stall) {
-            stalls_.fetch_add(1, std::memory_order_relaxed);
-            deferred.rejected = true;
-            return Status::Stalled;
-        }
-        stalls_.fetch_add(1, std::memory_order_relaxed);
-        const uint64_t stall_began = options_.clock();
-        flush_finished_.wait(lock);
-        const uint64_t stall_ended = options_.clock();
-        if (stall_ended > stall_began) {
-            stalled_total_ms_.fetch_add(stall_ended - stall_began, std::memory_order_relaxed);
-            deferred.stalled_ms += stall_ended - stall_began;
-        }
+    if (Status status = await_flush_slot(lock, /*force=*/true, deferred.log);
+        status != Status::Ok) {
+        return status;
     }
     if (mem_->empty()) return Status::Ok;
 
@@ -1191,6 +1155,7 @@ void DbImpl::reconcile(bool force_full) {
 
 void DbImpl::maintenance_loop() {
     while (true) {
+        bool timed_wake = false;
         {
             std::unique_lock<std::mutex> lock(maintenance_mutex_);
             ELYSIUMKV_LOCK_AUDIT();
@@ -1200,8 +1165,23 @@ void DbImpl::maintenance_loop() {
             // level's score passing 1, a version becoming collectible — none of those has an
             // age bound, so an indefinite wait plus a missed notification is a task that never
             // runs. A periodic wake with the gate closed costs two comparisons.
-            maintenance_tick_.wait_for(lock, options_.maintenance_interval);
+            timed_wake = maintenance_tick_.wait_for(lock, options_.maintenance_interval) ==
+                         std::cv_status::timeout;
             if (shutting_down_maintenance_) return;
+        }
+        Status retried_from = Status::Ok;
+        if (timed_wake) {
+            std::lock_guard<std::mutex> lock(mem_mutex_);
+            ELYSIUMKV_LOCK_AUDIT();
+            if (imm_ != nullptr && is_retryable(bg_error_)) {
+                retried_from = bg_error_;
+                bg_error_ = Status::Ok;
+            }
+        }
+        if (retried_from != Status::Ok) {
+            log_event(LogLevel::Warn, LogEvent::BackgroundRetry,
+                      "retrying a flush that failed with ", status_name(retried_from));
+            flush_scheduled_.notify_one();
         }
         ++reconcile_ticks_;
         reconcile(/*force_full=*/reconcile_ticks_ % kGateBypassEveryTicks == 0);
@@ -1558,15 +1538,6 @@ bool DbImpl::reads_are_blocked() const {
 Result<Pinned> DbImpl::get(Slice key) {
     if (reads_are_blocked()) return std::unexpected(Status::RecoveryRequired);
 
-    // Taken once, and used for both the clamp and the level walk. Two takes cost two locked
-    // refcounts on every lookup, and they can disagree: a truncation landing between them would
-    // let a key pass a clamp the version it is then read against says hides it.
-    auto version = versions_->current();
-
-    // Below the truncation point is absence, and absence is not an error — the same answer a
-    // deleted key gives, reached without touching a single file.
-    if (version->truncated(key)) return std::unexpected(Status::NotFound);
-
     std::shared_ptr<SkiplistMemtable> mem;
     std::shared_ptr<SkiplistMemtable> imm;
     {
@@ -1575,6 +1546,15 @@ Result<Pinned> DbImpl::get(Slice key) {
         mem = mem_;
         imm = imm_;
     }
+
+    // The memtables must be captured before the Version. A flush publishes its file and only then
+    // clears the immutable memtable, so this order sees the record on at least one side of that
+    // handoff. Reversing the takes can pair the old Version with the cleared immutable memtable.
+    auto version = versions_->current();
+
+    // Below the truncation point is absence, and absence is not an error — the same answer a
+    // deleted key gives, reached without touching a single file.
+    if (version->truncated(key)) return std::unexpected(Status::NotFound);
 
     // Newest source first, and at each one the point entry is asked about before the range: a range
     // tombstone shadows everything strictly older and nothing beside it, so a point entry here
@@ -2129,8 +2109,78 @@ bool DbImpl::shed_if_over_budget() {
     return budget->overage() > 0;
 }
 
+void DbImpl::report_stall(const StallLog& log) const {
+    if (log.retried_from != Status::Ok) {
+        log_event(LogLevel::Warn, LogEvent::BackgroundRetry, "retrying a flush that failed with ",
+                  status_name(log.retried_from));
+    }
+    if (log.gave_up_with != Status::Ok) {
+        log_event(LogLevel::Error, LogEvent::BackgroundFailure, "a write is failing on ",
+                  status_name(log.gave_up_with));
+    }
+    if (log.rejected) {
+        log_event(LogLevel::Warn, LogEvent::StallEntered,
+                  "write rejected: a flush is still in flight");
+    } else if (log.stalled_ms != 0) {
+        log_event(LogLevel::Warn, LogEvent::StallLeft, "writer blocked ", log.stalled_ms,
+                  " ms waiting for a flush");
+    }
+}
+
+Status DbImpl::await_flush_slot(std::unique_lock<std::mutex>& lock, bool force, StallLog& log) {
+    bool retried = false;
+    while (imm_ != nullptr && !shutting_down_ && (force || memtable_flush_due(/*force=*/false))) {
+        if (bg_error_ != Status::Ok) {
+            // Io means "ask again later" (ARCHITECTURE.md "Immutable named objects"), so a failed flush must not
+            // leave the instance permanently unable to flush. One retry per
+            // call; if it fails again the caller hears about it.
+            if (!is_retryable(bg_error_) || retried) {
+                log.gave_up_with = bg_error_;
+                return bg_error_;
+            }
+            log.retried_from = bg_error_;
+            bg_error_ = Status::Ok;
+            retried = true;
+            flush_scheduled_.notify_one();
+        }
+        stalls_.fetch_add(1, std::memory_order_relaxed);
+        if (!options_.block_on_stall) {
+            log.rejected = true;
+            return Status::Stalled;
+        }
+        const uint64_t stall_began = options_.clock();
+        flush_finished_.wait(lock);
+        const uint64_t stall_ended = options_.clock();
+        if (stall_ended > stall_began) {
+            stalled_total_ms_.fetch_add(stall_ended - stall_began, std::memory_order_relaxed);
+            log.stalled_ms += stall_ended - stall_began;
+        }
+    }
+    return Status::Ok;
+}
+
+Status DbImpl::await_rotation_slot() {
+    // Inline mode has no executor to be busy: the writer performs its own rotation in
+    // `freeze_and_flush_inline`, so there is no slot to wait for.
+    if (inline_mode()) return Status::Ok;
+
+    StallLog log;
+    Status result = Status::Ok;
+    {
+        std::unique_lock<std::mutex> lock(mem_mutex_);
+        ELYSIUMKV_LOCK_AUDIT();
+        // A write arriving at a fresh memtable is admitted even with a flush in flight: nothing is
+        // owed yet. It may end the call over `memtable_bytes`, and the next write is the one that
+        // waits, which bounds the overshoot at one write per writer.
+        result = await_flush_slot(lock, /*force=*/false, log);
+    }
+    report_stall(log);
+    return result;
+}
+
 Status DbImpl::throttle_writes() {
     if (unusable_.load()) return Status::Unusable;
+    if (Status status = await_rotation_slot(); status != Status::Ok) return status;
 
     // Reported once per stalled call rather than per wait iteration, and after the loop so no lock
     // is held. The reason is what an operator needs: which valve closed, not that one did.
