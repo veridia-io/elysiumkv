@@ -164,6 +164,13 @@ WatermarkInterval Compaction::watermark() const {
     return merged;
 }
 
+std::pair<std::string, std::string> Compaction::effective_hull() const {
+    std::string lower;
+    std::string upper;
+    widen(all_inputs(), lower, upper);
+    return {std::move(lower), std::move(upper)};
+}
+
 uint64_t Compaction::input_bytes() const { return total_bytes(all_inputs()); }
 
 std::string Compaction::largest_key() const {
@@ -258,7 +265,12 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
 
     // Optionally expand back into the source level with files falling inside the
     // resulting output range, while total input bytes stay under the budget.
-    if (!compaction.overlaps.empty()) {
+    //
+    // Never at an overlapping level. The transitive closure and the budget trim leave the input set
+    // downward-closed in age, which is what makes it sound for the files staying behind to shadow
+    // the output. The expanded set is selected by key range alone, so it can carry one file down
+    // past an older one that overlaps it, and the older file then wins every key they share.
+    if (!compaction.overlaps.empty() && !is_overlapping_level(chosen, source)) {
         std::string expanded_lower = lower;
         std::string expanded_upper = upper;
         widen(compaction.overlaps, expanded_lower, expanded_upper);
@@ -279,6 +291,9 @@ std::optional<Compaction> pick_compaction(const Version& version, const Resolved
             }
         }
     }
+
+    // Both questions below are about what the compaction *writes*, which reaches past the inputs.
+    std::tie(lower, upper) = compaction.effective_hull();
 
     compaction.grandparents = compaction.output_level + 1 <= last
                                   ? version.overlapping_inclusive(compaction.output_level + 1,

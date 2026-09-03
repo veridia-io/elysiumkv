@@ -4,6 +4,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -294,6 +295,58 @@ TEST(PickerTest, BottommostIsAboutTheKeyRangeNotTheLastLevel) {
     auto unaffected = pick_compaction(*version_of(disjoint), config(4, 4096, 4), 1u << 30);
     ASSERT_TRUE(unaffected.has_value());
     EXPECT_TRUE(unaffected->output_is_bottommost);
+}
+
+/// The bottommost decision must cover what the compaction *writes*, not only what it reads from the
+/// source level. An output-level file is rewritten whole, so the part of its span the inputs do not
+/// reach is still in the output — and a deeper file beneath that part is exactly what makes dropping
+/// a tombstone a resurrection rather than a reclamation.
+TEST(PickerTest, BottommostCoversTheWholeSpanOfTheFilesItRewrites) {
+    std::vector<FileMetadata> files;
+    for (uint64_t n = 1; n <= 5; ++n) files.push_back(file(0, n, "a", "c"));
+    // Reaches past the inputs, carries tombstones, and is rewritten in full.
+    files.push_back(file(1, 9, "b", "e", 1000, /*tombstones=*/1));
+    // Sits under the part of that file the inputs do not cover.
+    files.push_back(file(2, 20, "d", "d"));
+
+    auto compaction =
+        pick_compaction(*version_of(std::move(files)), config(4, 1u << 30, 4), 1u << 30);
+    ASSERT_TRUE(compaction.has_value());
+    ASSERT_EQ(compaction->output_level, 1);
+    ASSERT_EQ(compaction->overlaps.size(), 1u) << "the L1 file must be an input for this to matter";
+
+    EXPECT_FALSE(compaction->output_is_bottommost)
+        << "L2 holds `d`, which the rewritten L1 file covers: dropping tombstones there uncovers it";
+}
+
+/// Recency is positional, so a file left at an overlapping level shadows the output. That is only
+/// sound when everything left behind is *newer* than everything moved down. The transitive closure
+/// and the budget trim both maintain that; expanding back into the source level afterwards can
+/// break it, because the expanded set is chosen by key range alone.
+TEST(PickerTest, ExpandingAtAnOverlappingLevelLeavesOnlyNewerFilesBehind) {
+    // File numbers ascend with age. 3 overlaps 2 on [f,g], and only 3 falls inside the range the
+    // output-level file widens the compaction to.
+    std::vector<FileMetadata> files = {file(0, 1, "a", "b"), file(0, 2, "f", "h"),
+                                       file(0, 3, "e", "g"), file(1, 9, "a", "e")};
+    auto version = version_of(std::move(files));
+
+    auto compaction = pick_compaction(*version, config(/*max_files=*/2, 1u << 30, 3), 1u << 30);
+    ASSERT_TRUE(compaction.has_value());
+    ASSERT_EQ(compaction->level, 0);
+
+    std::set<uint64_t> moved;
+    for (const FileMetadata& input : compaction->inputs) moved.insert(input.file_number);
+    for (const FileMetadata& kept : version->files_at(0)) {
+        if (moved.count(kept.file_number) != 0) continue;
+        for (const FileMetadata& input : compaction->inputs) {
+            const bool overlaps = kept.effective_smallest() <= input.effective_largest() &&
+                                  input.effective_smallest() <= kept.effective_largest();
+            if (!overlaps) continue;
+            EXPECT_GT(kept.file_number, input.file_number)
+                << "file " << kept.file_number << " stayed at L0 overlapping file "
+                << input.file_number << ", which moved to L1: the older file now wins the key";
+        }
+    }
 }
 
 TEST(PickerTest, IsBottommostForRangeIsARangeQuestion) {

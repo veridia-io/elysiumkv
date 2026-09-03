@@ -315,16 +315,17 @@ Status DbImpl::compact_level(int level) {
 
             // The *effective* span, so a file carrying range tombstones is merged against what it
             // shadows rather than moved past it. See `FileMetadata::effective_smallest`.
-            const std::string span_low = file.effective_smallest();
-            const std::string span_high = file.effective_largest();
             if (!bottom) {
-                compaction.overlaps =
-                    version->overlapping_inclusive(output_level, Slice::from(span_low),
-                                                   Slice::from(span_high));
-                if (output_level + 1 <= config_.last()) {
-                    compaction.grandparents = version->overlapping_inclusive(
-                        output_level + 1, Slice::from(span_low), Slice::from(span_high));
-                }
+                compaction.overlaps = version->overlapping_inclusive(
+                    output_level, Slice::from(file.effective_smallest()),
+                    Slice::from(file.effective_largest()));
+            }
+            // Overlaps are selected by the input's span and then rewritten whole, so everything
+            // below is asked about the wider span the compaction actually writes.
+            const auto [span_low, span_high] = compaction.effective_hull();
+            if (!bottom && output_level + 1 <= config_.last()) {
+                compaction.grandparents = version->overlapping_inclusive(
+                    output_level + 1, Slice::from(span_low), Slice::from(span_high));
             }
             compaction.output_is_bottommost =
                 is_bottommost_for_range(*version, output_level, config_.last(),
@@ -387,15 +388,14 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         compaction.trivial_move = false;  // a move would leave it on the same tier
         compaction.overlaps = version->overlapping_inclusive(
             1, Slice::from(seed->effective_smallest()), Slice::from(seed->effective_largest()));
+        // The span the compaction writes, not the seed's: see `Compaction::effective_hull`.
+        const auto [span_low, span_high] = compaction.effective_hull();
         if (config_.last() >= 2) {
             compaction.grandparents = version->overlapping_inclusive(
-                2, Slice::from(seed->effective_smallest()),
-                                                           Slice::from(seed->effective_largest()));
+                2, Slice::from(span_low), Slice::from(span_high));
         }
-        compaction.output_is_bottommost =
-            is_bottommost_for_range(*version, 1, config_.last(),
-                                    Slice::from(seed->effective_smallest()),
-                                    Slice::from(seed->effective_largest()));
+        compaction.output_is_bottommost = is_bottommost_for_range(
+            *version, 1, config_.last(), Slice::from(span_low), Slice::from(span_high));
     }
 
     status = run_compaction(compaction, deferred);
