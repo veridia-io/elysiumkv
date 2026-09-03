@@ -1,4 +1,5 @@
 #include "elysiumkv/disk_manifest_catalog.hpp"
+#include "manifest/disk_manifest_file_system.hpp"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -87,17 +88,49 @@ private:
     int fd_ = -1;
 };
 
-bool sync_directory(const fs::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return false;
-    const bool synced = ::fsync(fd) == 0;
-    const bool closed = ::close(fd) == 0;
-    return synced && closed;
-}
+class PosixDiskManifestFileSystem final : public detail::DiskManifestFileSystem {
+public:
+    int open(const fs::path& path, int flags, mode_t mode) override {
+        return ::open(path.c_str(), flags, mode);
+    }
+    ssize_t write(int fd, const void* bytes, size_t size) override {
+        return ::write(fd, bytes, size);
+    }
+    ssize_t read(int fd, void* bytes, size_t size) override { return ::read(fd, bytes, size); }
+    int fsync(int fd) override { return ::fsync(fd); }
+    int close(int fd) override { return ::close(fd); }
+    int unlink(const fs::path& path) override { return ::unlink(path.c_str()); }
+    bool create_directories(const fs::path& path, std::error_code& error) override {
+        return fs::create_directories(path, error);
+    }
+    bool remove(const fs::path& path, std::error_code& error) override {
+        return fs::remove(path, error);
+    }
+    void rename(const fs::path& from, const fs::path& to, std::error_code& error) override {
+        fs::rename(from, to, error);
+    }
+    uintmax_t remove_all(const fs::path& path, std::error_code& error) override {
+        return fs::remove_all(path, error);
+    }
+    bool sync_directory(const fs::path& path) override {
+        const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
+        if (fd < 0) return false;
+        const bool synced = ::fsync(fd) == 0;
+        const bool closed = ::close(fd) == 0;
+        return synced && closed;
+    }
+};
 
 }  // namespace
 
-DiskManifestCatalog::DiskManifestCatalog(fs::path directory) : directory_(std::move(directory)) {}
+DiskManifestCatalog::DiskManifestCatalog(fs::path directory)
+    : DiskManifestCatalog(std::move(directory), std::make_shared<PosixDiskManifestFileSystem>()) {}
+
+DiskManifestCatalog::DiskManifestCatalog(
+    fs::path directory, std::shared_ptr<detail::DiskManifestFileSystem> file_system)
+    : directory_(std::move(directory)), file_system_(std::move(file_system)) {}
+
+DiskManifestCatalog::~DiskManifestCatalog() = default;
 
 fs::path DiskManifestCatalog::generation_dir(uint64_t generation) const {
     return directory_ / "manifest" / generation_name(generation);
@@ -105,10 +138,20 @@ fs::path DiskManifestCatalog::generation_dir(uint64_t generation) const {
 
 fs::path DiskManifestCatalog::current_path() const { return directory_ / "manifest" / "CURRENT"; }
 
-Status DiskManifestCatalog::write_object(const fs::path& path, Slice bytes) {
+Status DiskManifestCatalog::ensure_directory(const fs::path& path) {
     std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
+    const bool created = file_system_->create_directories(path, ec);
     if (ec) return Status::Io;
+    if (created &&
+        (!file_system_->sync_directory(path) ||
+         (!path.parent_path().empty() && !file_system_->sync_directory(path.parent_path())))) {
+        return Status::Io;
+    }
+    return Status::Ok;
+}
+
+Status DiskManifestCatalog::write_object(const fs::path& path, Slice bytes) {
+    if (Status status = ensure_directory(path.parent_path()); status != Status::Ok) return status;
 
     // Write-once: O_EXCL, because a put at an existing address is a programming
     // error rather than an overwrite (ARCHITECTURE.md "Ownership is one compare-and-set").
@@ -119,44 +162,45 @@ Status DiskManifestCatalog::write_object(const fs::path& path, Slice bytes) {
     //
     // The compare_and_set path shares this helper but removes its temp file first, so it does not
     // normally reach here.
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    const int fd = file_system_->open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) return errno == EEXIST ? Status::Config : Status::Io;
 
     size_t written = 0;
     while (written < bytes.size()) {
-        const ssize_t n = ::write(fd, bytes.data() + written, bytes.size() - written);
+        const ssize_t n = file_system_->write(fd, bytes.data() + written, bytes.size() - written);
         if (n < 0) {
             if (errno == EINTR) continue;
-            ::close(fd);
-            ::unlink(path.c_str());
+            file_system_->close(fd);
+            file_system_->unlink(path);
             return Status::Io;
         }
         written += static_cast<size_t>(n);
     }
     // An edit must be durable before the objects it releases may be deleted
     // (ARCHITECTURE.md "Open and recovery"), so this fsync is load-bearing rather than defensive.
-    const bool synced = ::fsync(fd) == 0;
-    ::close(fd);
-    return synced ? Status::Ok : Status::Io;
+    const bool synced = file_system_->fsync(fd) == 0;
+    const bool closed = file_system_->close(fd) == 0;
+    if (!synced || !closed || !file_system_->sync_directory(path.parent_path())) return Status::Io;
+    return Status::Ok;
 }
 
 GetResult DiskManifestCatalog::read_object(const fs::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY);
+    const int fd = file_system_->open(path, O_RDONLY);
     if (fd < 0) return std::unexpected(errno == ENOENT ? Status::NotFound : Status::Io);
 
     Buffer out;
     uint8_t chunk[64 * 1024];
     while (true) {
-        const ssize_t n = ::read(fd, chunk, sizeof(chunk));
+        const ssize_t n = file_system_->read(fd, chunk, sizeof(chunk));
         if (n < 0) {
             if (errno == EINTR) continue;
-            ::close(fd);
+            file_system_->close(fd);
             return std::unexpected(Status::Io);
         }
         if (n == 0) break;
         out.insert(out.end(), chunk, chunk + n);
     }
-    ::close(fd);
+    file_system_->close(fd);
     return out;
 }
 
@@ -176,9 +220,11 @@ Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::read() {
 Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::compare_and_set(
     std::optional<Entry> expected, uint64_t generation) {
     const fs::path manifest_dir = current_path().parent_path();
+    if (Status status = ensure_directory(manifest_dir); status != Status::Ok) {
+        return std::unexpected(status);
+    }
+
     std::error_code ec;
-    fs::create_directories(manifest_dir, ec);
-    if (ec) return std::unexpected(Status::Io);
 
     FileLock lock(manifest_dir / "CURRENT.lock");
     if (!lock.valid()) return std::unexpected(Status::Io);
@@ -207,14 +253,14 @@ Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::compare_and_s
     const std::string text = std::to_string(generation) + " " + format_token(token) + "\n";
     const fs::path temp = current_path().string() + ".tmp";
 
-    fs::remove(temp, ec);
+    file_system_->remove(temp, ec);
     if (ec) return std::unexpected(Status::Io);
     if (Status status = write_object(temp, Slice::from(text)); status != Status::Ok) {
         return std::unexpected(status);
     }
-    fs::rename(temp, current_path(), ec);
+    file_system_->rename(temp, current_path(), ec);
     if (ec) return std::unexpected(Status::Io);
-    if (!sync_directory(manifest_dir)) return std::unexpected(Status::Io);
+    if (!file_system_->sync_directory(manifest_dir)) return std::unexpected(Status::Io);
 
     return std::optional<Entry>(Entry{generation, format_token(token)});
 }
@@ -280,8 +326,11 @@ std::future<Result<std::vector<uint64_t>>> DiskManifestCatalog::list_edits(uint6
 
 std::future<Status> DiskManifestCatalog::delete_generation(uint64_t generation) {
     std::error_code ec;
-    fs::remove_all(generation_dir(generation), ec);
-    return make_ready_future(ec ? Status::Io : Status::Ok);
+    file_system_->remove_all(generation_dir(generation), ec);
+    if (ec || !file_system_->sync_directory(generation_dir(generation).parent_path())) {
+        return make_ready_future(Status::Io);
+    }
+    return make_ready_future(Status::Ok);
 }
 
 }  // namespace elysiumkv

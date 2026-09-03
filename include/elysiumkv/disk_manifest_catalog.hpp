@@ -4,9 +4,13 @@
 #include "elysiumkv/manifest_catalog.hpp"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 
 namespace elysiumkv {
+namespace detail {
+class DiskManifestFileSystem;
+}
 
 /// ARCHITECTURE.md "Ownership is one compare-and-set" — generation objects as files under `manifest/{generation}/`; the
 /// pointer as a temp file atomically renamed over `CURRENT`.
@@ -17,6 +21,9 @@ namespace elysiumkv {
 class DiskManifestCatalog final : public ManifestCatalog {
 public:
     explicit DiskManifestCatalog(std::filesystem::path directory);
+    DiskManifestCatalog(std::filesystem::path directory,
+                        std::shared_ptr<detail::DiskManifestFileSystem> file_system);
+    ~DiskManifestCatalog() override;
 
     Result<std::optional<Entry>> read() override;
     Result<std::optional<Entry>> compare_and_set(std::optional<Entry> expected,
@@ -37,10 +44,12 @@ public:
 private:
     std::filesystem::path generation_dir(uint64_t generation) const;
     std::filesystem::path current_path() const;
+    Status ensure_directory(const std::filesystem::path& path);
     Status write_object(const std::filesystem::path& path, Slice bytes);
     GetResult read_object(const std::filesystem::path& path);
 
     std::filesystem::path directory_;
+    std::shared_ptr<detail::DiskManifestFileSystem> file_system_;
 };
 
 }  // namespace elysiumkv

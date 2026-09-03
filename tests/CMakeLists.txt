@@ -62,6 +62,7 @@ add_executable(elysiumkv_tests
     contract/disk_blob_store_test.cpp
     contract/cache_blob_store_test.cpp
     fault/fault_injecting_blob_store.cpp
+    fault/fault_injecting_manifest_file_system.cpp
     fault/fault_injecting_blob_store_test.cpp
     fault/db_fault_test.cpp
     fault/cache_fault_test.cpp

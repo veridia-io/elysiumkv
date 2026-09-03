@@ -1,4 +1,5 @@
 #include "contract/manifest_catalog_contract.hpp"
+#include "fault/fault_injecting_manifest_file_system.hpp"
 #include "support/temp_dir.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 
@@ -144,6 +145,65 @@ TEST(DiskManifestCatalog, ConcurrentProcessesLeaveExactlyOneCasWinner) {
     EXPECT_EQ(winners, 1);
     EXPECT_EQ(losers, static_cast<int>(kProcesses - 1));
     EXPECT_EQ(errors, 0) << "contention must be reported as a lost CAS, not an I/O failure";
+}
+
+TEST(DiskManifestCatalog, AnAcknowledgedEditSurvivesLossOfUnsyncedDirectoryEntries) {
+    TempDir dir;
+    auto file_system = std::make_shared<FaultInjectingManifestFileSystem>();
+    DiskManifestCatalog catalog(dir.path(), file_system);
+
+    ASSERT_EQ(catalog.put_snapshot(1, Slice::from(std::string("snapshot"))).get(), Status::Ok);
+    auto installed = catalog.compare_and_set(std::nullopt, 1);
+    ASSERT_TRUE(installed.has_value() && installed->has_value());
+    ASSERT_EQ(catalog.put_edit(1, 1, Slice::from(std::string("edit"))).get(), Status::Ok);
+
+    file_system->crash();
+    DiskManifestCatalog reopened(dir.path());
+    auto edit = reopened.get_edit(1, 1).get();
+    ASSERT_TRUE(edit.has_value())
+        << "an acknowledged edit must retain its directory entry across power loss";
+    EXPECT_EQ(std::string(edit->begin(), edit->end()), "edit");
+}
+
+TEST(DiskManifestCatalog, DirectorySyncFailurePreventsAcknowledgement) {
+    TempDir dir;
+    auto file_system = std::make_shared<FaultInjectingManifestFileSystem>();
+    DiskManifestCatalog catalog(dir.path(), file_system);
+
+    file_system->fail_next(FaultInjectingManifestFileSystem::Op::DirectoryFsync);
+    EXPECT_EQ(catalog.put_snapshot(1, Slice::from(std::string("snapshot"))).get(), Status::Io);
+}
+
+TEST(DiskManifestCatalog, FileOperationFailuresPreventAcknowledgement) {
+    for (const auto operation : {FaultInjectingManifestFileSystem::Op::Open,
+                                 FaultInjectingManifestFileSystem::Op::Write,
+                                 FaultInjectingManifestFileSystem::Op::Fsync}) {
+        TempDir dir;
+        auto file_system = std::make_shared<FaultInjectingManifestFileSystem>();
+        DiskManifestCatalog catalog(dir.path(), file_system);
+        file_system->fail_next(operation);
+        EXPECT_EQ(catalog.put_snapshot(1, Slice::from(std::string("snapshot"))).get(), Status::Io);
+    }
+
+    TempDir dir;
+    auto file_system = std::make_shared<FaultInjectingManifestFileSystem>();
+    DiskManifestCatalog catalog(dir.path(), file_system);
+    ASSERT_EQ(catalog.put_snapshot(1, Slice::from(std::string("snapshot"))).get(), Status::Ok);
+    file_system->fail_next(FaultInjectingManifestFileSystem::Op::Rename);
+    auto installed = catalog.compare_and_set(std::nullopt, 1);
+    ASSERT_FALSE(installed.has_value());
+    EXPECT_EQ(installed.error(), Status::Io);
+}
+
+TEST(DiskManifestCatalog, GenerationDeletionIncludesTheManifestDirectorySync) {
+    TempDir dir;
+    auto file_system = std::make_shared<FaultInjectingManifestFileSystem>();
+    DiskManifestCatalog catalog(dir.path(), file_system);
+    ASSERT_EQ(catalog.put_snapshot(1, Slice::from(std::string("snapshot"))).get(), Status::Ok);
+
+    file_system->fail_next(FaultInjectingManifestFileSystem::Op::DirectoryFsync);
+    EXPECT_EQ(catalog.delete_generation(1).get(), Status::Io)
+        << "deletion is not acknowledged until the parent directory is durable";
 }
 
 }  // namespace

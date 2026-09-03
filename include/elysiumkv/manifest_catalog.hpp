@@ -24,7 +24,8 @@ namespace elysiumkv {
 /// storage and CAS wrong and nothing else.
 ///
 /// Objects are immutable and write-once. A put at an existing address is a
-/// programming error, not an overwrite.
+/// programming error, not an overwrite. A successful object write, pointer CAS or deletion is
+/// durable across power loss; the engine may immediately delete data made obsolete by it.
 class ManifestCatalog {
 public:
     struct Entry {
@@ -53,10 +54,8 @@ public:
     /// Every generation this catalog holds, in any order.
     ///
     /// Optional. The default reports `Status::Unsupported`, and the engine falls back to
-    /// probing a bounded window below the live pointer — which finds the generation a crash
-    /// between the pointer install and the delete leaves behind, and cannot find an older one. A
-    /// catalog that can enumerate cheaply should, because that is what makes the reclaim complete
-    /// rather than merely usual.
+    /// probing a bounded window around the live pointer. A catalog that can enumerate cheaply
+    /// should, because that is what makes reclaim complete rather than limited to nearby residue.
     ///
     /// Not a pure virtual, deliberately: an embedder's own catalog compiled against an earlier
     /// header keeps working, and leaks at worst the generations the fallback already covers.
