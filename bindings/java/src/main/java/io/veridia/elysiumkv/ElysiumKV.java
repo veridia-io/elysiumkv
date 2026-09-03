@@ -5,9 +5,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.OptionalLong;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.LongConsumer;
+import java.util.function.LongFunction;
 
 /**
  * An embedded LSM key-value store, over a native core.
@@ -45,21 +48,11 @@ public final class ElysiumKV implements ReadOnlyStore {
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
     private final Set<BatchedIterator> batchedIterators =
             Collections.synchronizedSet(Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
-    /**
-     * Claimed exactly once, because {@link #close} takes it away on one thread while another may
-     * still be reading it — a metrics thread in {@link #stats()}, or a caller parallelising its
-     * reads.
-     *
-     * <p>Both halves matter. A plain field gives the closed check in {@link #handle()} no visibility
-     * guarantee and is not an atomic read on a 32-bit JVM, so the race hands JNI a stale or torn
-     * pointer instead of throwing; and a check-then-clear in close could let two threads both claim
-     * the same handle and free it twice. One {@code getAndSet} is both.
-     */
-    private final AtomicLong handle = new AtomicLong();
-    private byte[] statsBuffer = new byte[256];
+    private volatile long handle;
+    private final ReentrantReadWriteLock lifecycle = new ReentrantReadWriteLock();
 
     private ElysiumKV(long handle, boolean checked) {
-        this.handle.set(handle);
+        this.handle = handle;
         this.checked = checked;
     }
 
@@ -137,9 +130,11 @@ public final class ElysiumKV implements ReadOnlyStore {
      */
     @Override
     public Pinned get(byte[] key) {
-        long[] pin = new long[1];
-        ByteBuffer value = Native.get(handle(), key, key.length, pin);
-        return value == null ? null : new Pinned(this, pin[0], value, checked);
+        return callHandle(h -> {
+            long[] pin = new long[1];
+            ByteBuffer value = Native.get(h, key, key.length, pin);
+            return value == null ? null : new Pinned(this, pin[0], value, checked);
+        });
     }
 
     /**
@@ -151,30 +146,33 @@ public final class ElysiumKV implements ReadOnlyStore {
         if (!key.isDirect()) {
             throw new IllegalArgumentException("key buffer must be direct; use get(byte[])");
         }
-        long[] pin = new long[1];
-        ByteBuffer value = Native.getDirect(handle(), key, key.remaining(), pin);
-        return value == null ? null : new Pinned(this, pin[0], value, checked);
+        return callHandle(h -> {
+            long[] pin = new long[1];
+            ByteBuffer value = Native.getDirect(h, key, key.position(), key.remaining(), pin);
+            return value == null ? null : new Pinned(this, pin[0], value, checked);
+        });
     }
 
     /** Copies rather than pinning. Returns null if the key is absent. */
     @Override
     public byte[] getCopy(byte[] key) {
-        byte[] out = new byte[512];
-        int length = Native.getCopy(handle(), key, key.length, out);
-        if (length < 0) return null;
-        if (length <= out.length) return Arrays.copyOf(out, length);
-
-        // The value was larger than the guess; ask again with room for it.
-        out = new byte[length];
-        length = Native.getCopy(handle(), key, key.length, out);
-        if (length < 0) return null;
-        return length == out.length ? out : Arrays.copyOf(out, length);
+        return callHandle(h -> {
+            byte[] out = new byte[512];
+            int length = Native.getCopy(h, key, key.length, out);
+            if (length < 0) return null;
+            while (length > out.length) {
+                out = new byte[length];
+                length = Native.getCopy(h, key, key.length, out);
+                if (length < 0) return null;
+            }
+            return length == out.length ? out : Arrays.copyOf(out, length);
+        });
     }
 
     /** Pins currently held. Nonzero at close is a leak (ARCHITECTURE.md "The ABI boundary"). */
     @Override
     public long pinsOutstanding() {
-        return Native.pinsOutstanding(handle());
+        return callHandle(Native::pinsOutstanding);
     }
 
     // --- writes --------------------------------------------------------------
@@ -186,21 +184,21 @@ public final class ElysiumKV implements ReadOnlyStore {
      * written in the first place.
      */
     public void put(byte[] key, byte[] value) {
-        Native.put(handle(), key, key.length, value, value.length);
+        runHandle(h -> Native.put(h, key, key.length, value, value.length));
     }
 
     public void delete(byte[] key) {
-        Native.delete(handle(), key, key.length);
+        runHandle(h -> Native.delete(h, key, key.length));
     }
 
     /** Applies the batch as a unit. */
     public void write(WriteBatch batch) {
-        Native.write(handle(), batch.handle());
+        runHandle(h -> Native.write(h, batch.handle()));
     }
 
     /** Flushes the memtable to L0. */
     public void flush() {
-        Native.flush(handle());
+        runHandle(Native::flush);
     }
 
     /**
@@ -211,7 +209,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      * nothing. Watch {@link ElysiumKVStats.Level#filesStaleCodec()}.
      */
     public void compactLevel(int level) {
-        Native.compactLevel(handle(), level);
+        runHandle(h -> Native.compactLevel(h, level));
     }
 
     /**
@@ -224,7 +222,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      * holds the version it started on, as it already does across a compaction.
      */
     public void truncateBelow(byte[] key) {
-        Native.truncateBelow(handle(), key, key.length);
+        runHandle(h -> Native.truncateBelow(h, key, key.length));
     }
 
     /**
@@ -242,7 +240,9 @@ public final class ElysiumKV implements ReadOnlyStore {
      * files are rewritten, or at once for a file the range covers whole.
      */
     public void deleteRange(byte[] lower, byte[] upper) {
-        Native.deleteRange(handle(), lower, upper);
+        Objects.requireNonNull(lower, "lower");
+        Objects.requireNonNull(upper, "upper");
+        runHandle(h -> Native.deleteRange(h, lower, upper));
     }
 
     /**
@@ -261,7 +261,9 @@ public final class ElysiumKV implements ReadOnlyStore {
      */
     @Override
     public boolean rangeIsErased(byte[] lower, byte[] upper) {
-        return Native.rangeIsErased(handle(), lower, upper);
+        Objects.requireNonNull(lower, "lower");
+        Objects.requireNonNull(upper, "upper");
+        return callHandle(h -> Native.rangeIsErased(h, lower, upper));
     }
 
     // --- iteration -----------------------------------------------------------
@@ -269,16 +271,16 @@ public final class ElysiumKV implements ReadOnlyStore {
     /** Half-open range scan; null bounds are unbounded. */
     @Override
     public ElysiumKVIterator iterator(byte[] lo, byte[] hi) {
-        long iter = Native.iterCreate(handle(), lo, lo == null ? 0 : lo.length, hi,
-                                      hi == null ? 0 : hi.length);
-        return track(new ElysiumKVIterator(this, iter, checked));
+        return callHandle(h -> track(new ElysiumKVIterator(
+                this, Native.iterCreate(h, lo, lo == null ? 0 : lo.length, hi,
+                                        hi == null ? 0 : hi.length), checked)));
     }
 
     /** Prefix scan — ARCHITECTURE.md "Absence is an answer, not an error" makes this a first-class path, not sugar over a range. */
     @Override
     public ElysiumKVIterator prefixIterator(byte[] prefix) {
-        long iter = Native.iterPrefix(handle(), prefix, prefix.length);
-        return track(new ElysiumKVIterator(this, iter, checked));
+        return callHandle(h -> track(new ElysiumKVIterator(
+                this, Native.iterPrefix(h, prefix, prefix.length), checked)));
     }
 
     /**
@@ -290,16 +292,16 @@ public final class ElysiumKV implements ReadOnlyStore {
      */
     @Override
     public ElysiumKVIterator reverseIterator(byte[] lo, byte[] hi) {
-        long iter = Native.iterCreateReverse(handle(), lo, lo == null ? 0 : lo.length, hi,
-                                             hi == null ? 0 : hi.length);
-        return track(new ElysiumKVIterator(this, iter, checked));
+        return callHandle(h -> track(new ElysiumKVIterator(
+                this, Native.iterCreateReverse(h, lo, lo == null ? 0 : lo.length, hi,
+                                               hi == null ? 0 : hi.length), checked)));
     }
 
     /** Prefix scan, descending. */
     @Override
     public ElysiumKVIterator reversePrefixIterator(byte[] prefix) {
-        long iter = Native.iterPrefixReverse(handle(), prefix, prefix.length);
-        return track(new ElysiumKVIterator(this, iter, checked));
+        return callHandle(h -> track(new ElysiumKVIterator(
+                this, Native.iterPrefixReverse(h, prefix, prefix.length), checked)));
     }
 
     /**
@@ -309,10 +311,8 @@ public final class ElysiumKV implements ReadOnlyStore {
      */
     @Override
     public BatchedIterator batchedPrefixIterator(byte[] prefix) {
-        long iter = Native.iterPrefix(handle(), prefix, prefix.length);
-        BatchedIterator batched = new BatchedIterator(this, iter, checked);
-        batchedIterators.add(batched);
-        return batched;
+        return callHandle(h -> track(new BatchedIterator(
+                this, Native.iterPrefix(h, prefix, prefix.length), checked)));
     }
 
     /**
@@ -322,30 +322,24 @@ public final class ElysiumKV implements ReadOnlyStore {
      */
     @Override
     public BatchedIterator batchedIterator(byte[] lo, byte[] hi) {
-        long iter = Native.iterCreate(handle(), lo, lo == null ? 0 : lo.length, hi,
-                                      hi == null ? 0 : hi.length);
-        BatchedIterator batched = new BatchedIterator(this, iter, checked);
-        batchedIterators.add(batched);
-        return batched;
+        return callHandle(h -> track(new BatchedIterator(
+                this, Native.iterCreate(h, lo, lo == null ? 0 : lo.length, hi,
+                                        hi == null ? 0 : hi.length), checked)));
     }
 
     /** The same batched range scan, descending. */
     @Override
     public BatchedIterator batchedReverseIterator(byte[] lo, byte[] hi) {
-        long iter = Native.iterCreateReverse(handle(), lo, lo == null ? 0 : lo.length, hi,
-                                             hi == null ? 0 : hi.length);
-        BatchedIterator batched = new BatchedIterator(this, iter, checked);
-        batchedIterators.add(batched);
-        return batched;
+        return callHandle(h -> track(new BatchedIterator(
+                this, Native.iterCreateReverse(h, lo, lo == null ? 0 : lo.length, hi,
+                                               hi == null ? 0 : hi.length), checked)));
     }
 
     /** The same batched scan, descending. */
     @Override
     public BatchedIterator batchedReversePrefixIterator(byte[] prefix) {
-        long iter = Native.iterPrefixReverse(handle(), prefix, prefix.length);
-        BatchedIterator batched = new BatchedIterator(this, iter, checked);
-        batchedIterators.add(batched);
-        return batched;
+        return callHandle(h -> track(new BatchedIterator(
+                this, Native.iterPrefixReverse(h, prefix, prefix.length), checked)));
     }
 
     // --- statistics ----------------------------------------------------------
@@ -353,22 +347,25 @@ public final class ElysiumKV implements ReadOnlyStore {
     /** One instant of the engine (ARCHITECTURE.md "Statistics are a buffer, not a struct"), from a single native call. */
     @Override
     public ElysiumKVStats stats() {
-        int needed = Native.statsSnapshot(handle(), statsBuffer);
-        if (needed > statsBuffer.length) {
-            statsBuffer = new byte[needed];
-            needed = Native.statsSnapshot(handle(), statsBuffer);
-        }
-        return ElysiumKVStats.decode(statsBuffer, needed);
+        return callHandle(h -> {
+            byte[] buffer = new byte[256];
+            int needed = Native.statsSnapshot(h, buffer);
+            if (needed > buffer.length) {
+                buffer = new byte[needed];
+                needed = Native.statsSnapshot(h, buffer);
+            }
+            return ElysiumKVStats.decode(buffer, needed);
+        });
     }
 
     @Override
     public void refresh() {
-        Native.refresh(handle());
+        runHandle(Native::refresh);
     }
 
     /** Clears {@code requiresRecovery} after a discard. The only way to (ARCHITECTURE.md "A tier is not a level"). */
     public void markRecoveryComplete() {
-        Native.markRecoveryComplete(handle());
+        runHandle(Native::markRecoveryComplete);
     }
 
     // --- watermark -----------------------------------------------------------
@@ -393,7 +390,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      * {@code committedOffset()} is {@link #recoveredWatermark()}.
      */
     public void setWatermark(long position) {
-        Native.setWatermark(handle(), position);
+        runHandle(h -> Native.setWatermark(h, position));
     }
 
     /**
@@ -414,7 +411,7 @@ public final class ElysiumKV implements ReadOnlyStore {
      */
     @Override
     public OptionalLong recoveredWatermark() {
-        long value = Native.watermark(handle());
+        long value = callHandle(Native::watermark);
         return value < 0 ? OptionalLong.empty() : OptionalLong.of(value);
     }
 
@@ -463,41 +460,78 @@ public final class ElysiumKV implements ReadOnlyStore {
     }
 
     private long closeReportingOutstanding(boolean flushFirst) {
-        // Exactly one caller wins the handle; a second concurrent close sees zero and does nothing
-        // rather than destroying a database this one is still closing.
-        long h = handle.getAndSet(0);
-        if (h == 0) return 0;
+        lifecycle.writeLock().lock();
+        try {
+            long h = handle;
+            if (h == 0) return 0;
+            handle = 0;
 
-        // Close natively *first*: it is what counts the outstanding pins and
-        // iterators, and tidying the Java wrappers beforehand would zero the
-        // number this method exists to report. The C ABI detaches live iterators
-        // rather than freeing them, so destroying the wrappers afterwards is
-        // safe by contract.
-        long outstanding = flushFirst ? Native.close(h) : Native.closeWithoutFlush(h);
-        synchronized (iterators) {
-            for (ElysiumKVIterator iterator : new ArrayList<>(iterators)) iterator.close();
-            iterators.clear();
+            // Close natively *first*: it is what counts the outstanding pins and
+            // iterators, and tidying the Java wrappers beforehand would zero the
+            // number this method exists to report. The C ABI detaches live iterators
+            // rather than freeing them, so destroying the wrappers afterwards is
+            // safe by contract.
+            long outstanding = flushFirst ? Native.close(h) : Native.closeWithoutFlush(h);
+            synchronized (iterators) {
+                for (ElysiumKVIterator iterator : new ArrayList<>(iterators)) iterator.close();
+                iterators.clear();
+            }
+            synchronized (batchedIterators) {
+                for (BatchedIterator batched : new ArrayList<>(batchedIterators)) batched.detach();
+                batchedIterators.clear();
+            }
+            return outstanding;
+        } finally {
+            lifecycle.writeLock().unlock();
         }
-        synchronized (batchedIterators) {
-            for (BatchedIterator batched : new ArrayList<>(batchedIterators)) batched.detach();
-            batchedIterators.clear();
-        }
-        return outstanding;
     }
 
     @Override
     public boolean isOpen() {
-        return handle.get() != 0;
+        return handle != 0;
     }
 
     long handle() {
-        long h = handle.get();
+        long h = handle;
         if (h == 0) throw new IllegalStateException("database is closed");
         return h;
     }
 
+    void release(long pin) {
+        lifecycle.readLock().lock();
+        try {
+            long h = handle;
+            if (h != 0) Native.unpin(h, pin);
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
+    private <T> T callHandle(LongFunction<T> call) {
+        lifecycle.readLock().lock();
+        try {
+            return call.apply(handle());
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
+    private void runHandle(LongConsumer call) {
+        lifecycle.readLock().lock();
+        try {
+            call.accept(handle());
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
     private ElysiumKVIterator track(ElysiumKVIterator iterator) {
         iterators.add(iterator);
+        return iterator;
+    }
+
+    private BatchedIterator track(BatchedIterator iterator) {
+        batchedIterators.add(iterator);
         return iterator;
     }
 
