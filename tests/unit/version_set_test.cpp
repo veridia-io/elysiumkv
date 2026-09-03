@@ -1,5 +1,6 @@
 #include "version/version_set.hpp"
 
+#include "fault/fault_injecting_manifest_file_system.hpp"
 #include "support/temp_dir.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 
@@ -91,6 +92,31 @@ TEST_F(VersionSetTest, InstallsThatDeleteNothingDoNotAccumulateVersionSlots) {
     // Only the current version is still held; the other 200 expired as each install replaced them.
     EXPECT_LE(versions->tracked_versions(), 2u)
         << "expired version slots were never pruned on a store that deletes nothing";
+}
+
+TEST_F(VersionSetTest, AnAcknowledgedDeletionSurvivesLossOfUnsyncedDirectoryEntries) {
+    auto file_system = std::make_shared<test::FaultInjectingManifestFileSystem>();
+    DiskManifestCatalog catalog(dir_.path(), file_system);
+    VersionSet versions(catalog, 1000, recorder(), plain_encryption());
+    ASSERT_EQ(versions.create(), Status::Ok);
+
+    VersionEdit add;
+    add.added.push_back(file(0, 1));
+    ASSERT_EQ(versions.apply(std::move(add)), Status::Ok);
+    ASSERT_TRUE(file_system->sync_directory(dir_.path() / "manifest" / "000000000001"));
+
+    VersionEdit remove;
+    remove.deleted.push_back({0, 1});
+    ASSERT_EQ(versions.apply(std::move(remove)), Status::Ok);
+    ASSERT_EQ(deleted_, std::vector<uint64_t>{1})
+        << "the SST deletion makes loss of the manifest edit unsafe";
+
+    file_system->crash();
+    DiskManifestCatalog reopened_catalog(dir_.path());
+    VersionSet reopened(reopened_catalog, 1000, recorder(), plain_encryption());
+    ASSERT_EQ(reopened.recover(), Status::Ok);
+    EXPECT_TRUE(reopened.current()->all_files().empty())
+        << "recovery must not reference an SST deleted after the edit was acknowledged";
 }
 
 TEST_F(VersionSetTest, EditsSurviveReopen) {
