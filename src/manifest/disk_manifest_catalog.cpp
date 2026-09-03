@@ -1,6 +1,7 @@
 #include "elysiumkv/disk_manifest_catalog.hpp"
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -60,6 +61,38 @@ std::string edit_name(uint64_t seq) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "edit-%012llu", static_cast<unsigned long long>(seq));
     return buf;
+}
+
+class FileLock {
+public:
+    explicit FileLock(const fs::path& path) : fd_(::open(path.c_str(), O_RDWR | O_CREAT, 0644)) {
+        if (fd_ < 0) return;
+        while (::flock(fd_, LOCK_EX) != 0) {
+            if (errno == EINTR) continue;
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+    }
+
+    ~FileLock() {
+        if (fd_ < 0) return;
+        (void)::flock(fd_, LOCK_UN);
+        (void)::close(fd_);
+    }
+
+    bool valid() const { return fd_ >= 0; }
+
+private:
+    int fd_ = -1;
+};
+
+bool sync_directory(const fs::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return false;
+    const bool synced = ::fsync(fd) == 0;
+    const bool closed = ::close(fd) == 0;
+    return synced && closed;
 }
 
 }  // namespace
@@ -142,6 +175,14 @@ Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::read() {
 
 Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::compare_and_set(
     std::optional<Entry> expected, uint64_t generation) {
+    const fs::path manifest_dir = current_path().parent_path();
+    std::error_code ec;
+    fs::create_directories(manifest_dir, ec);
+    if (ec) return std::unexpected(Status::Io);
+
+    FileLock lock(manifest_dir / "CURRENT.lock");
+    if (!lock.valid()) return std::unexpected(Status::Io);
+
     auto observed = read();
     if (!observed) return std::unexpected(observed.error());
 
@@ -157,21 +198,23 @@ Result<std::optional<ManifestCatalog::Entry>> DiskManifestCatalog::compare_and_s
         parsed.token = 0;
         std::from_chars((*observed)->token.data(),
                         (*observed)->token.data() + (*observed)->token.size(), parsed.token);
+        if (parsed.token == std::numeric_limits<uint64_t>::max()) {
+            return std::unexpected(Status::Unusable);
+        }
         token = parsed.token + 1;
     }
 
     const std::string text = std::to_string(generation) + " " + format_token(token) + "\n";
     const fs::path temp = current_path().string() + ".tmp";
 
-    std::error_code ec;
-    fs::create_directories(current_path().parent_path(), ec);
-    if (ec) return std::unexpected(Status::Io);
     fs::remove(temp, ec);
+    if (ec) return std::unexpected(Status::Io);
     if (Status status = write_object(temp, Slice::from(text)); status != Status::Ok) {
         return std::unexpected(status);
     }
     fs::rename(temp, current_path(), ec);
     if (ec) return std::unexpected(Status::Io);
+    if (!sync_directory(manifest_dir)) return std::unexpected(Status::Io);
 
     return std::optional<Entry>(Entry{generation, format_token(token)});
 }

@@ -467,29 +467,23 @@ TEST_F(VersionSetTest, AnEditAddressTakenByAnotherWriterFencesTheInstance) {
         << "a fenced instance must not write again";
 }
 
-// The same rule one step earlier: rolling a generation writes its snapshot before
-// the CAS, so a writer that loses the race to roll finds the *snapshot* address
-// taken. The generation number is derived from what this instance believes is
-// current, so an occupied address there also means someone else installed it.
-//
-// This is the shape a live two-writer database actually takes — it is what a flush
-// through the Java binding hit, where it surfaced as `Config` and told the loser it
-// had a configuration problem.
-TEST_F(VersionSetTest, LosingTheRaceToRollAGenerationFencesTheInstance) {
+// A snapshot is written before its pointer CAS, so a crash between those operations leaves an
+// occupied generation above CURRENT. The pointer still names this writer's version: the occupied
+// immutable address is residue, not evidence that ownership moved.
+TEST_F(VersionSetTest, AnAbovePointerSnapshotIsRenumberedRatherThanFencing) {
     auto ours = make(/*edits_per_generation=*/1);
     ASSERT_EQ(ours->create(), Status::Ok);
 
-    // Another writer rolls generation 2 first, by hand: its snapshot exists and its
-    // address is taken.
+    // The exact durable state left when generation 2's snapshot landed and its CAS did not.
     DiskManifestCatalog other_catalog(dir_.path());
-    ASSERT_EQ(other_catalog.put_snapshot(2, Slice::from(std::string("theirs"))).get(), Status::Ok);
+    ASSERT_EQ(other_catalog.put_snapshot(2, Slice::from(std::string("residue"))).get(), Status::Ok);
 
-    // One edit takes us past edits_per_generation, so this apply rolls.
     VersionEdit edit;
     edit.added.push_back(file(0, ours->allocate_file_number()));
-    EXPECT_EQ(ours->apply(std::move(edit)), Status::Fenced)
-        << "losing the roll is losing the store";
-    EXPECT_TRUE(ours->fenced());
+    EXPECT_EQ(ours->apply(std::move(edit)), Status::Ok)
+        << "the unchanged pointer still grants ownership, so the roll must use a fresh generation";
+    EXPECT_FALSE(ours->fenced());
+    EXPECT_EQ(ours->generation(), 3u);
 }
 
 // ARCHITECTURE.md "Ownership is one compare-and-set" — a lost CAS means another process owns the store. Merging is not

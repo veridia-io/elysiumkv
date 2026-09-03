@@ -386,21 +386,28 @@ TEST_F(DbFaultTest, ATakenSstNameIsSurvivedByRenumbering) {
     fill(*db, oracle, 50, "v1");
     ASSERT_EQ(db->flush(), Status::Ok);
 
-    // Take the name this instance will allocate next, *after* it has opened, so the counter
-    // advance at open cannot have stepped over it.
-    ASSERT_EQ(local_->put("000000000002.sst", Slice::from(std::string_view("theirs"))).get(),
-              Status::Ok);
+    // Take several names after open, so the fixed retry count cannot masquerade as recovery.
+    // A fresh listing has to advance the global counter past all of them.
+    for (uint64_t number = 2; number <= 5; ++number) {
+        ASSERT_EQ(local_->put(sst_object_name(number), Slice::from(std::string_view("theirs"))).get(),
+                  Status::Ok);
+    }
+    const uint64_t lists_before = faulty_->call_count(FaultInjectingBlobStore::Op::List);
 
     fill(*db, oracle, 50, "v2");
     EXPECT_EQ(db->flush(), Status::Ok) << "the flush must route around the taken name";
+    EXPECT_GT(faulty_->call_count(FaultInjectingBlobStore::Op::List), lists_before)
+        << "the collision must refresh the listing rather than guess how many names to skip";
     expect_matches(*db, oracle);
 
     // On a fresh number, and the squatter untouched.
     auto names = local_->list("").get();
     ASSERT_TRUE(names.has_value());
-    EXPECT_NE(std::find(names->begin(), names->end(), "000000000002.sst"), names->end())
-        << "and must not have overwritten or removed what was there";
-    EXPECT_GE(names->size(), 3u) << "file 1, the squatter, and the flush's own output";
+    for (uint64_t number = 2; number <= 5; ++number) {
+        EXPECT_NE(std::find(names->begin(), names->end(), sst_object_name(number)), names->end())
+            << "and must not have overwritten or removed what was there";
+    }
+    EXPECT_NE(std::find(names->begin(), names->end(), "000000000006.sst"), names->end());
 }
 
 // The bug this all exists for. Open takes no lock and performs no compare-and-set, so it
@@ -464,14 +471,16 @@ TEST_F(DbFaultTest, AGenerationLeftByACrashIsReclaimedBySweep) {
     const uint64_t live = engine.current_generation_for_test();
     ASSERT_GT(live, 0u);
 
-    // Exactly what a crash between the CAS and the delete leaves: the previous generation's
-    // snapshot, still sitting there with nothing pointing at it.
+    // Residue on both sides: after a successful CAS the old generation is below CURRENT; before
+    // the CAS, or after collision-driven renumbering, an abandoned snapshot is above it.
     DiskManifestCatalog planted(dir_.path());
     ASSERT_EQ(planted.put_snapshot(live - 1, Slice::from(std::string("leaked"))).get(), Status::Ok);
+    ASSERT_EQ(planted.put_snapshot(live + 1, Slice::from(std::string("leaked"))).get(), Status::Ok);
     {
         auto before = planted.list_generations().get();
         ASSERT_TRUE(before.has_value());
         EXPECT_NE(std::find(before->begin(), before->end(), live - 1), before->end());
+        EXPECT_NE(std::find(before->begin(), before->end(), live + 1), before->end());
     }
 
     ASSERT_EQ(engine.sweep_orphans_for_test(), Status::Ok);
@@ -480,6 +489,7 @@ TEST_F(DbFaultTest, AGenerationLeftByACrashIsReclaimedBySweep) {
         ASSERT_TRUE(seen_once.has_value());
         EXPECT_NE(std::find(seen_once->begin(), seen_once->end(), live - 1), seen_once->end())
             << "one observation is not a sustained one; a reader may still be loading it";
+        EXPECT_NE(std::find(seen_once->begin(), seen_once->end(), live + 1), seen_once->end());
     }
 
     now_.fetch_add(120'000);
@@ -488,7 +498,8 @@ TEST_F(DbFaultTest, AGenerationLeftByACrashIsReclaimedBySweep) {
         auto after = planted.list_generations().get();
         ASSERT_TRUE(after.has_value());
         EXPECT_EQ(std::find(after->begin(), after->end(), live - 1), after->end())
-            << "past the reader window and below the live pointer, so it goes";
+            << "past the reader window and not the live generation, so it goes";
+        EXPECT_EQ(std::find(after->begin(), after->end(), live + 1), after->end());
         EXPECT_NE(std::find(after->begin(), after->end(), live), after->end())
             << "and the live generation is untouched";
     }

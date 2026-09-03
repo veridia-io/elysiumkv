@@ -65,10 +65,9 @@ struct S3Options {
 };
 
 /// Objects are write-once: `put` uses `If-None-Match: *`, so a second write to
-/// the same name fails rather than overwriting. File numbers are monotonic under
-/// a single writer, so a collision means a zombie process is reusing them — and
-/// the conditional costs nothing while converting a silent overwrite into an
-/// error the engine can act on.
+/// the same name fails rather than overwriting. The conditional converts a silent overwrite into
+/// an address collision the engine survives by allocating a fresh file number; ownership remains
+/// the manifest pointer's decision alone.
 class S3BlobStore final : public BlobStore {
 public:
     /// Fails only on unusable configuration; it does not talk to S3. A bucket

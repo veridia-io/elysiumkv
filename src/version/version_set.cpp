@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <set>
 #include <utility>
 #include <vector>
@@ -98,24 +99,41 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
     snapshot.watermark_floor = version->watermark_floor();
 
     const std::string bytes = encode_version_snapshot(snapshot);
-    auto framed = ManifestPayload::seal(encryption_, generation,
-                                        ManifestPayload::snapshot_address(generation),
-                                        Slice::from(bytes));
-    if (!framed) return framed.error();
-    if (Status status = catalog_.put_snapshot(generation, Slice::from(*framed)).get();
-        status != Status::Ok) {
-        // The same rule as the edit path, one step earlier. The generation
-        // number here is `entry_->generation + 1`, derived from what this instance
-        // believes is current, so an occupied snapshot address means another writer
-        // has already installed that generation — it beat us to the roll. The CAS
-        // below would have discovered it a moment later; discovering it here is the
-        // same conclusion, and reporting `Config` instead would leave the loser
-        // believing it had a configuration problem with `fenced_` still clear.
-        if (status == Status::Config) {
+    constexpr int kSnapshotAttempts = 16;
+    for (int attempt = 0; attempt < kSnapshotAttempts; ++attempt) {
+        auto framed = ManifestPayload::seal(encryption_, generation,
+                                            ManifestPayload::snapshot_address(generation),
+                                            Slice::from(bytes));
+        if (!framed) return framed.error();
+        const Status status = catalog_.put_snapshot(generation, Slice::from(*framed)).get();
+        if (status == Status::Ok) break;
+        if (status != Status::Config) return status;
+
+        // The pointer alone decides ownership. An occupied immutable address with CURRENT still
+        // where we last saw it is crash residue or another writer's uncommitted work, so move to a
+        // fresh generation and let the CAS below arbitrate between us.
+        auto pointer = catalog_.read();
+        if (!pointer) return pointer.error();
+        const bool unchanged = (!entry_.has_value() && !pointer->has_value()) ||
+                               (entry_.has_value() && pointer->has_value() &&
+                                entry_->generation == (*pointer)->generation &&
+                                entry_->token == (*pointer)->token);
+        if (!unchanged) {
             fenced_.store(true, std::memory_order_release);
             return Status::Fenced;
         }
-        return status;
+
+        auto generations = catalog_.list_generations().get();
+        if (generations) {
+            for (const uint64_t existing : *generations) {
+                generation = std::max(generation, existing);
+            }
+        } else if (generations.error() != Status::Unsupported) {
+            return generations.error();
+        }
+        if (generation == std::numeric_limits<uint64_t>::max()) return Status::Unusable;
+        ++generation;
+        if (attempt + 1 == kSnapshotAttempts) return Status::Unusable;
     }
 
     // The pointer install is the commit point: a partially written generation
