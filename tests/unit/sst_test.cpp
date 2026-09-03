@@ -1,4 +1,5 @@
 #include "sst/sst_reader.hpp"
+#include "sst/footer.hpp"
 #include "sst/sst_writer.hpp"
 
 #include "fault/fault_injecting_blob_store.hpp"
@@ -8,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +66,117 @@ protected:
     uint64_t file_size_ = 0;
 };
 
+
+/// The reader's ceiling has to admit every block the writer may emit, and a block is not one entry.
+/// `SstWriter::add` appends and only then asks whether the block is full, so a block can hold
+/// nearly `block_bytes` of earlier entries *plus* one entry at the write-side limits. A ceiling
+/// budgeting only the entry accepts the write and refuses the read.
+TEST(SstBoundsTest, ABlockCarryingAMaximalEntryAfterOthersIsStillReadable) {
+    TempDir dir;
+    DiskBlobStore store(dir.path());
+
+    SstWriter writer({.block_bytes = 4096, .compression = Compression::None});
+    for (int i = 0; i < 40; ++i) {
+        char key[32];
+        std::snprintf(key, sizeof(key), "aaa:%08d", i);
+        writer.add(Slice::from(std::string(key)), ValueType::Put,
+                   Slice::from(std::string(64, 'v')));
+    }
+    // At the limits `DbImpl::put` enforces, so this entry is one the engine accepts.
+    const std::string big_key = "zzz" + std::string(kMaxKeyBytes - 3, 'k');
+    const std::string big_value(kMaxValueBytes, 'V');
+    writer.add(Slice::from(big_key), ValueType::Put, Slice::from(big_value));
+
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(store.put("000000000001.sst", Slice::from(built->bytes)).get(), Status::Ok);
+
+    auto reader =
+        SstReader::open(store, "000000000001.sst", built->bytes.size(), {.block_bytes = 4096});
+    ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+    auto found = (*reader)->get(Slice::from(big_key));
+    ASSERT_TRUE(found.has_value()) << "the block the writer emitted was refused: "
+                                   << status_name(found.error());
+    ASSERT_TRUE(found->has_value());
+    EXPECT_EQ((*found)->value.size(), big_value.size());
+}
+
+/// A filter is sized by the file's key count and its bits per key, so it is unrelated to
+/// `block_bytes` and can be larger than any block is allowed to be. Bounding it as though it were
+/// a block makes every point lookup on such a file report corruption, while iteration — which
+/// never consults it — keeps working.
+TEST(SstBoundsTest, AFilterLargerThanAnyBlockIsStillReadable) {
+    TempDir dir;
+    DiskBlobStore store(dir.path());
+
+    SstWriter writer(
+        {.block_bytes = 4096, .bloom_bits_per_key = 2000, .compression = Compression::None});
+    std::vector<std::string> keys;
+    for (int i = 0; i < 6000; ++i) {
+        char key[32];
+        std::snprintf(key, sizeof(key), "user:%08d", i);
+        keys.emplace_back(key);
+        writer.add(Slice::from(keys.back()), ValueType::Put, Slice::from(std::string(8, 'v')));
+    }
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+    ASSERT_EQ(store.put("000000000001.sst", Slice::from(built->bytes)).get(), Status::Ok);
+
+    auto reader =
+        SstReader::open(store, "000000000001.sst", built->bytes.size(), {.block_bytes = 4096});
+    ASSERT_TRUE(reader.has_value()) << status_name(reader.error());
+    // The premise: without this the ceiling under test is never crossed, and the case below would
+    // pass against a reader that still bounded the filter as though it were a block. Read from the
+    // file rather than recomputed, so it cannot agree with the builder by sharing its arithmetic.
+    const Slice tail(reinterpret_cast<const uint8_t*>(built->bytes.data()) + built->bytes.size() -
+                         Footer::kMaxFooterLength,
+                     Footer::kMaxFooterLength);
+    auto footer = Footer::decode(tail);
+    ASSERT_TRUE(footer.has_value());
+    ASSERT_GT(footer->filter.length, kMaxEntryBlockBytes + 4096u)
+        << "the filter is too small to exercise the ceiling";
+    auto found = (*reader)->get(Slice::from(keys[1234]));
+    ASSERT_TRUE(found.has_value()) << "a point lookup could not read the filter: "
+                                   << status_name(found.error());
+    EXPECT_TRUE(found->has_value());
+}
+
+/// A v1 or v2 footer carries no checksum, so its handles are whatever the bytes say. `offset +
+/// length` is therefore corruption-controlled, and the sum wraps: a wrapped sum passes an unsigned
+/// comparison against the file size while naming bytes nowhere near the file.
+///
+/// **This case does not discriminate in an ordinary build, and that was checked rather than
+/// assumed.** With the overflow guard removed it still passes: the read lands on unrelated memory,
+/// fails its checksum, and is reported as corruption — the right answer reached by undefined
+/// behaviour. It is the sanitizer builds that make it a test, where the same read traps. Left here
+/// because those run the whole suite in CI, and labelled because a green run of the debug preset is
+/// not evidence for the property in the name.
+TEST(SstBoundsTest, AFooterHandleThatWrapsIsRefused) {
+    TempDir dir;
+    DiskBlobStore store(dir.path());
+
+    SstWriter writer({.compression = Compression::None});
+    for (const Entry& e : sample(50)) writer.add(Slice::from(e.key), e.type, Slice::from(e.value));
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+
+    // A hand-built v1 footer whose index handle wraps when its two fields are added.
+    Footer wrapped;
+    wrapped.format_version = Footer::kFormatVersion1;
+    wrapped.filter.offset = 0;
+    wrapped.filter.length = 0;
+    wrapped.index.offset = std::numeric_limits<uint64_t>::max() - 8;
+    wrapped.index.length = 16;
+    wrapped.num_entries = 1;
+
+    std::string bytes = built->bytes;
+    bytes.resize(bytes.size() - static_cast<size_t>(Footer::kFooterLengthV3));
+    bytes += wrapped.encode();
+    ASSERT_EQ(store.put("000000000002.sst", Slice::from(bytes)).get(), Status::Ok);
+
+    auto reader = SstReader::open(store, "000000000002.sst", bytes.size(), {});
+    EXPECT_FALSE(reader.has_value()) << "a handle naming bytes outside the file was accepted";
+}
 
 /// Opening a reader must cost one round trip: the footer and the index are adjacent at the end
 /// (FORMAT.md §5) and are taken in one speculative tail read, and the bloom filter is loaded

@@ -28,6 +28,7 @@ public:
             if (!enter(index_)) return;
             inner_->seek_to_first();
             if (inner_->valid()) return;
+            if (positioning_failed()) return;
             ++index_;  // an empty file, which a truncating compaction can leave
         }
         leave();
@@ -40,6 +41,7 @@ public:
             if (!enter(index_)) return;
             inner_->seek_to_last();
             if (inner_->valid()) return;
+            if (positioning_failed()) return;
             if (index_ == begin_) break;
             --index_;
         }
@@ -60,6 +62,7 @@ public:
             if (!enter(index_)) return;
             inner_->seek(target);
             if (inner_->valid()) return;
+            if (positioning_failed()) return;
             // Past every entry of this file — the target sits in the gap before the next one.
             ++index_;
         }
@@ -80,6 +83,7 @@ public:
             if (!enter(index_)) return;
             inner_->seek_for_prev(target);
             if (inner_->valid()) return;
+            if (positioning_failed()) return;
             if (index_ == begin_) break;
             --index_;
         }
@@ -120,6 +124,19 @@ public:
     }
 
 private:
+    /// A child that failed to position is not an empty file, and must not be stepped over.
+    ///
+    /// Stepping past it reports the file as holding nothing in range, which is exactly what a
+    /// successful read of a file holding nothing looks like — so an unreachable or damaged file
+    /// would be answered as an absent key. `enter` replaces `inner_` and `leave` clears it, so the
+    /// child's status has to be taken here or it is lost with the child.
+    bool positioning_failed() {
+        if (inner_ == nullptr || inner_->valid()) return false;
+        if (inner_->status() == Status::Ok) return false;
+        status_ = inner_->status();
+        return true;
+    }
+
     /// Opens file `at` and positions nothing. False means the open failed and the iterator is done;
     /// `status()` says why, which is how a caller tells that from exhaustion.
     bool enter(size_t at) {
