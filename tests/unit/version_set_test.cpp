@@ -147,9 +147,7 @@ TEST_F(VersionSetTest, EditsSurviveReopen) {
     }
 }
 
-// ARCHITECTURE.md "Open and recovery" — replay stops at the first gap in seq or the first object failing CRC.
-// Objects after a gap are ignored even if present.
-TEST_F(VersionSetTest, ReplayStopsAtATornEditAndIgnoresWhatFollows) {
+TEST_F(VersionSetTest, ACorruptEditBelowTheListedTailRefusesRecovery) {
     {
         auto versions = make();
         ASSERT_EQ(versions->create(), Status::Ok);
@@ -170,9 +168,31 @@ TEST_F(VersionSetTest, ReplayStopsAtATornEditAndIgnoresWhatFollows) {
     }
 
     auto versions = make();
+    EXPECT_EQ(versions->recover(), Status::Corrupt);
+    EXPECT_NE(versions->last_error().find("generation 1 edit 3"), std::string::npos)
+        << versions->last_error();
+}
+
+TEST_F(VersionSetTest, ACorruptTailIsTreatedAsAnUnacknowledgedTornWrite) {
+    {
+        auto versions = make();
+        ASSERT_EQ(versions->create(), Status::Ok);
+        for (uint64_t i = 1; i <= 3; ++i) {
+            VersionEdit edit;
+            edit.added.push_back(file(0, versions->allocate_file_number()));
+            ASSERT_EQ(versions->apply(std::move(edit)), Status::Ok);
+        }
+    }
+    const auto path = dir_.path() / "manifest" / "000000000001" / "edit-000000000003";
+    {
+        std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(2);
+        f.put('\xFF');
+    }
+
+    auto versions = make();
     ASSERT_EQ(versions->recover(), Status::Ok);
-    EXPECT_EQ(versions->current()->file_count(0), 2u)
-        << "only the edits before the damaged one may be applied";
+    EXPECT_EQ(versions->current()->file_count(0), 2u);
 }
 
 TEST_F(VersionSetTest, ReplayStopsAtAMissingSequenceNumber) {
@@ -413,6 +433,103 @@ private:
     ManifestCatalog& inner_;
     When when_;
 };
+
+class AmbiguousCasCatalog final : public ManifestCatalog {
+public:
+    AmbiguousCasCatalog(ManifestCatalog& inner, bool install) : inner_(inner), install_(install) {}
+
+    Result<std::optional<Entry>> read() override { return inner_.read(); }
+    Result<std::optional<Entry>> compare_and_set(std::optional<Entry> expected,
+                                                 uint64_t generation) override {
+        if (install_) (void)inner_.compare_and_set(std::move(expected), generation);
+        return std::unexpected(Status::Io);
+    }
+    std::future<Status> put_snapshot(uint64_t generation, Slice bytes) override {
+        return inner_.put_snapshot(generation, bytes);
+    }
+    std::future<GetResult> get_snapshot(uint64_t generation) override {
+        return inner_.get_snapshot(generation);
+    }
+    std::future<Status> put_edit(uint64_t generation, uint64_t seq, Slice bytes) override {
+        return inner_.put_edit(generation, seq, bytes);
+    }
+    std::future<GetResult> get_edit(uint64_t generation, uint64_t seq) override {
+        return inner_.get_edit(generation, seq);
+    }
+    std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override {
+        return inner_.list_edits(generation);
+    }
+    std::future<Status> delete_generation(uint64_t generation) override {
+        return inner_.delete_generation(generation);
+    }
+
+private:
+    ManifestCatalog& inner_;
+    bool install_;
+};
+
+TEST_F(VersionSetTest, AnAmbiguousSuccessfulCasIsAdoptedFromThePointer) {
+    DiskManifestCatalog inner(dir_.path());
+    AmbiguousCasCatalog ambiguous(inner, true);
+    VersionSet versions(ambiguous, 1000, recorder(), plain_encryption());
+
+    EXPECT_EQ(versions.create(), Status::Ok);
+    EXPECT_EQ(versions.generation(), 1u);
+}
+
+TEST_F(VersionSetTest, AnUnresolvedCasIoIsNotTreatedAsSuccess) {
+    DiskManifestCatalog inner(dir_.path());
+    AmbiguousCasCatalog ambiguous(inner, false);
+    VersionSet versions(ambiguous, 1000, recorder(), plain_encryption());
+
+    EXPECT_EQ(versions.create(), Status::Io);
+    EXPECT_EQ(versions.generation(), 0u);
+}
+
+class FailingRollCatalog final : public ManifestCatalog {
+public:
+    explicit FailingRollCatalog(ManifestCatalog& inner) : inner_(inner) {}
+    Result<std::optional<Entry>> read() override { return inner_.read(); }
+    Result<std::optional<Entry>> compare_and_set(std::optional<Entry> expected,
+                                                 uint64_t generation) override {
+        return inner_.compare_and_set(std::move(expected), generation);
+    }
+    std::future<Status> put_snapshot(uint64_t generation, Slice bytes) override {
+        if (generation > 1) return make_ready_future(Status::Io);
+        return inner_.put_snapshot(generation, bytes);
+    }
+    std::future<GetResult> get_snapshot(uint64_t generation) override {
+        return inner_.get_snapshot(generation);
+    }
+    std::future<Status> put_edit(uint64_t generation, uint64_t seq, Slice bytes) override {
+        return inner_.put_edit(generation, seq, bytes);
+    }
+    std::future<GetResult> get_edit(uint64_t generation, uint64_t seq) override {
+        return inner_.get_edit(generation, seq);
+    }
+    std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override {
+        return inner_.list_edits(generation);
+    }
+    std::future<Status> delete_generation(uint64_t generation) override {
+        return inner_.delete_generation(generation);
+    }
+
+private:
+    ManifestCatalog& inner_;
+};
+
+TEST_F(VersionSetTest, ACommittedEditIsSuccessfulWhenTheFollowingRollFails) {
+    DiskManifestCatalog inner(dir_.path());
+    FailingRollCatalog failing(inner);
+    VersionSet versions(failing, 1, recorder(), plain_encryption());
+    ASSERT_EQ(versions.create(), Status::Ok);
+
+    VersionEdit truncate;
+    truncate.truncation_point = "m";
+    EXPECT_EQ(versions.apply(std::move(truncate)), Status::Ok);
+    EXPECT_EQ(versions.current()->truncation_point(), "m");
+    EXPECT_NE(versions.last_error().find("roll failed"), std::string::npos);
+}
 
 /// A roll under a reader is not a damaged store. The pointer named a generation, the writer
 /// rolled and deleted it, and the snapshot came back absent — which was reported as `Corrupt`,

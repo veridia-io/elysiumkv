@@ -139,7 +139,22 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
     // The pointer install is the commit point: a partially written generation
     // that never gets installed is an orphan, collected later.
     auto installed = catalog_.compare_and_set(entry_, generation);
-    if (!installed) return installed.error();
+    if (!installed) {
+        if (installed.error() != Status::Io) return installed.error();
+        auto observed = catalog_.read();
+        if (!observed) return observed.error();
+        if (observed->has_value() && (*observed)->generation == generation) {
+            installed = *observed;
+        } else {
+            const bool unchanged = (!entry_.has_value() && !observed->has_value()) ||
+                                   (entry_.has_value() && observed->has_value() &&
+                                    entry_->generation == (*observed)->generation &&
+                                    entry_->token == (*observed)->token);
+            if (unchanged) return Status::Io;
+            fenced_.store(true, std::memory_order_release);
+            return Status::Fenced;
+        }
+    }
     if (!installed->has_value()) {
         // Another writer got there first. Its version is not ours to merge into.
         fenced_.store(true, std::memory_order_release);
@@ -189,7 +204,8 @@ Status VersionSet::recover() {
             // A snapshot the pointer names and that is not there is either a damaged store or a
             // generation deleted under us. The pointer is what tells the two apart.
             auto moved = catalog_.read();
-            if (moved && moved->has_value() && (*moved)->generation != generation) continue;
+            if (!moved) return moved.error();
+            if (moved->has_value() && (*moved)->generation != generation) continue;
             return Status::Corrupt;
         }
         // Every failure here is hard, unlike an edit's. A snapshot is read before any edit, so
@@ -224,16 +240,22 @@ Status VersionSet::recover() {
         auto seqs = catalog_.list_edits(generation).get();
         if (!seqs) return seqs.error();
 
-        // Apply in sequence order, stopping at the first gap or the first object
-        // that fails to decode: an edit that was never acknowledged, whose files are
-        // orphans. Objects after a gap are ignored even if present (ARCHITECTURE.md "Open and recovery").
+        std::sort(seqs->begin(), seqs->end());
         uint64_t expected_seq = 1;
         bool unreadable = false;
+        std::string replay_corruption;
         for (uint64_t seq : *seqs) {
             if (seq != expected_seq) break;
+            const bool tail = seq == seqs->back();
             auto bytes = catalog_.get_edit(generation, seq).get();
             if (!bytes) {
-                if (bytes.error() == Status::NotFound) break;
+                if (bytes.error() == Status::NotFound && tail) break;
+                if (bytes.error() == Status::NotFound) {
+                    replay_corruption = "manifest generation " + std::to_string(generation) +
+                                        " edit " + std::to_string(seq) +
+                                        " is missing below the listed tail";
+                    break;
+                }
                 unreadable = true;
                 break;
             }
@@ -249,10 +271,20 @@ Status VersionSet::recover() {
                 if (!edit_why.empty()) last_error_ = edit_why;
                 return plain.error();
             }
-            if (!plain) break;  // torn write: everything from here on is unacknowledged
+            if (!plain) {
+                if (tail && plain.error() == Status::Corrupt) break;
+                last_error_ = "manifest generation " + std::to_string(generation) + " edit " +
+                              std::to_string(seq) + " is corrupt below the listed tail";
+                return plain.error() == Status::Unsupported ? Status::Unsupported : Status::Corrupt;
+            }
 
             auto edit = decode_version_edit(Slice::from(*plain));
-            if (!edit) break;  // torn write: everything from here on is unacknowledged
+            if (!edit) {
+                if (tail && edit.error() == Status::Corrupt) break;
+                last_error_ = "manifest generation " + std::to_string(generation) + " edit " +
+                              std::to_string(seq) + " does not decode below the listed tail";
+                return edit.error() == Status::Unsupported ? Status::Unsupported : Status::Corrupt;
+            }
 
             version = Version::apply(*version, *edit);
             if (edit->next_file_number > file_number) file_number = edit->next_file_number;
@@ -261,8 +293,15 @@ Status VersionSet::recover() {
         if (unreadable) {
             // Same question as a missing snapshot: rolled under us, or genuinely unreadable.
             auto moved = catalog_.read();
-            if (moved && moved->has_value() && (*moved)->generation != generation) continue;
+            if (moved->has_value() && (*moved)->generation != generation) continue;
             return Status::Io;
+        }
+        if (!replay_corruption.empty()) {
+            auto moved = catalog_.read();
+            if (!moved) return moved.error();
+            if (moved && moved->has_value() && (*moved)->generation != generation) continue;
+            last_error_ = std::move(replay_corruption);
+            return Status::Corrupt;
         }
 
         // Re-read the pointer before installing anything. Everything above was read across
@@ -377,7 +416,10 @@ Status VersionSet::apply(VersionEdit edit) {
     // counts as a live reader of the files this edit just removed.
     base.reset();
 
-    if (Status status = maybe_roll_generation(next); status != Status::Ok) return status;
+    if (Status status = maybe_roll_generation(next); status != Status::Ok) {
+        last_error_ = "manifest edit committed, but generation roll failed (" +
+                      std::string(status_name(status)) + ")";
+    }
 
     collect_obsolete_locked();
     return Status::Ok;

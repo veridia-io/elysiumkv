@@ -32,6 +32,38 @@ int total_files(const Stats& stats) {
     return files;
 }
 
+class RollFailingCatalog final : public ManifestCatalog {
+public:
+    explicit RollFailingCatalog(std::shared_ptr<ManifestCatalog> inner) : inner_(std::move(inner)) {}
+    Result<std::optional<Entry>> read() override { return inner_->read(); }
+    Result<std::optional<Entry>> compare_and_set(std::optional<Entry> expected,
+                                                 uint64_t generation) override {
+        return inner_->compare_and_set(std::move(expected), generation);
+    }
+    std::future<Status> put_snapshot(uint64_t generation, Slice bytes) override {
+        return generation > 1 ? make_ready_future(Status::Io)
+                              : inner_->put_snapshot(generation, bytes);
+    }
+    std::future<GetResult> get_snapshot(uint64_t generation) override {
+        return inner_->get_snapshot(generation);
+    }
+    std::future<Status> put_edit(uint64_t generation, uint64_t seq, Slice bytes) override {
+        return inner_->put_edit(generation, seq, bytes);
+    }
+    std::future<GetResult> get_edit(uint64_t generation, uint64_t seq) override {
+        return inner_->get_edit(generation, seq);
+    }
+    std::future<Result<std::vector<uint64_t>>> list_edits(uint64_t generation) override {
+        return inner_->list_edits(generation);
+    }
+    std::future<Status> delete_generation(uint64_t generation) override {
+        return inner_->delete_generation(generation);
+    }
+
+private:
+    std::shared_ptr<ManifestCatalog> inner_;
+};
+
 /// `truncate_below` — dropping a prefix of the keyspace by moving one key in the manifest rather
 /// than writing a tombstone per key.
 class Truncate : public ::testing::Test {
@@ -68,6 +100,21 @@ TEST_F(Truncate, KeysBelowThePointBecomeAbsent) {
     const std::vector<std::string> seen = keys_of(*it);
     ASSERT_EQ(seen.size(), 10u);
     EXPECT_EQ(seen.front(), key_at(10));
+}
+
+TEST_F(Truncate, AFailedFollowOnRollDoesNotReopenTheTruncatedRangeToWrites) {
+    db_.reset();
+    Options options = make_options(store_, Compression::None, 64u << 10);
+    options.background = BackgroundMode::Inline;
+    options.manifest_edits_per_generation = 1;
+    options.manifest_catalog = std::make_shared<RollFailingCatalog>(store_.catalog());
+    auto opened = DbImpl::open(options, /*require_all_durable=*/true);
+    ASSERT_TRUE(opened.has_value());
+    db_ = std::move(opened->db);
+
+    ASSERT_EQ(db_->truncate_below(Slice::from(key_at(10))), Status::Ok);
+    EXPECT_EQ(db_->put(Slice::from(key_at(3)), Slice::from(std::string("hidden"))), Status::Config);
+    EXPECT_EQ(db_->get(Slice::from(key_at(3))).error(), Status::NotFound);
 }
 
 /// The unflushed memtable is not described by any Version, so it has to be truncated eagerly or a

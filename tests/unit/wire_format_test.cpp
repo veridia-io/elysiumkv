@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -120,6 +121,38 @@ TEST(WireFormat, BlockFramingIsPayloadThenLengthThenCodecThenCrc) {
     const uint32_t expected =
         crc32c(reinterpret_cast<const uint8_t*>(framed.data()), covered);
     EXPECT_EQ(read_u32(framed, covered), expected);
+}
+
+TEST(WireFormat, ManifestLevelsAreBoundedBeforeNarrowing) {
+    VersionEdit added;
+    added.added.push_back(FileMetadata{.level = -1, .file_number = 1});
+    VersionEdit deleted;
+    deleted.deleted.push_back({-1, 1});
+    VersionEdit pointer;
+    pointer.compaction_pointers.emplace_back(-1, "key");
+    for (const VersionEdit* edit : {&added, &deleted, &pointer}) {
+        auto decoded = decode_version_edit(Slice::from(encode_version_edit(*edit)));
+        ASSERT_FALSE(decoded.has_value());
+        EXPECT_EQ(decoded.error(), Status::Corrupt);
+    }
+
+    VersionSnapshot snapshot;
+    snapshot.files.push_back(FileMetadata{.level = -1, .file_number = 1});
+    auto decoded = decode_version_snapshot(Slice::from(encode_version_snapshot(snapshot)));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error(), Status::Corrupt);
+
+    auto content = unframe_block(Slice::from(encode_version_edit(added)), 1u << 20);
+    ASSERT_TRUE(content.has_value());
+    const std::array<uint8_t, 5> level_2_31 = {0x80, 0x80, 0x80, 0x80, 0x08};
+    content->erase(content->begin() + 3, content->begin() + 13);
+    content->insert(content->begin() + 3, level_2_31.begin(), level_2_31.end());
+    std::string framed;
+    ASSERT_EQ(frame_block(Slice(content->data(), content->size()), Compression::None, framed),
+              Status::Ok);
+    auto decoded_edit = decode_version_edit(Slice::from(framed));
+    ASSERT_FALSE(decoded_edit.has_value());
+    EXPECT_EQ(decoded_edit.error(), Status::Corrupt);
 }
 
 TEST(WireFormat, ABlockThatCompressionDoesNotShrinkIsStoredRawWithCodecNone) {
