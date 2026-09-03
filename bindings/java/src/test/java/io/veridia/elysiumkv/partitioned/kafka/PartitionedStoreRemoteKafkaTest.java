@@ -91,7 +91,9 @@ class PartitionedStoreRemoteKafkaTest {
      *
      * <p>The transient tier is bounded by <em>capacity</em> rather than age, for the reason the
      * durability fixture gives: capacity makes migration a function of how much was written rather
-     * than of how long the test slept.
+     * than of how long the test slept. L0 holds enough files to avoid compacting the fixture into
+     * one object larger than the tier, which capacity eviction would move whole and leave nothing
+     * for the wipe to destroy.
      */
     private ElysiumKVOptions optionsFor(int partition) {
         try {
@@ -116,9 +118,9 @@ class PartitionedStoreRemoteKafkaTest {
                     .memtableBytes(8 * 1024)
                     .blockBytes(1024)
                     .paranoidChecks(true)
-                    .addTier(local, Durability.TRANSIENT, 3_600_000L, 6 * 1024, 7_200_000L)
+                    .addTier(local, Durability.TRANSIENT, 3_600_000L, 16 * 1024, 7_200_000L)
                     .addTier(cold, Durability.DURABLE, 0, 0, 0)
-                    .level(0, Compression.NONE, 0, 4, 8, 12, 0)
+                    .level(0, Compression.NONE, 0, 64, 96, 128, 0)
                     .level(1, Compression.NONE, 0, 0, 0, 0, 0));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
