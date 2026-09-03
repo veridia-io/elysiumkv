@@ -20,6 +20,7 @@ namespace elysiumkv {
 struct ProviderRegistry {
     std::map<std::string, std::shared_ptr<EncryptionProvider>> providers;
     std::string primary;
+    bool accept_plaintext = false;
 
     EncryptionProvider* find(const std::string& id) const {
         const auto found = providers.find(id);

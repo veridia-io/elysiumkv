@@ -1094,6 +1094,14 @@ void JNICALL options_set_encryption_rewrite_to_primary(JNIEnv* env, jclass, jlon
     });
 }
 
+void JNICALL options_set_encryption_accept_plaintext(JNIEnv* env, jclass, jlong options,
+                                                     jboolean enabled) {
+    guard_void(env, [&] {
+        check(env, elysiumkv_options_set_encryption_accept_plaintext(
+                       as_options(options), enabled == JNI_TRUE));
+    });
+}
+
 void JNICALL options_set_primary_encryption_provider(JNIEnv* env, jclass, jlong options,
                                                      jstring id) {
     guard_void(env, [&] {
@@ -1441,6 +1449,8 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(options_set_geometric_levels)},
     {const_cast<char*>("optionsSetEncryptionRewriteToPrimary"), const_cast<char*>("(JZ)V"),
      reinterpret_cast<void*>(options_set_encryption_rewrite_to_primary)},
+    {const_cast<char*>("optionsSetEncryptionAcceptPlaintext"), const_cast<char*>("(JZ)V"),
+     reinterpret_cast<void*>(options_set_encryption_accept_plaintext)},
     {const_cast<char*>("optionsSetPrimaryEncryptionProvider"),
      const_cast<char*>("(JLjava/lang/String;)V"),
      reinterpret_cast<void*>(options_set_primary_encryption_provider)},

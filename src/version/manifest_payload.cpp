@@ -183,6 +183,11 @@ Result<std::string> ManifestPayload::open(const ProviderRegistry& registry, uint
     }
 
     const std::string id(reinterpret_cast<const char*>(p + kHeaderBytes), provider_len);
+    if (id.empty() && !registry.primary.empty() && !registry.accept_plaintext) {
+        error = "plaintext manifest payload refused while encryption is required; enable "
+                "accept_plaintext only for a one-time migration";
+        return std::unexpected(Status::Config);
+    }
     EncryptionProvider* provider = registry.find(id);
     if (provider == nullptr) {
         // The bytes are intact; what is missing is the configuration that reads them. Reporting

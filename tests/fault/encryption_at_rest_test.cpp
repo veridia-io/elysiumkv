@@ -160,8 +160,8 @@ TEST_F(EncryptionAtRest, TheStoreReopensAndStillReads) {
     }
 }
 
-/// I6. Turning encryption on for a populated store leaves the old files plaintext and writes the
-/// new ones encrypted. Both must read, or enabling the feature is a migration rather than a switch.
+/// Migration mode leaves old files plaintext and writes new ones encrypted. Both must read until
+/// compaction has converged the store and the compatibility option can be removed.
 TEST_F(EncryptionAtRest, PlaintextAndEncryptedFilesCoexist) {
     {
         Options plain = make_options(store_, Compression::None, 64u << 10);
@@ -173,7 +173,9 @@ TEST_F(EncryptionAtRest, PlaintextAndEncryptedFilesCoexist) {
         ASSERT_EQ(db->flush(), Status::Ok);
     }
 
-    auto db = std::move(*DB::open(encrypted_options()));
+    Options migrating = encrypted_options();
+    migrating.encryption.accept_plaintext = true;
+    auto db = std::move(*DB::open(migrating));
     for (int i = 100; i < 200; ++i) {
         ASSERT_EQ(db->put(Slice::from(key_at(i)), Slice::from(value_at(i))), Status::Ok);
     }

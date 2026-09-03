@@ -227,6 +227,8 @@ final class Native {
 
     static native void optionsSetPrimaryEncryptionProvider(long options, String id);
 
+    static native void optionsSetEncryptionAcceptPlaintext(long options, boolean enabled);
+
     static native void optionsSetEncryptionRewriteToPrimary(long options, boolean enabled);
 
     static native void optionsSetTtl(long options, long ttlMs);

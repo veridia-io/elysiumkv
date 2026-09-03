@@ -529,6 +529,18 @@ elysiumkv_status elysiumkv_options_set_encryption_rewrite_to_primary(elysiumkv_o
     });
 }
 
+elysiumkv_status elysiumkv_options_set_encryption_accept_plaintext(elysiumkv_options* options,
+                                                                   int enabled) {
+    return guard([&]() -> elysiumkv_status {
+        if (options == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_set_encryption_accept_plaintext: null options");
+        }
+        options->options.encryption.accept_plaintext = enabled != 0;
+        return ELYSIUMKV_OK;
+    });
+}
+
 elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption_with_static_key(
     elysiumkv_options* options, const char* id, const uint8_t* master_key, size_t master_key_len,
     size_t chunk_bytes) {

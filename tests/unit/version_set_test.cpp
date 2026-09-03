@@ -2,6 +2,7 @@
 
 #include "fault/fault_injecting_manifest_file_system.hpp"
 #include "support/temp_dir.hpp"
+#include "support/test_encryption.hpp"
 #include "elysiumkv/disk_manifest_catalog.hpp"
 
 #include <gtest/gtest.h>
@@ -71,6 +72,26 @@ TEST_F(VersionSetTest, AnEmptyStoreHasNoPointer) {
     ASSERT_EQ(versions->create(), Status::Ok);
     EXPECT_EQ(versions->generation(), 1u);
     EXPECT_TRUE(versions->current()->all_files().empty());
+}
+
+TEST_F(VersionSetTest, StrictEncryptionRefusesPlaintextFileMetadata) {
+    ProviderRegistry compatibility = passthrough_registry();
+    compatibility.providers["gcm"] = test::make_test_provider();
+    compatibility.primary = "gcm";
+    compatibility.accept_plaintext = true;
+    {
+        VersionSet writer(*catalog_, 1000, recorder(), compatibility);
+        ASSERT_EQ(writer.create(), Status::Ok);
+        VersionEdit edit;
+        edit.added.push_back(file(0, writer.allocate_file_number()));
+        ASSERT_EQ(writer.apply(std::move(edit)), Status::Ok);
+    }
+
+    ProviderRegistry strict = compatibility;
+    strict.accept_plaintext = false;
+    VersionSet reader(*catalog_, 1000, recorder(), strict);
+    EXPECT_EQ(reader.recover(), Status::Config);
+    EXPECT_NE(reader.last_error().find("plaintext"), std::string::npos) << reader.last_error();
 }
 
 /// A store that never deletes must not accumulate version slots. Every install appends a
