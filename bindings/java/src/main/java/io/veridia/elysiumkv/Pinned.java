@@ -57,7 +57,7 @@ public final class Pinned implements AutoCloseable {
     public void close() {
         if (closed) return;   // idempotent: try-with-resources plus an explicit close is normal
         closed = true;
-        Native.unpin(db.handle(), pin);
+        db.release(pin);
     }
 
     private void check() {

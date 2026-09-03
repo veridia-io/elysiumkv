@@ -576,8 +576,8 @@ jobject JNICALL get(JNIEnv* env, jclass, jlong db, jbyteArray key, jint key_leng
                  static_cast<jobject>(nullptr));
 }
 
-jobject JNICALL get_direct(JNIEnv* env, jclass, jlong db, jobject key, jint key_length,
-                           jlongArray pin_out) {
+jobject JNICALL get_direct(JNIEnv* env, jclass, jlong db, jobject key, jint key_offset,
+                           jint key_length, jlongArray pin_out) {
     return guard(env,
                  [&]() -> jobject {
                      const uint8_t* key_bytes =
@@ -590,7 +590,8 @@ jobject JNICALL get_direct(JNIEnv* env, jclass, jlong db, jobject key, jint key_
                      size_t value_len = 0;
                      uint64_t pin = 0;
                      const elysiumkv_status status =
-                         elysiumkv_get(as_db(db), key_bytes, static_cast<size_t>(key_length), &value,
+                         elysiumkv_get(as_db(db), key_bytes + key_offset,
+                                     static_cast<size_t>(key_length), &value,
                                      &value_len, &pin);
                      if (status == ELYSIUMKV_NOT_FOUND) return nullptr;
                      if (!check(env, status)) return nullptr;
@@ -1361,7 +1362,7 @@ const JNINativeMethod kMethods[] = {
     {const_cast<char*>("get"), const_cast<char*>("(J[BI[J)Ljava/nio/ByteBuffer;"),
      reinterpret_cast<void*>(get)},
     {const_cast<char*>("getDirect"),
-     const_cast<char*>("(JLjava/nio/ByteBuffer;I[J)Ljava/nio/ByteBuffer;"),
+     const_cast<char*>("(JLjava/nio/ByteBuffer;II[J)Ljava/nio/ByteBuffer;"),
      reinterpret_cast<void*>(get_direct)},
     {const_cast<char*>("unpin"), const_cast<char*>("(JJ)V"), reinterpret_cast<void*>(unpin)},
     {const_cast<char*>("getCopy"), const_cast<char*>("(J[BI[B)I"),

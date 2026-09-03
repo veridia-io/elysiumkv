@@ -1,5 +1,7 @@
 package io.veridia.elysiumkv;
 
+import java.util.Objects;
+
 /**
  * Puts and deletes applied as a unit by {@link ElysiumKV#write(WriteBatch)}. The
  * batch is ordered: a delete after a put of the same key wins, as it would if
@@ -33,6 +35,8 @@ public final class WriteBatch implements AutoCloseable {
      * in between.
      */
     public WriteBatch deleteRange(byte[] lower, byte[] upper) {
+        Objects.requireNonNull(lower, "lower");
+        Objects.requireNonNull(upper, "upper");
         Native.batchDeleteRange(handle(), lower, upper);
         return this;
     }

@@ -163,7 +163,8 @@ final class Native {
     static native ByteBuffer get(long db, byte[] key, int keyLength, long[] pinOut);
 
     /** As {@link #get}, for a caller whose key is already off-heap. */
-    static native ByteBuffer getDirect(long db, ByteBuffer key, int keyLength, long[] pinOut);
+    static native ByteBuffer getDirect(long db, ByteBuffer key, int keyOffset, int keyLength,
+                                       long[] pinOut);
 
     static native void unpin(long db, long pin);
 
