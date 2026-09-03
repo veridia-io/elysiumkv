@@ -71,9 +71,14 @@ std::shared_ptr<const Version> load_version(ManifestCatalog& catalog,
     uint64_t expected_seq = 1;
     for (uint64_t seq : *seqs) {
         if (seq != expected_seq) break;
+        const bool tail = seq == seqs->back();
         auto bytes = catalog.get_edit(generation, seq).get();
         if (!bytes) {
-            if (bytes.error() == Status::NotFound) break;
+            if (bytes.error() == Status::NotFound && tail) break;
+            if (bytes.error() == Status::NotFound) {
+                fail("manifest generation " + std::to_string(generation) + " edit " +
+                     std::to_string(seq) + " is missing below the listed tail");
+            }
             fail("could not fetch edit " + std::to_string(seq) + " (" + named(bytes.error()) + ")");
         }
 
@@ -86,10 +91,18 @@ std::shared_ptr<const Version> load_version(ManifestCatalog& catalog,
         if (!plain && (plain.error() == Status::Config || plain.error() == Status::Unsupported)) {
             fail(payload_error("edit", plain.error(), edit_why));
         }
-        if (!plain) break;   // torn write: everything above it is unacknowledged
+        if (!plain) {
+            if (tail && plain.error() == Status::Corrupt) break;
+            fail("manifest generation " + std::to_string(generation) + " edit " +
+                 std::to_string(seq) + " is corrupt below the listed tail");
+        }
 
         auto edit = decode_version_edit(Slice::from(*plain));
-        if (!edit) break;
+        if (!edit) {
+            if (tail && edit.error() == Status::Corrupt) break;
+            fail("manifest generation " + std::to_string(generation) + " edit " +
+                 std::to_string(seq) + " did not decode (" + named(edit.error()) + ")");
+        }
         version = Version::apply(*version, *edit);
         ++expected_seq;
         ++edits_replayed;

@@ -239,6 +239,23 @@ TEST_F(CliVersionLoad, ReplayStopsAtAGapAsRecoveryDoes) {
     EXPECT_EQ(version->all_files().size(), 1u) << "the edit above the gap was replayed";
 }
 
+TEST_F(CliVersionLoad, ACorruptEditBelowTheListedTailIsReported) {
+    auto versions = write_store(passthrough_registry(), 4);
+    const uint64_t generation = versions->generation();
+    const auto path = dir_.path() / "manifest" / "000000000001" / "edit-000000000003";
+    {
+        std::fstream stream(path, std::ios::in | std::ios::out | std::ios::binary);
+        stream.seekp(2);
+        stream.put('\xFF');
+    }
+
+    const std::string message = message_from([&] {
+        size_t edits = 0;
+        load_version(catalog_, open_registry(EncryptionOptions{}), generation, edits);
+    });
+    EXPECT_NE(message.find("generation 1 edit 3"), std::string::npos) << message;
+}
+
 /// `NotFound` is a collected generation; anything else is the store being unreachable or refused.
 /// One sentence for both is what sent an operator looking at their data for a defect in the tool.
 TEST_F(CliVersionLoad, AFetchFailureIsNotReportedAsAMissingSnapshot) {

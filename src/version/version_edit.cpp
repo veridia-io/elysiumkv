@@ -8,6 +8,7 @@ namespace {
 
 constexpr uint32_t kEditFormatVersion = 6;
 constexpr uint32_t kSnapshotFormatVersion = 6;
+constexpr uint64_t kMaxLevels = 1024;
 /// A manifest snapshot for a mature store is a few hundred KB; the bound only
 /// has to keep a corrupt length from becoming an allocation.
 constexpr size_t kMaxManifestBytes = 256u << 20;
@@ -83,7 +84,7 @@ void put_file(std::string& out, const FileMetadata& file) {
 
 bool get_file(const uint8_t*& p, const uint8_t* limit, FileMetadata& file) {
     uint64_t level = 0;
-    if (!get_varint64(p, limit, level)) return false;
+    if (!get_varint64(p, limit, level) || level > kMaxLevels) return false;
     file.level = static_cast<int>(level);
     if (!get_varint64(p, limit, file.file_number)) return false;
     if (!get_string(p, limit, file.store_id)) return false;
@@ -121,7 +122,10 @@ bool get_pointers(const uint8_t*& p, const uint8_t* limit,
     for (uint64_t i = 0; i < count; ++i) {
         uint64_t level = 0;
         std::string key;
-        if (!get_varint64(p, limit, level) || !get_string(p, limit, key)) return false;
+        if (!get_varint64(p, limit, level) || level > kMaxLevels ||
+            !get_string(p, limit, key)) {
+            return false;
+        }
         pointers.emplace_back(static_cast<int>(level), std::move(key));
     }
     return true;
@@ -247,7 +251,8 @@ Result<VersionEdit> decode_version_edit(Slice bytes) {
     for (uint64_t i = 0; i < deleted; ++i) {
         uint64_t level = 0;
         FileRef ref;
-        if (!get_varint64(p, limit, level) || !get_varint64(p, limit, ref.file_number)) {
+        if (!get_varint64(p, limit, level) || level > kMaxLevels ||
+            !get_varint64(p, limit, ref.file_number)) {
             return std::unexpected(Status::Corrupt);
         }
         ref.level = static_cast<int>(level);
