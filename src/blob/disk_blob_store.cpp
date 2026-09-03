@@ -204,8 +204,7 @@ Status DiskBlobStore::do_put(std::string_view name, Slice bytes) {
     if (::link(temp_path.c_str(), final_path.c_str()) != 0) {
         const int err = errno;
         ::unlink(temp_path.c_str());
-        // A collision under a single writer with a monotonic counter means
-        // another process is reusing file numbers: terminal, not retryable.
+        // The caller renumbers rather than retrying bytes under an immutable name.
         return err == EEXIST ? Status::Unusable : Status::Io;
     }
     ::unlink(temp_path.c_str());

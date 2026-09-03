@@ -2371,7 +2371,7 @@ Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice byte
     EncryptionProvider* provider = provider_for(encryption_.primary);
     if (provider == nullptr) return std::unexpected(Status::Config);
 
-    constexpr int kAttempts = 4;
+    constexpr int kAttempts = 16;
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
         const uint64_t file_number = versions_->allocate_file_number();
         const std::string name = sst_object_name(file_number);
@@ -2399,20 +2399,20 @@ Result<DbImpl::WrittenObject> DbImpl::write_new_sst(BlobStore& store, Slice byte
         if (status == Status::Ok) return written;
         if (status != Status::Unusable) return std::unexpected(status);
 
-        // Taken. Step past it and try the next number.
-        versions_->observe_file_number(file_number);
+        // Refresh the global counter from every tier. A collision is a numbering accident, and a
+        // listing jumps past a whole run of crash residue without guessing how long that run is.
+        for (const ListResult& names : list_all_stores()) {
+            if (!names) {
+                return std::unexpected(names.error() == Status::NotFound ? Status::Io
+                                                                         : names.error());
+            }
+            for (const std::string& existing : *names) {
+                if (auto number = sst_file_number(existing)) versions_->observe_file_number(*number);
+            }
+        }
     }
 
-    // Four collisions in a row is not a numbering accident: something is allocating from the
-    // same sequence we are, and the manifest will refuse us shortly. Say so here rather than
-    // writing objects that can never be installed.
-    versions_->mark_fenced();
-    last_error_ = "object names are being taken as fast as they are allocated: another writer "
-                  "owns this store";
-    log_event(LogLevel::Error, LogEvent::Fenced,
-              "fenced: object names are being taken as fast as they are allocated, so another "
-              "writer owns this store");
-    return std::unexpected(Status::Fenced);
+    return std::unexpected(Status::Unusable);
 }
 
 /// See `VersionSet::manifest_advanced`. On a path that has already failed, so its cost is moot.
@@ -2519,19 +2519,10 @@ Status DbImpl::sweep_orphans() {
     return Status::Ok;
 }
 
-/// Nothing else reclaims a manifest generation. The roll writes the new snapshot, installs the
-/// pointer, then deletes the previous generation — so a crash between the last two leaves that
-/// generation's snapshot and up to `manifest_edits_per_generation` edits behind for ever. The
-/// orphan sweep lists blob stores only, and the catalog has no listing operation it is required to
-/// provide. On DynamoDB that is dead items, on S3 dead objects, and neither shows up anywhere.
-///
-/// "Below the live pointer" is a positive statement, unlike an unreferenced object: the pointer
-/// is authoritative about generations, so nothing has to be inferred from absence and the sweep's
-/// usual argument about a concurrent writer does not arise. What does arise is a *reader*, which
-/// may be part way through loading a generation this is about to delete — four round trips against
-/// a manifest that moves — so the same `obsolete_retention` that defers deleting an object on a
-/// reader's behalf defers this too. A reader that loses the race retries and lands on the live
-/// generation; the window is what keeps that rare rather than routine.
+/// Nothing else reclaims a manifest generation. A crash before or after the pointer CAS can leave
+/// one on either side of the live generation, and an address collision may make the next roll jump
+/// over it. CURRENT is authoritative about exactly one live generation; sustained inequality is
+/// what makes every other one collectable after the reader window.
 uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
     const uint64_t live = versions_->generation();
     if (live == 0) return 0;
@@ -2540,7 +2531,7 @@ uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
     std::vector<uint64_t> candidates;
     if (listed) {
         for (const uint64_t generation : *listed) {
-            if (generation < live) candidates.push_back(generation);
+            if (generation != live) candidates.push_back(generation);
         }
     } else if (listed.error() == Status::Unsupported) {
         // The fallback, and its limit stated rather than discovered. Without a listing the only
@@ -2551,6 +2542,14 @@ uint64_t DbImpl::sweep_stale_generations(uint64_t now) {
         for (uint64_t back = 1; back <= kProbeWindow && back <= live; ++back) {
             const uint64_t generation = live - back;
             if (generation == 0) break;
+            if (options_.manifest_catalog->get_snapshot(generation).get().has_value()) {
+                candidates.push_back(generation);
+            }
+        }
+        for (uint64_t ahead = 1;
+             ahead <= kProbeWindow && live <= std::numeric_limits<uint64_t>::max() - ahead;
+             ++ahead) {
+            const uint64_t generation = live + ahead;
             if (options_.manifest_catalog->get_snapshot(generation).get().has_value()) {
                 candidates.push_back(generation);
             }

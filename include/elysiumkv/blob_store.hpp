@@ -23,11 +23,10 @@ using ListResult = Result<std::vector<std::string>>;
 /// Contract, uniform across every implementation:
 ///
 /// - Objects are write-once and immutable. `put` at a name that already
-///   exists never overwrites; it reports `Status::Unusable`, because under a
-///   single writer with a monotonic file-number counter a collision means a
-///   zombie process is reusing numbers. A failed `put` must therefore not be
-///   retried under the same name — allocate a new file number instead; the
-///   partial object becomes an orphan and is collected.
+///   exists never overwrites; it reports `Status::Unusable`. A collision is a numbering accident,
+///   not evidence about writer ownership: allocate a new file number instead. A failed `put` must
+///   likewise not be retried under the same name; the partial object becomes an orphan and is
+///   collected.
 /// - `Status::NotFound` is positive evidence that the named object is
 ///   absent. `Status::Io` means "could not determine" and is never evidence of
 ///   loss (ARCHITECTURE.md "A tier is not a level"). A store never reports whole-store absence.

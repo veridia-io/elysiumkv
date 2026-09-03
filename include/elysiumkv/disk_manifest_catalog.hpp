@@ -11,10 +11,9 @@ namespace elysiumkv {
 /// ARCHITECTURE.md "Ownership is one compare-and-set" — generation objects as files under `manifest/{generation}/`; the
 /// pointer as a temp file atomically renamed over `CURRENT`.
 ///
-/// `token` is a monotonic counter embedded in that file, so the CAS is validated
-/// even though a single-writer filesystem makes contention impossible. The point
-/// is that the *engine* exercises the same code path it will run against a
-/// contended remote catalog.
+/// A dedicated lock file serializes the pointer's compare and replacement across processes.
+/// `token` is a monotonic counter embedded in CURRENT, so a stale expectation still loses after
+/// the process holding the lock exits.
 class DiskManifestCatalog final : public ManifestCatalog {
 public:
     explicit DiskManifestCatalog(std::filesystem::path directory);
