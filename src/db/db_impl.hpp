@@ -314,6 +314,27 @@ private:
     /// `stop_at` or its `stall_age`. The age valve is what turns the exposure
     /// bound into a guarantee, so it is not configurable off.
     Status throttle_writes();
+    /// The rotation valve: one memtable may be in flight, so a write that needs a rotation the
+    /// flush executor cannot accept yet waits here, or is refused.
+    ///
+    /// Evaluated before the entry reaches the memtable, because `Stalled` says the write was not
+    /// stored. It used to be decided after the insert, which left the store holding a key its
+    /// caller had been told was refused.
+    Status await_rotation_slot();
+    /// What a stall has to say once the lock is gone: the log sink must never see an engine mutex
+    /// held, and every exit from the wait is inside the critical section.
+    struct StallLog {
+        Status retried_from = Status::Ok;
+        Status gave_up_with = Status::Ok;
+        uint64_t stalled_ms = 0;
+        bool rejected = false;
+    };
+    void report_stall(const StallLog& log) const;
+    /// The wait itself, shared by the valve and by a forced freeze so that retry and refusal have
+    /// one definition rather than two that can diverge. `mem_mutex_` is held on entry and on
+    /// return; `force` waits for the slot itself, where the valve waits only for a rotation the
+    /// live memtable is already owed.
+    Status await_flush_slot(std::unique_lock<std::mutex>& lock, bool force, StallLog& log);
 
     // --- compaction
     /// One thread drives both migration and compaction (ARCHITECTURE.md "Migration between tiers"): migration off a

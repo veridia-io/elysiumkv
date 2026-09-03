@@ -486,6 +486,8 @@ TEST_F(MaintenanceTest, TheWritePathStallsOnThePublishedFlagAloneAndNotOnTheCloc
     engine().pin_transient_stall_for_test(true);
     EXPECT_EQ(db_->put(Slice::from(key_at(2001)), Slice::from("x")), Status::Stalled)
         << "the write path is not reading the published flag";
+    EXPECT_EQ(db_->get(Slice::from(key_at(2001))).error(), Status::NotFound)
+        << "the tier valve decides before the insert, so a refused write is not stored";
     EXPECT_GT(db_->stats().stall_count, 0u);
 }
 

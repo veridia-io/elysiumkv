@@ -604,6 +604,8 @@ TEST_F(CompactionTest, StopAtAloneRefusesAWriteWithNoMemtablePressure) {
     EXPECT_EQ(db->put(Slice::from(key_at(99)), Slice::from(std::string(64, 'v'))),
               Status::Stalled)
         << "L0 is at stop_at, and that is the only valve that can be closed";
+    EXPECT_EQ(db->get(Slice::from(key_at(99))).error(), Status::NotFound)
+        << "the level valve decides before the insert, so a refused write is not stored";
     EXPECT_GT(db->stats().stall_count, 0u);
 }
 

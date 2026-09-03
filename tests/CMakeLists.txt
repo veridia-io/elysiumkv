@@ -26,6 +26,7 @@ add_executable(elysiumkv_tests
     unit/block_cache_test.cpp
     unit/memory_budget_test.cpp
     unit/read_path_test.cpp
+    unit/read_order_test.cpp
     unit/picker_test.cpp
     unit/compaction_test.cpp
     unit/logger_test.cpp
