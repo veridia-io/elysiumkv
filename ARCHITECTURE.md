@@ -559,6 +559,9 @@ Its shape differs from the object boundary in three ways, each forced:
   manifest payload to authenticate against, and its meaning depends entirely on where it sits: an
   edit replayed at another sequence number applies the wrong change. So `snap#<gen>` and
   `edit#<gen>#<seq>` go into the associated data, along with the whole header.
+- **Store identity is not bound by the current format.** Two stores sharing a provider and key can
+  open a payload substituted at the same generation and address. Adding store identity to the AAD
+  and KMS context requires a format break and belongs in the next format cut.
 - **A payload this process cannot route fails loudly, not quietly.** Replay tolerates an
   undecodable *last* edit — that is what an unacknowledged write looks like — so an unregistered
   provider reported as corruption would stop replay and open on a truncated history. It is `Config`

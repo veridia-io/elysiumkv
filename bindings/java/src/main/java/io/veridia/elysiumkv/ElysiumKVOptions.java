@@ -335,6 +335,15 @@ public final class ElysiumKVOptions implements AutoCloseable {
     }
 
     /**
+     * Permit plaintext manifests and SST metadata while an encrypted primary is configured.
+     * Off by default and intended only for a one-time migration of an existing plaintext store.
+     */
+    public ElysiumKVOptions acceptPlaintextEncryption(boolean enabled) {
+        Native.optionsSetEncryptionAcceptPlaintext(handle(), enabled);
+        return this;
+    }
+
+    /**
      * Rewrite files recorded under any other provider, in the background, until none are left.
      * Off by default.
      *

@@ -221,6 +221,13 @@ Status VersionSet::recover() {
         }
         auto snapshot = decode_version_snapshot(Slice::from(*snapshot_plain));
         if (!snapshot) return snapshot.error();
+        if (!encryption_.primary.empty() && !encryption_.accept_plaintext &&
+            std::ranges::any_of(snapshot->files, [](const FileMetadata& file) {
+                return file.encryption_provider.empty();
+            })) {
+            last_error_ = "plaintext SST metadata refused while encryption is required";
+            return Status::Config;
+        }
 
         std::map<int, std::string> pointers;
         for (const auto& [level, key] : snapshot->compaction_pointers) pointers[level] = key;
@@ -284,6 +291,13 @@ Status VersionSet::recover() {
                 last_error_ = "manifest generation " + std::to_string(generation) + " edit " +
                               std::to_string(seq) + " does not decode below the listed tail";
                 return edit.error() == Status::Unsupported ? Status::Unsupported : Status::Corrupt;
+            }
+            if (!encryption_.primary.empty() && !encryption_.accept_plaintext &&
+                std::ranges::any_of(edit->added, [](const FileMetadata& file) {
+                    return file.encryption_provider.empty();
+                })) {
+                last_error_ = "plaintext SST metadata refused while encryption is required";
+                return Status::Config;
             }
 
             version = Version::apply(*version, *edit);

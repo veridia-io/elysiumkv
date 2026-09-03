@@ -418,6 +418,7 @@ Status DbImpl::recover() {
                                   std::make_shared<NoEncryptionProvider>());
 
     encryption_.primary = options_.encryption.primary_provider;
+    encryption_.accept_plaintext = options_.encryption.accept_plaintext;
     if (!encryption_.providers.contains(encryption_.primary)) {
         last_error_ = "primary encryption provider '" + encryption_.primary + "' is not registered";
         return Status::Config;
@@ -1418,6 +1419,10 @@ EncryptionProvider* DbImpl::provider_for(const std::string& id) const {
 /// through the read and write paths, so there is one path to get right and one to test — which is
 /// what the reserved id is for.
 Result<std::shared_ptr<ObjectCipher>> DbImpl::cipher_for(const FileMetadata& file) const {
+    if (file.encryption_provider.empty() && !encryption_.primary.empty() &&
+        !encryption_.accept_plaintext) {
+        return std::unexpected(Status::Config);
+    }
     EncryptionProvider* provider = provider_for(file.encryption_provider);
     if (provider == nullptr) {
         // The bytes are intact; what is missing is the configuration that can read them. Reporting

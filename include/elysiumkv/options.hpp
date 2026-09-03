@@ -281,6 +281,10 @@ struct Options {
         /// Which registered provider writes new objects. Empty means the passthrough.
         std::string primary_provider;
 
+        /// Permit manifest payloads and SST metadata recorded under the passthrough while a
+        /// non-empty primary is configured. Off by default; intended only for one-time migration.
+        bool accept_plaintext = false;
+
         /// Rewrite files recorded under any *other* provider, in the background, until none are
         /// left. Off by default.
         ///

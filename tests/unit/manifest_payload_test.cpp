@@ -65,6 +65,45 @@ TEST(ManifestPayload, ThePassthroughUsesTheSameFraming) {
     EXPECT_EQ(*opened, plain);
 }
 
+TEST(ManifestPayload, AnEncryptedRegistryRefusesAPassthroughPayload) {
+    const ProviderRegistry writer = passthrough_registry();
+    auto framed = ManifestPayload::seal(writer, 1, "snap#000000000001",
+                                        Slice::from(manifest_like()));
+    ASSERT_TRUE(framed.has_value());
+
+    const ProviderRegistry reader = encrypted();
+    std::string why;
+    auto opened = ManifestPayload::open(reader, 1, "snap#000000000001", Slice::from(*framed), why);
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error(), Status::Config);
+    EXPECT_NE(why.find("plaintext"), std::string::npos) << why;
+}
+
+TEST(ManifestPayload, CompatibilityModeCanOpenAPassthroughPayload) {
+    const ProviderRegistry writer = passthrough_registry();
+    auto framed = ManifestPayload::seal(writer, 1, "snap#000000000001",
+                                        Slice::from(manifest_like()));
+    ASSERT_TRUE(framed.has_value());
+
+    ProviderRegistry reader = encrypted();
+    reader.accept_plaintext = true;
+    std::string why;
+    EXPECT_TRUE(ManifestPayload::open(reader, 1, "snap#000000000001", Slice::from(*framed), why)
+                    .has_value());
+}
+
+TEST(ManifestPayload, SealedPayloadsAreNotBoundToAStoreIdentity) {
+    const ProviderRegistry store_a = encrypted();
+    const ProviderRegistry store_b = encrypted();
+    auto framed = ManifestPayload::seal(store_a, 1, "snap#000000000001",
+                                        Slice::from(manifest_like()));
+    ASSERT_TRUE(framed.has_value());
+
+    std::string why;
+    EXPECT_TRUE(ManifestPayload::open(store_b, 1, "snap#000000000001", Slice::from(*framed), why)
+                    .has_value());
+}
+
 TEST(ManifestPayload, CompressionIsAppliedAndIsOptional) {
     const ProviderRegistry registry = passthrough_registry();
 

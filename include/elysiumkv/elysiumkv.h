@@ -411,6 +411,11 @@ ELYSIUMKV_API elysiumkv_status elysiumkv_options_add_encryption_provider(
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_primary_encryption_provider(
     elysiumkv_options*, const char* id);
 
+/* Permit plaintext manifests and SST metadata while an encrypted primary is configured. Off by
+ * default and intended only for a one-time migration of an existing plaintext store. */
+ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_encryption_accept_plaintext(
+    elysiumkv_options*, int enabled);
+
 /* Rewrite files recorded under any other provider, in the background, until none are left. Off by
  * default.
  *

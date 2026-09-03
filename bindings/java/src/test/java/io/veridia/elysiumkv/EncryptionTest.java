@@ -107,6 +107,32 @@ class EncryptionTest {
     }
 
     @Test
+    void enablingEncryptionRefusesAPlaintextStoreWithoutMigrationMode(@TempDir Path dir)
+            throws IOException {
+        try (TestSupport support = new TestSupport(dir)) {
+            ElysiumKV plain = support.own(ElysiumKV.open(support.options()));
+            plain.put(TestSupport.key(1), TestSupport.bytes("value"));
+            plain.flush();
+            plain.close();
+
+            DirectKeys keys = new DirectKeys();
+            ConfigException refused = assertThrows(
+                    ConfigException.class,
+                    () -> ElysiumKV.open(support.options().encryptWith("java-kms", keys, 0)));
+            assertTrue(refused.getMessage().contains("plaintext"), refused::getMessage);
+
+            ElysiumKV migrating = support.own(ElysiumKV.open(
+                    support.options()
+                            .encryptWith("java-kms", keys, 0)
+                            .acceptPlaintextEncryption(true)));
+            try (Pinned found = migrating.get(TestSupport.key(1))) {
+                assertEquals("value", TestSupport.string(found.toByteArray()));
+            }
+            migrating.close();
+        }
+    }
+
+    @Test
     void repeatedKeyCallbacksStayInsideTheirJniLocalFrame(@TempDir Path dir) throws IOException {
         try (TestSupport support = new TestSupport(dir)) {
             DirectKeys keys = new DirectKeys();

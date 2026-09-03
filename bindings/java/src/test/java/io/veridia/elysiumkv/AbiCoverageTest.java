@@ -193,6 +193,10 @@ class AbiCoverageTest {
             encrypted.rewriteToPrimaryEncryptionProvider(false);
             exercise("optionsSetEncryptionRewriteToPrimary");
 
+            encrypted.acceptPlaintextEncryption(true);
+            encrypted.acceptPlaintextEncryption(false);
+            exercise("optionsSetEncryptionAcceptPlaintext");
+
             support.options().geometricLevels(64L << 10, 10, 4);
             exercise("optionsSetGeometricLevels");
 
