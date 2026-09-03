@@ -495,18 +495,22 @@ elysiumkv_status elysiumkv_options_add_aes256_gcm_encryption(
     elysiumkv_options* options, const char* id, const elysiumkv_encryption_key_manager* keys,
     size_t chunk_bytes) {
     return guard([&]() -> elysiumkv_status {
+        if (keys == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption: incomplete key manager");
+        }
+        auto manager = std::make_shared<VtableEncryptionKeyManager>(*keys);
+        if (keys->new_data_key == nullptr || keys->open_data_key == nullptr) {
+            return fail(Status::Config,
+                        "elysiumkv_options_add_aes256_gcm_encryption: incomplete key manager");
+        }
         if (const elysiumkv_status bad =
                 check_provider_id(options, id, "elysiumkv_options_add_aes256_gcm_encryption");
             bad != ELYSIUMKV_OK) {
             return bad;
         }
-        if (keys == nullptr || keys->new_data_key == nullptr || keys->open_data_key == nullptr) {
-            return fail(Status::Config,
-                        "elysiumkv_options_add_aes256_gcm_encryption: incomplete key manager");
-        }
 
-        auto provider = Aes256GcmEncryptionProvider::open(
-            std::make_shared<VtableEncryptionKeyManager>(*keys), chunk_bytes);
+        auto provider = Aes256GcmEncryptionProvider::open(std::move(manager), chunk_bytes);
         if (!provider) return fail(provider.error(), "encryption provider configuration rejected");
         options->options.encryption.providers[id] = *provider;
         return ELYSIUMKV_OK;
@@ -853,7 +857,21 @@ elysiumkv_status elysiumkv_options_configure_jitter(elysiumkv_options* options, 
 elysiumkv_status elysiumkv_options_set_logger(elysiumkv_options* options,
                                         const elysiumkv_logger_vtable* vtable, int min_level) {
     return guard([&]() -> elysiumkv_status {
-        if (options == nullptr) return fail(Status::Config, "elysiumkv_options_set_logger: null options");
+        struct Holder {
+            ~Holder() {
+                if (vtable.destroy != nullptr) vtable.destroy(vtable.context);
+            }
+            Logger logger;
+            elysiumkv_logger_vtable vtable;
+        };
+        std::shared_ptr<Holder> holder;
+        if (vtable != nullptr && vtable->write != nullptr) {
+            holder = std::make_shared<Holder>();
+            holder->vtable = *vtable;
+        }
+        if (options == nullptr) {
+            return fail(Status::Config, "elysiumkv_options_set_logger: null options");
+        }
         if (min_level < static_cast<int>(LogLevel::Debug) ||
             min_level > static_cast<int>(LogLevel::Off)) {
             return fail(Status::Config, "elysiumkv_options_set_logger: min_level is out of range");
@@ -867,12 +885,6 @@ elysiumkv_status elysiumkv_options_set_logger(elysiumkv_options* options,
         // A trampoline rather than a cast between function pointer types: the enums are `int`
         // underneath, but calling through a differently-typed pointer is undefined even so. The
         // holder owns the caller's vtable by value, so the caller may let theirs go out of scope.
-        struct Holder {
-            Logger logger;
-            elysiumkv_logger_vtable vtable;
-        };
-        auto holder = std::make_shared<Holder>();
-        holder->vtable = *vtable;
         holder->logger.context = holder.get();
         holder->logger.write = [](void* context, LogLevel level, LogEvent event,
                                   const char* message, size_t len) {
@@ -1271,8 +1283,11 @@ elysiumkv_status elysiumkv_open_read_only(const elysiumkv_options* options, elys
 
         auto opened = DB::open_read_only(read_options);
         if (!opened) {
-            return fail(opened.error(), std::string("read-only open failed: ") +
-                                            std::string(status_name(opened.error())));
+            std::string why = std::string("read-only open failed: ") +
+                              std::string(status_name(opened.error()));
+            const std::string_view detail = elysiumkv::last_error();
+            if (!detail.empty()) why += ": " + std::string(detail);
+            return fail(opened.error(), std::move(why));
         }
         handle->reader = std::move(*opened);
         *out = handle.release();
@@ -1283,7 +1298,12 @@ elysiumkv_status elysiumkv_open_read_only(const elysiumkv_options* options, elys
 elysiumkv_status elysiumkv_refresh(elysiumkv_db* db) {
     return guard([&]() -> elysiumkv_status {
         if (db == nullptr) return fail(Status::Config, "elysiumkv_refresh: null db");
-        return to_c(db->reads()->refresh());
+        const Status status = db->reads()->refresh();
+        if (status != Status::Ok) {
+            return fail(status, std::string("elysiumkv_refresh: ") +
+                                    std::string(status_name(status)));
+        }
+        return ELYSIUMKV_OK;
     });
 }
 
@@ -1744,8 +1764,15 @@ elysiumkv_status elysiumkv_iter_next_batch(elysiumkv_iter* iter, uint8_t* buf, s
 }
 
 elysiumkv_status elysiumkv_iter_status(elysiumkv_iter* iter) {
-    if (iter == nullptr || iter->iterator == nullptr) return ELYSIUMKV_CONFIG;
-    return to_c(iter->iterator->status());
+    if (iter == nullptr || iter->iterator == nullptr) {
+        return fail(Status::Config, "elysiumkv_iter_status: null or detached iterator");
+    }
+    const Status status = iter->iterator->status();
+    if (status != Status::Ok) {
+        return fail(status, std::string("elysiumkv_iter_status: ") +
+                                std::string(status_name(status)));
+    }
+    return ELYSIUMKV_OK;
 }
 
 void elysiumkv_iter_destroy(elysiumkv_iter* iter) {
@@ -1934,7 +1961,11 @@ elysiumkv_status elysiumkv_set_watermark(elysiumkv_db* db, uint64_t position) {
         if (status == Status::Config) {
             return fail(status, "elysiumkv_set_watermark: watermarks must be non-decreasing");
         }
-        return to_c(status);
+        if (status != Status::Ok) {
+            return fail(status, std::string("elysiumkv_set_watermark: ") +
+                                    std::string(status_name(status)));
+        }
+        return ELYSIUMKV_OK;
     });
 }
 

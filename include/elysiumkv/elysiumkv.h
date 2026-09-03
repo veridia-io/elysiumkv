@@ -251,6 +251,8 @@ typedef enum {
 typedef struct {
     void* context;
     void (*write)(void* context, int level, int event, const char* message, size_t len);
+    /* Called once after registration, including replacement or failure. May be NULL. */
+    void (*destroy)(void* context);
 } elysiumkv_logger_vtable;
 
 ELYSIUMKV_API elysiumkv_status elysiumkv_options_set_logger(elysiumkv_options*,
@@ -327,7 +329,7 @@ typedef struct {
     /* The plaintext key for an envelope this manager produced. */
     elysiumkv_status (*open_data_key)(void* context, const uint8_t* envelope, size_t envelope_len,
                                       uint8_t* key_out, size_t key_cap);
-    /* Called once when the options are destroyed. May be NULL. */
+    /* Called once after registration, including when registration fails. May be NULL. */
     void (*destroy)(void* context);
 } elysiumkv_encryption_key_manager;
 

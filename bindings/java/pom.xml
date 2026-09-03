@@ -76,6 +76,7 @@
          is a refusal to start, so this cannot be set unconditionally while
          Java 11 is the declared floor. -->
     <elysiumkv.surefire.args></elysiumkv.surefire.args>
+    <elysiumkv.check.jni></elysiumkv.check.jni>
 
     <junit.version>5.13.4</junit.version>
     <!-- Test scope only. Nothing this module ships imports Kafka, and that is the point of the
@@ -318,7 +319,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
         <configuration>
-          <argLine>${elysiumkv.surefire.args}</argLine>
+          <argLine>${elysiumkv.surefire.args} ${elysiumkv.check.jni}</argLine>
           <!-- Iterators and pins are single-threaded; so is the suite. -->
           <forkCount>1</forkCount>
           <reuseForks>true</reuseForks>

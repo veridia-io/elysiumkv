@@ -174,8 +174,7 @@ class AbiCoverageTest {
             exercise("optionsConfigureCompaction");
             exercise("optionsConfigureJitter");
             exercise("rangeIsErased");
-            // Likewise — prepare() sets it whether or not a sink was configured, so the null path
-            // is what every other test here already crosses. LoggerTest covers a real one.
+            // LoggerTest covers a real sink and the null path.
             exercise("optionsSetLogger");
 
             // Called for real, not marked. A wrong JNI signature on these compiles and links,

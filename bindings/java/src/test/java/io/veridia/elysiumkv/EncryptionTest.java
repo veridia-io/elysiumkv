@@ -106,6 +106,22 @@ class EncryptionTest {
         }
     }
 
+    @Test
+    void repeatedKeyCallbacksStayInsideTheirJniLocalFrame(@TempDir Path dir) throws IOException {
+        try (TestSupport support = new TestSupport(dir)) {
+            DirectKeys keys = new DirectKeys();
+            ElysiumKV db = PinLeakExtension.watch(support.own(
+                    ElysiumKV.open(support.options().encryptWith("java-kms", keys, 0))));
+
+            for (int i = 0; i < 64; ++i) {
+                db.put(TestSupport.key(i), TestSupport.bytes("v"));
+                db.flush();
+            }
+            assertTrue(keys.issued.get() >= 64, "the checked-JNI gate needs repeated callbacks");
+            db.close();
+        }
+    }
+
     private static final String MASTER_HEX =
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
