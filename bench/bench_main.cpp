@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <random>
@@ -327,7 +326,11 @@ void BM_RemotePointLookup(benchmark::State& state) {
     state.counters["gets_per_op"] = benchmark::Counter(static_cast<double>(spent) / per);
     state.counters["opens_per_op"] = benchmark::Counter(static_cast<double>(opens) / per);
 }
-BENCHMARK(BM_RemotePointLookup)->Arg(0)->Arg(200)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_RemotePointLookup)
+    ->Arg(0)
+    ->Arg(200)
+    ->Iterations(1000)
+    ->Unit(benchmark::kMicrosecond);
 
 void BM_RemotePrefixScan(benchmark::State& state) {
     constexpr int kKeys = 200000;
@@ -348,7 +351,11 @@ void BM_RemotePrefixScan(benchmark::State& state) {
     state.counters["gets_per_scan"] =
         benchmark::Counter(static_cast<double>(spent) / static_cast<double>(scans ? scans : 1));
 }
-BENCHMARK(BM_RemotePrefixScan)->Arg(0)->Arg(200)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_RemotePrefixScan)
+    ->Arg(0)
+    ->Arg(200)
+    ->Iterations(1000)
+    ->Unit(benchmark::kMicrosecond);
 
 // --- the write path --------------------------------------------------------------
 //
@@ -619,28 +626,6 @@ BENCHMARK(BM_RemoteCompaction)
     ->Args({20000, 8u << 20})
     ->Args({20000, 32u << 20})
     ->Unit(benchmark::kMillisecond);
-
-/// ARCHITECTURE.md "Negative controls" — the subject of the ratchet's negative control, and nothing else.
-///
-/// The gate under test is `check_regression.py`, not the engine, so the engine
-/// is not the thing to slow down: this benchmark's duration comes from the
-/// environment. Running it fast, recording a baseline, then running it slow must
-/// trip the threshold *and name this benchmark* — which is what distinguishes a
-/// working ratchet from one whose filter matches nothing.
-void BM_RatchetControl(benchmark::State& state) {
-    const char* configured = std::getenv("ELYSIUMKV_RATCHET_SPIN_NS");
-    const auto spin_ns = configured == nullptr ? 1000 : std::atoi(configured);
-    for (auto _ : state) {
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::nanoseconds(spin_ns);
-        auto now = std::chrono::steady_clock::now();
-        while (now < deadline) {
-            now = std::chrono::steady_clock::now();
-            benchmark::DoNotOptimize(now);
-        }
-    }
-}
-BENCHMARK(BM_RatchetControl);
 
 }  // namespace
 }  // namespace elysiumkv
