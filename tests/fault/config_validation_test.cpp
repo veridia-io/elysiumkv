@@ -62,6 +62,14 @@ TEST_F(ConfigValidationTest, ATransientLastTierIsRejected) {
     EXPECT_EQ(open_error(options), Status::Config);
 }
 
+TEST_F(ConfigValidationTest, AnEnabledOrphanSweepRequiresNonZeroRetention) {
+    Options options = base();
+    options.orphan_sweep_interval = Duration(1);
+    options.orphan_retention = Duration(0);
+    EXPECT_EQ(open_error(options), Status::Config);
+    EXPECT_NE(std::string(last_error()).find("orphan_retention"), std::string::npos);
+}
+
 // ARCHITECTURE.md "A tier is not a level" — placement must be monotone, or files thrash between stores paying a
 // copy each way.
 TEST_F(ConfigValidationTest, BoundsMustBeNonDecreasingAcrossTiers) {

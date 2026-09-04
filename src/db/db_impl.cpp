@@ -334,6 +334,10 @@ Result<OpenResult> DbImpl::open(const Options& options, bool require_all_durable
                       "by being compacted into L1, so with one level it can never leave");
     }
 
+    if (options.orphan_sweep_interval.has_value() && options.orphan_retention.count() == 0) {
+        return refuse("orphan_retention must be non-zero when orphan_sweep_interval is enabled");
+    }
+
     // The orphan window must be at least the reader window. An obsolete object is, to the
     // sweep, indistinguishable from an orphan — the edit that removed it is committed, so the
     // current manifest does not reference it, which is the sweep's own test. The pending queue keeps

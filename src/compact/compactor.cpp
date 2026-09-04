@@ -104,6 +104,10 @@ void DbImpl::note_maintenance_state_changed() { invalidate_maintenance(); }
 /// files leave the version in one edit and reach the object store through the ordinary
 /// obsolete-object path, which is what keeps an open reader safe from them.
 bool DbImpl::reclaim_dead_files(Status& status) {
+    std::lock_guard<std::mutex> work(compaction_work_mutex_);
+    ELYSIUMKV_LOCK_AUDIT();
+    ELYSIUMKV_CLAIM_DELETING_TASK();
+
     auto version = versions_->current();
     std::vector<FileMetadata> dead = version->files_entirely_truncated();
     // Files a newer range tombstone covers whole go the same way: the bytes are already unreadable,
@@ -188,12 +192,23 @@ void DbImpl::background_compaction_loop() {
 
         // ARCHITECTURE.md "Migration between tiers" — migrations off a Transient tier preempt everything, including
         // compaction. Draining them first is that rule.
-        while (run_one_migration(status)) {
+        bool migration_failure_preempts = true;
+        while (run_one_migration(status, &migration_failure_preempts)) {
             did_work = true;
+        }
+        // A durable-to-durable move is a cost optimisation. Its outage must not stop L0 from
+        // draining; a transient rescue remains load-bearing and still preempts the pass.
+        if (status != Status::Ok && is_retryable(status) && !migration_failure_preempts) {
+            background_failures_.fetch_add(1, std::memory_order_relaxed);
+            status = Status::Ok;
         }
         while (status == Status::Ok && run_one_compaction(status)) {
             did_work = true;
-            while (run_one_migration(status)) {
+            while (run_one_migration(status, &migration_failure_preempts)) {
+            }
+            if (status != Status::Ok && is_retryable(status) && !migration_failure_preempts) {
+                background_failures_.fetch_add(1, std::memory_order_relaxed);
+                status = Status::Ok;
             }
         }
         // Last, and deliberately so. A rotation that finishes a minute later costs nothing;
@@ -363,6 +378,7 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         // tiers is the lowest priority and starvable (ARCHITECTURE.md "Migration between tiers"),
         // and the older file leaves under ordinary L0 pressure anyway.
         const FileMetadata* seed = nullptr;
+        bool must_leave = false;
         for (const FileMetadata& file : version->files_at(0)) {
             const int tier = tiers_.tier_of_store(file.store_id);
             const bool misplaced = tier >= 0 &&
@@ -370,10 +386,10 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
                                              now_ms()) > tier;
             const bool stale_encryption = options_.encryption.rewrite_to_primary &&
                                           file.encryption_provider != encryption_.primary;
-            if (!misplaced && !stale_encryption) continue;
+            if (misplaced || stale_encryption) must_leave = true;
             if (seed == nullptr || file.file_number < seed->file_number) seed = &file;
         }
-        if (seed == nullptr) return false;
+        if (!must_leave || seed == nullptr) return false;
 
         for (const FileMetadata& other : version->overlapping_inclusive(
                  0, Slice::from(seed->effective_smallest()),
@@ -403,7 +419,7 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
     return status == Status::Ok;
 }
 
-bool DbImpl::run_one_migration(Status& status) {
+bool DbImpl::run_one_migration(Status& status, bool* failure_preempts) {
     if (unusable_.load()) {
         status = Status::Unusable;
         return false;
@@ -444,6 +460,9 @@ bool DbImpl::run_one_migration(Status& status) {
 
     status = run_migration(*migration, deferred);
     compaction_finished_.notify_all();
+    if (failure_preempts != nullptr && status != Status::Ok) {
+        *failure_preempts = migration->leaves_transient;
+    }
     return status == Status::Ok;
 }
 
@@ -696,14 +715,20 @@ Status DbImpl::compact_until_quiet() {
         // property only the threaded build had.
         if (reclaim_dead_files(status)) worked = true;
         if (status != Status::Ok) return status;
-        while (run_one_migration(status)) worked = true;
-        if (status != Status::Ok) return status;
+        bool migration_failure_preempts = true;
+        while (run_one_migration(status, &migration_failure_preempts)) worked = true;
+        const Status migration_failure = status;
+        if (status != Status::Ok) {
+            if (!is_retryable(status) || migration_failure_preempts) return status;
+            status = Status::Ok;
+        }
         if (run_one_compaction(status)) worked = true;
         if (status != Status::Ok) return status;
         // Inline mode has to run it too, or a rotation would be a property only the threaded
         // build converged — the same argument `reclaim_dead_files` makes above.
         if (run_one_reencryption(status)) worked = true;
         if (status != Status::Ok) return status;
+        if (migration_failure != Status::Ok) return migration_failure;
         if (!worked) break;
     }
     return status;

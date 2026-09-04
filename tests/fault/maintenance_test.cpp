@@ -271,6 +271,66 @@ TEST_F(MaintenanceTest, AQuietStoreMigratesBetweenDurableTiersOnAge) {
     EXPECT_TRUE(settle([&] { return files_on(0) == 0 && files_on(1) > 0; }));
 }
 
+TEST_F(MaintenanceTest, AFailingDurableMigrationDoesNotBlockCompaction) {
+    auto failing_cold = std::make_shared<FaultInjectingBlobStore>(store_.store(1));
+    Options options = make_options(store_, Compression::None, 8u << 10);
+    options.tiers = {
+        Tier{.store = store_.store(0),
+             .durability = Durability::Durable,
+             .max_age = kMaxAge},
+        Tier{.store = failing_cold, .durability = Durability::Durable},
+    };
+    options = base(std::move(options));
+    open(std::move(options));
+
+    write(500);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+    const uint64_t before = db_->stats().compactions;
+
+    engine().suppress_maintenance_wakes_for_test(true);
+    write(1000, std::string(64, 'n'), 1000);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_GT(engine().current_version()->file_count(0), 0u);
+    failing_cold->set_unreachable(true);
+    advance(Duration(300'000));
+    engine().suppress_maintenance_wakes_for_test(false);
+
+    EXPECT_TRUE(settle([&] { return db_->stats().background_failures > 0u; }))
+        << "the durable migration fault did not engage";
+    EXPECT_TRUE(settle([&] { return db_->stats().compactions > before; }))
+        << "a retryable durable migration failure starved L0 compaction";
+}
+
+TEST_F(MaintenanceTest, TtlReclaimWaitsForAnOperatorCompaction) {
+    auto slow = std::make_shared<FaultInjectingBlobStore>(store_.store(0));
+    slow->set_latency(std::chrono::milliseconds(20));
+    Options options = make_options(store_, Compression::None, 8u << 10);
+    options.tiers = {Tier{.store = slow, .durability = Durability::Durable}};
+    options.ttl = Duration(100);
+    options = base(std::move(options));
+    open(std::move(options));
+
+    engine().suppress_maintenance_wakes_for_test(true);
+    write(1000);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    const uint64_t reads_before = slow->call_count(FaultInjectingBlobStore::Op::Get);
+
+    Status compacted = Status::Ok;
+    std::thread operator_compaction([&] { compacted = db_->compact_level(0); });
+    const bool began = settle([&] {
+        return slow->call_count(FaultInjectingBlobStore::Op::Get) > reads_before;
+    });
+
+    advance(Duration(1'000));
+    engine().suppress_maintenance_wakes_for_test(false);
+    operator_compaction.join();
+    ASSERT_TRUE(began) << "the operator compaction never began reading its input";
+    ASSERT_EQ(compacted, Status::Ok);
+    EXPECT_TRUE(settle([&] { return engine().current_version()->all_files().empty(); }))
+        << "the racing compaction reintroduced files that TTL reclamation had removed";
+}
+
 /* Rescue completes end to end with a compaction deliberately in flight.
  *
  * The exposure window has four terms and the third — queueing behind an in-flight compaction — is
