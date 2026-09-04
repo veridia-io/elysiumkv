@@ -10,7 +10,7 @@ package io.veridia.elysiumkv;
  *
  * <pre>{@code
  * try (S3BlobStore cold = S3BlobStore.builder("my-bucket").prefix("cold").open()) {
- *     options.addTier(cold, Durability.DURABLE, 0, 0, 0, 0);
+ *     options.addTier(cold, Durability.DURABLE, 0, 0, 0);
  * }
  * }</pre>
  *

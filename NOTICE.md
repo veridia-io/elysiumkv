@@ -20,6 +20,12 @@ Java jar, which embeds the native library as a resource.
 - LZ4 Library, Copyright (c) 2011-2020, Yann Collet. All rights reserved.
 - BSD-2-Clause.
 
+### OpenSSL
+
+- Upstream: https://www.openssl.org/
+- Copyright OpenSSL contributors.
+- Apache License 2.0.
+
 ### AWS SDK for C++ — optional
 
 Present only in builds configured with `-DELYSIUMKV_BUILD_AWS=ON`, which is off by default. A
@@ -31,7 +37,8 @@ default build links none of it.
 The full license texts as vendored for the build are installed by vcpkg under
 `build/<preset>/vcpkg_installed/<triplet>/share/<port>/copyright`. If you redistribute a build of
 this project, include the applicable texts — BSD-2-Clause and BSD-3-Clause both require the
-copyright notice and disclaimer to accompany binary redistributions.
+copyright notice and disclaimer to accompany binary redistributions, and OpenSSL is distributed
+under Apache License 2.0.
 
 ## Algorithms implemented from published specifications
 

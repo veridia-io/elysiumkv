@@ -68,7 +68,7 @@ struct Footer {
     /// not need. A checksum every file lacks is a checksum.
     uint32_t crc = 0;
 
-    /// kFooterLengthV1 or kFooterLengthV2 bytes, depending on `format_version`.
+    /// The footer length corresponding to `format_version`.
     std::string encode() const;
 
     /// `trailer` is the last kTrailerLength bytes of the file. Reports the footer width for that

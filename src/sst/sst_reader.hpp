@@ -17,7 +17,8 @@
 namespace elysiumkv {
 
 struct SstReaderOptions {
-    /// Bounds `uncompressed_len` at `max(16 * block_bytes, 1 MiB)` (ARCHITECTURE.md "Inside an SST").
+    /// Bounds data-block `uncompressed_len` at `max(16 * block_bytes,
+    /// kMaxEntryBlockBytes + block_bytes)` (ARCHITECTURE.md "Inside an SST").
     size_t block_bytes = 4096;
     /// Block-cache key component; also what `evict_file` addresses.
     uint64_t file_number = 0;

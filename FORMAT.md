@@ -11,9 +11,11 @@ Current versions:
 
 | Format | Version | Constant |
 | --- | --- | --- |
-| SST file | 1 | `Footer::kFormatVersion1` |
+| SST file written | 3 | `Footer::kFormatVersion3` |
+| SST file readable | 1–3 | `Footer::kFormatVersion1` … `kFormatVersion3` |
 | Manifest edit | 6 | `kEditFormatVersion` |
 | Manifest snapshot | 6 | `kSnapshotFormatVersion` |
+| Manifest payload envelope | 1 | `kHeaderVersion` |
 | Stats buffer | 1 | `kStatsFormatVersion` |
 
 Conventions throughout: **little-endian** fixed-width integers; `varint32`/`varint64` are
@@ -132,8 +134,8 @@ performance structure, never an authority on absence.
 data block*         framed (§2), keys ascending across blocks
 filter block        framed, compression_type = 0
 index block         framed
-range delete block  framed, present only in format_version 2
-footer              44 bytes (v1) or 56 bytes (v2), exactly at end of file
+range delete block  framed, present from format_version 2 when the file carries ranges
+footer              44 bytes (v1), 56 bytes (v2), or 60 bytes (v3), exactly at end of file
 ```
 
 The footer, at file offset `file_len - footer_length`:
@@ -145,8 +147,8 @@ The footer, at file offset `file_len - footer_length`:
 | 12 | `index_handle.offset` | uint64 | |
 | 20 | `index_handle.length` | uint32 | framed length |
 | 24 | `num_entries` | uint64 | |
-| 32 | `range_del_handle.offset` | uint64 | **v2 only** |
-| 40 | `range_del_handle.length` | uint32 | **v2 only**, framed length |
+| 32 | `range_del_handle.offset` | uint64 | **v2 and later** |
+| 40 | `range_del_handle.length` | uint32 | **v2 and later**, framed length |
 | 44 | `crc32c` | uint32 | **v3 only**, over footer bytes `[0, 44)` |
 | 32 / 44 / 48 | `format_version` | uint32 | 1, 2 or 3 |
 | 36 / 48 / 52 | `magic` | uint64 | `0x454C595349554D31` |
@@ -175,11 +177,8 @@ build; the remedy is a different binary rather than a restore.
 
 ### Range delete block
 
-Present only when the file carries range tombstones, and its presence is exactly what makes the file
-`format_version = 2`. **The version is per file, not per writer**: a file nobody range-deleted from
-is still written as v1, so adding this feature reformats nothing, and a reader that predates range
-tombstones keeps reading every such file while refusing exactly the files whose keys it would
-otherwise report as present.
+Present from v2 onward when the file carries range tombstones. Every current writer emits v3, with a
+zero handle when there are none; v2 used the presence of this block to select the version.
 
 The block is an ordinary §3 block. Each entry is one half-open range `[lower, upper)`: the **key is
 `lower`**, the **value is `upper`**, and `value_type` is `1` (`Put`) — not `Delete`, because the type
@@ -203,9 +202,27 @@ in order to discover the version.
 The magic spells `ELYSIUM1` in ASCII. It is frozen — changing it makes every existing file fail the
 check before any other field is examined.
 
-## 6. Manifest records
+## 6. Manifest payloads and records
 
-Both record types are framed with §2's framing, then the content below.
+Every encoded snapshot or edit is compressed, sealed, and then handed to the catalog as opaque
+bytes. The outer envelope begins with this 32-byte little-endian header:
+
+| Offset | Field | Type | Notes |
+| --- | --- | --- | --- |
+| 0 | `magic` | uint32 | bytes `45 4b 56 02` (`EKV\x02`) |
+| 4 | `header_version` | uint16 | 1 |
+| 6 | `provider_len` | uint16 | bytes in `provider` |
+| 8 | `metadata_len` | uint32 | bytes in provider metadata |
+| 12 | `codec` | uint32 | 0 = none, 1 = zstd |
+| 16 | `plain_len` | uint64 | before compression |
+| 24 | `packed_len` | uint64 | after compression, before sealing |
+
+The header is followed by `provider ‖ metadata ‖ ciphertext`. Ciphertext is emitted in the
+provider's fixed-size chunks, each with its per-chunk overhead. Every chunk authenticates its chunk
+index and manifest address; chunk zero additionally authenticates the complete header. Catalog
+chunking, where needed, happens outside this envelope.
+
+The plaintext inside that envelope is one of the following §2-framed records.
 
 A **string** is `varint64 length ‖ bytes`. A **file entry** is:
 
@@ -227,21 +244,19 @@ max_write_time_ms  varint64
 watermark_flags    varint64   bit 0 = low present, bit 1 = high present; other values invalid
 watermark_low      varint64   zero when bit 0 is clear
 watermark_high     varint64   zero when bit 1 is clear
-encryption_provider string    reserved; always empty in this version
-encryption_metadata string    reserved; always empty in this version
+encryption_provider string    provider id; empty names the plaintext passthrough
+encryption_metadata string    opaque metadata produced by that provider
 ```
 
-The two **encryption** fields are reserved and written empty. They will name the provider that
-encrypted the file's bytes and carry whatever that provider needs to reopen them; nothing populates
-them yet. They are present now because adding a field costs a version bump — and a rebuild of every
-store from its changelog — once a version has shipped, while a version that has not shipped can
-still absorb one for free. A decoder must read and discard them, not skip them: they occupy
-positions, and the fields after them are found by reading through.
+The two **encryption** fields identify the provider that sealed the SST and carry the opaque metadata
+needed to reopen it. Migration copies both unchanged with the ciphertext. A decoder must consume
+them even when the provider id is empty; they occupy positions in the record.
 
 The **range tombstone span** is the interval this file's range deletes cover, and it is deliberately
 not bounded by `smallest_key` and `largest_key`: a file can delete a range it holds no keys in, so a
 reader that consulted only the data span would walk past the tombstone answering its query.
-`num_range_tombstones` is zero exactly when the file's SST is `format_version = 1`.
+`num_range_tombstones` is zero exactly when the file has no range-delete block. A v3 file records a
+zero range-delete handle in that case; only the historical v1 layout omitted the handle itself.
 
 `store_id` is persisted rather than derived: tier and level are independent, so a file's store cannot
 be computed from its level. `min_write_time_ms` is carried over unchanged by migration, so placement
@@ -326,12 +341,12 @@ size of each record type, so a decoder built against an older layout locates the
 and skips fields it does not know. **Locate records by the declared sizes, never by summing the
 fields you happen to know.**
 
-Header — `kStatsHeaderBytes = 264`:
+Header — `kStatsHeaderBytes = 272`:
 
 | Offset | Field | Type |
 | --- | --- | --- |
 | 0 | `format_version` | uint32 (1) |
-| 4 | `header_bytes` | uint32 (264) |
+| 4 | `header_bytes` | uint32 (272) |
 | 8 | `level_record_bytes` | uint32 (48) |
 | 12 | `tier_record_bytes` | uint32 (88) |
 | 16 | `level_count` | uint32 |
@@ -347,6 +362,7 @@ Header — `kStatsHeaderBytes = 264`:
 | 240 | `compactions_trimmed` | uint64 |
 | 248 | `reencryptions` | uint64 |
 | 256 | `files_pending_reencryption` | uint64 |
+| 264 | `manifest_payloads_pending_reencryption` | uint64 |
 
 The **22** scalars in the contiguous run at offset 32, in order: `memtable_bytes`,
 `memtable_age_ms`, `compactions`, `compaction_bytes_read`, `compaction_bytes_written`,
@@ -356,11 +372,11 @@ The **22** scalars in the contiguous run at offset 32, in order: `memtable_bytes
 `memory_budget_total`, `budget_sheds`, `flushes` (offset 192), `durable_watermark` (offset 200).
 That run ends at 208, where `watermark_present` begins.
 
-Six more uint64 scalars follow the flag and its padding, and are **not** part of that run:
+Seven more uint64 scalars follow the flag and its padding, and are **not** part of that run:
 `memtable_entries` (216), `memtable_tombstones` (224), `background_failures` (232),
-`compactions_trimmed` (240), `reencryptions` (248), `files_pending_reencryption` (256).
-Twenty-eight in total; the run is twenty-two. Count from the table above, which is keyed by offset
-and is the normative part.
+`compactions_trimmed` (240), `reencryptions` (248), `files_pending_reencryption` (256), and
+`manifest_payloads_pending_reencryption` (264). Twenty-nine in total; the run is twenty-two. Count
+from the table above, which is keyed by offset and is the normative part.
 
 Every scalar after `pins_outstanding` was **appended without a version bump**, and so were the level
 record's `entries` and `tombstones` — which is what the self-describing header is for: a decoder that
@@ -415,8 +431,8 @@ record grew from 32 to 88 by appending, under the same rule as the level record 
 
 ## 8. Entry limits
 
-Enforced by the writer, not only the reader — a limit the writer does not know about is a trap that
-accepts data which can never be read back.
+Enforced by the database write API, not only the reader — a limit the write path does not know about
+is a trap that accepts data which can never be read back.
 
 | Limit | Value | Constant |
 | --- | --- | --- |

@@ -751,10 +751,13 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  * so the value alone cannot express absence. An exporter omits the series when the flag is zero.
  *   level record, level_count of them
  *     i32 level, i32 file_count, u64 bytes, u64 oldest_file_age_ms,
- *     i32 files_stale_codec, u8 age_triggered, u8 stalling, u8 reserved[2]
+ *     i32 files_stale_codec, u8 age_triggered, u8 stalling, u8 reserved[2],
+ *     u64 entries, u64 tombstones
  *   tier record, tier_count of them
  *     i32 tier, i32 file_count, u64 bytes, u64 oldest_file_age_ms,
- *     i32 files_pending_migration, u8 stalling, u8 reserved[3]
+ *     i32 files_pending_migration, u8 stalling, u8 reserved[3],
+ *     u64 gets, u64 puts, u64 removes, u64 lists,
+ *     u64 bytes_read, u64 bytes_written, u64 errors
  *
  * Decode by the declared sizes, not by sizeof: a reader that starts records at `header_bytes`,
  * steps by `*_record_bytes` and ignores trailing bytes it does not recognise survives a field
