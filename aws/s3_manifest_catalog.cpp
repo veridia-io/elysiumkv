@@ -1,13 +1,16 @@
 #include "elysiumkv/s3_manifest_catalog.hpp"
+#include "sdk_guard.hpp"
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
+#include <aws/core/utils/UUID.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/Delete.h>
 #include <aws/s3/model/DeleteObjectsRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/ObjectIdentifier.h>
 #include <aws/s3/model/PutObjectRequest.h>
@@ -17,41 +20,14 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
-#include <mutex>
 #include <utility>
 
 namespace elysiumkv {
 namespace {
 
-class SdkGuard {
-public:
-    SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (refs_++ == 0) {
-            options_ = new Aws::SDKOptions();
-            Aws::InitAPI(*options_);
-        }
-    }
-    ~SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (--refs_ == 0) {
-            Aws::ShutdownAPI(*options_);
-            delete options_;
-            options_ = nullptr;
-        }
-    }
-    SdkGuard(const SdkGuard&) = delete;
-    SdkGuard& operator=(const SdkGuard&) = delete;
+constexpr const char* kWriteId = "elysiumkv-write-id";
 
-private:
-    static std::mutex mutex_;
-    static int refs_;
-    static Aws::SDKOptions* options_;
-};
-
-std::mutex SdkGuard::mutex_;
-int SdkGuard::refs_ = 0;
-Aws::SDKOptions* SdkGuard::options_ = nullptr;
+std::string fresh_write_id() { return Aws::Utils::UUID::RandomUUID(); }
 
 std::string generation_prefix(uint64_t generation) {
     char buf[32];
@@ -105,12 +81,10 @@ GetResult decompress(const Buffer& raw) {
 
 template <typename Error>
 Status classify(const Error& error) {
-    if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_KEY ||
-        error.GetErrorType() == Aws::S3::S3Errors::RESOURCE_NOT_FOUND) {
+    if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_KEY) {
         return Status::NotFound;
     }
     if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_BUCKET) return Status::Io;
-    if (error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) return Status::NotFound;
     return Status::Io;
 }
 
@@ -123,9 +97,10 @@ std::string etag_of(const std::string& etag) { return etag; }
 }  // namespace
 
 struct S3ManifestCatalog::Impl {
-    SdkGuard sdk;
+    aws_detail::SdkGuard sdk;
     S3Options options;
     std::shared_ptr<Aws::S3::S3Client> client;
+    std::shared_ptr<Aws::S3::S3Client> conditional_client;
 
     std::string key(const std::string& suffix) const {
         return options.prefix.empty() ? suffix : options.prefix + "/" + suffix;
@@ -159,22 +134,43 @@ struct S3ManifestCatalog::Impl {
     /// same address fails rather than overwriting. ARCHITECTURE.md "Ownership is one compare-and-set" calls that a programming
     /// error, and this is what makes it one in fact rather than by convention.
     Status put_once(const std::string& object_key, const char* data, size_t size) {
-        Aws::S3::Model::PutObjectRequest request;
-        request.SetBucket(options.bucket);
-        request.SetKey(object_key);
-        request.SetIfNoneMatch("*");
-        auto body = Aws::MakeShared<Aws::StringStream>("elysiumkv");
-        body->write(data, static_cast<std::streamsize>(size));
-        request.SetBody(body);
-        request.SetContentLength(static_cast<long long>(size));
+        const std::string write_id = fresh_write_id();
+        const auto attempt = [&] {
+            Aws::S3::Model::PutObjectRequest request;
+            request.SetBucket(options.bucket);
+            request.SetKey(object_key);
+            request.SetIfNoneMatch("*");
+            request.AddMetadata(kWriteId, write_id);
+            auto body = Aws::MakeShared<Aws::StringStream>("elysiumkv");
+            body->write(data, static_cast<std::streamsize>(size));
+            request.SetBody(body);
+            request.SetContentLength(static_cast<long long>(size));
+            return conditional_client->PutObject(request);
+        };
 
-        auto outcome = client->PutObject(request);
+        auto outcome = attempt();
         if (outcome.IsSuccess()) return Status::Ok;
-        if (outcome.GetError().GetResponseCode() ==
+        if (outcome.GetError().GetResponseCode() !=
             Aws::Http::HttpResponseCode::PRECONDITION_FAILED) {
-            return Status::Config;
+            outcome = attempt();
+            if (outcome.IsSuccess()) return Status::Ok;
+            Aws::S3::Model::HeadObjectRequest head;
+            head.SetBucket(options.bucket);
+            head.SetKey(object_key);
+            auto found = conditional_client->HeadObject(head);
+            if (found.IsSuccess() &&
+                found.GetResult().GetContentLength() == static_cast<long long>(size)) {
+                const auto marker = found.GetResult().GetMetadata().find(kWriteId);
+                if (marker != found.GetResult().GetMetadata().end() &&
+                    marker->second == write_id) {
+                    return Status::Ok;
+                }
+            }
         }
-        return Status::Io;
+        return outcome.GetError().GetResponseCode() ==
+                       Aws::Http::HttpResponseCode::PRECONDITION_FAILED
+                   ? Status::Config
+                   : Status::Io;
     }
 };
 
@@ -210,6 +206,16 @@ Result<std::shared_ptr<S3ManifestCatalog>> S3ManifestCatalog::open(S3Options opt
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, !overridden);
     }
 
+    config.retryStrategy = aws_detail::no_retry_strategy();
+    if (options.access_key.empty()) {
+        impl->conditional_client = std::make_shared<Aws::S3::S3Client>(
+            config, Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, !overridden);
+    } else {
+        impl->conditional_client = std::make_shared<Aws::S3::S3Client>(
+            Aws::Auth::AWSCredentials(options.access_key, options.secret_key), config,
+            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, !overridden);
+    }
+
     return std::shared_ptr<S3ManifestCatalog>(new S3ManifestCatalog(std::move(impl)));
 }
 
@@ -240,30 +246,51 @@ Result<std::optional<ManifestCatalog::Entry>> S3ManifestCatalog::read() {
 
 Result<std::optional<ManifestCatalog::Entry>> S3ManifestCatalog::compare_and_set(
     std::optional<Entry> expected, uint64_t generation) {
-    const std::string body = std::to_string(generation) + "\n";
+    const std::string body = std::to_string(generation) + "\n" + fresh_write_id() + "\n";
+    const auto attempt = [&] {
+        Aws::S3::Model::PutObjectRequest request;
+        request.SetBucket(impl_->options.bucket);
+        request.SetKey(impl_->pointer_key());
+        if (expected.has_value()) {
+            request.SetIfMatch(expected->token);
+        } else {
+            request.SetIfNoneMatch("*");
+        }
+        auto stream = Aws::MakeShared<Aws::StringStream>("elysiumkv");
+        stream->write(body.data(), static_cast<std::streamsize>(body.size()));
+        request.SetBody(stream);
+        request.SetContentLength(static_cast<long long>(body.size()));
+        return impl_->conditional_client->PutObject(request);
+    };
 
-    Aws::S3::Model::PutObjectRequest request;
-    request.SetBucket(impl_->options.bucket);
-    request.SetKey(impl_->pointer_key());
-    if (expected.has_value()) {
-        request.SetIfMatch(expected->token);
-    } else {
-        // No pointer expected: the write must fail if one appeared, or two
-        // processes could both believe they installed the first generation.
-        request.SetIfNoneMatch("*");
-    }
-    auto stream = Aws::MakeShared<Aws::StringStream>("elysiumkv");
-    stream->write(body.data(), static_cast<std::streamsize>(body.size()));
-    request.SetBody(stream);
-    request.SetContentLength(static_cast<long long>(body.size()));
-
-    auto outcome = impl_->client->PutObject(request);
+    auto outcome = attempt();
     if (outcome.IsSuccess()) {
         return Result<std::optional<Entry>>(
             std::optional<Entry>(Entry{generation, etag_of(outcome.GetResult().GetETag())}));
     }
 
-    const auto code = outcome.GetError().GetResponseCode();
+    auto code = outcome.GetError().GetResponseCode();
+    if (code != Aws::Http::HttpResponseCode::PRECONDITION_FAILED) {
+        outcome = attempt();
+        if (outcome.IsSuccess()) {
+            return Result<std::optional<Entry>>(
+                std::optional<Entry>(Entry{generation, etag_of(outcome.GetResult().GetETag())}));
+        }
+        code = outcome.GetError().GetResponseCode();
+        Aws::S3::Model::GetObjectRequest request;
+        request.SetBucket(impl_->options.bucket);
+        request.SetKey(impl_->pointer_key());
+        auto current = impl_->conditional_client->GetObject(request);
+        if (current.IsSuccess()) {
+            auto& stream = current.GetResult().GetBody();
+            const std::string current_body((std::istreambuf_iterator<char>(stream)),
+                                           std::istreambuf_iterator<char>());
+            if (current_body == body) {
+                return Result<std::optional<Entry>>(std::optional<Entry>(
+                    Entry{generation, etag_of(current.GetResult().GetETag())}));
+            }
+        }
+    }
 
     // 412 is a lost CAS, not an error. Another writer installed first, so
     // this process is fenced: nullopt, which the engine turns into Status::Fenced

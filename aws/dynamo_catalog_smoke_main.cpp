@@ -1,4 +1,6 @@
 #include "elysiumkv/dynamo_manifest_catalog.hpp"
+#include "elysiumkv/aws_kms_encryption_key_manager.hpp"
+#include "elysiumkv/s3_blob_store.hpp"
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/client/ClientConfiguration.h>
@@ -105,6 +107,35 @@ int main() {
 
     auto empty = c.read();
     check(empty.has_value() && !empty->has_value(), "no pointer yet reads as empty, not an error");
+
+    {
+        S3Options s3_options;
+        s3_options.bucket = "elysiumkv-probe";
+        s3_options.endpoint = endpoint;
+        s3_options.access_key = "test";
+        s3_options.secret_key = "test";
+        auto s3 = S3BlobStore::open(s3_options);
+
+        KmsOptions kms_options;
+        kms_options.key_id = "00000000-0000-0000-0000-000000000000";
+        kms_options.endpoint = endpoint;
+        kms_options.access_key = "test";
+        kms_options.secret_key = "test";
+        auto kms = AwsKmsEncryptionKeyManager::open(kms_options);
+        check(s3.has_value() && kms.has_value(), "S3, DynamoDB and KMS clients coexist");
+
+        if (s3.has_value()) *s3 = nullptr;
+        auto after_s3 = c.read();
+        check(after_s3.has_value(), "DynamoDB survives destruction of the S3 client");
+        if (kms.has_value()) {
+            auto absent = (*kms)->new_data_key();
+            check(!absent.has_value() && absent.error() == Status::Config,
+                  "KMS survives destruction of the S3 client");
+            *kms = nullptr;
+        }
+        auto after_kms = c.read();
+        check(after_kms.has_value(), "DynamoDB survives destruction of the KMS client");
+    }
 
     auto first = c.compare_and_set(std::nullopt, 1);
     check(first.has_value() && first->has_value() && (*first)->generation == 1,

@@ -53,12 +53,28 @@ int main() {
     auto listed = s.list("").get();
     check(listed.has_value() && listed->size() == 2 && (*listed)[0] == "000000000001.sst",
           "list strips the prefix and sorts");
+    const IoCounters before_bulk = s.counters();
+    auto bulk = s.bulk_view().get("000000000001.sst", 0, BlobStore::kReadToEnd).get();
+    const IoCounters after_bulk = s.counters();
+    check(bulk.has_value() && after_bulk.gets == before_bulk.gets + 1 &&
+              after_bulk.bytes_read == before_bulk.bytes_read + bulk->size(),
+          "bulk reads advance the billing counters");
     check(s.remove_many({"000000000001.sst", "000000000002.sst"}).get() == Status::Ok, "remove_many");
     auto after = s.list("").get();
     check(after.has_value() && after->empty(), "empty list succeeds and means empty");
     check(s.remove("000000000001.sst").get() == Status::Ok, "remove is idempotent");
     check(&s.bulk_view() != static_cast<BlobStore*>(&s), "bulk_view is a distinct view");
     check(s.bulk_view().id() == s.id(), "bulk_view names the same location");
+    S3Options misrouted = o;
+    misrouted.endpoint += "/not-an-s3-endpoint";
+    auto wrong_endpoint = S3BlobStore::open(misrouted);
+    check(wrong_endpoint.has_value(), "a misrouted endpoint is syntactically valid");
+    if (wrong_endpoint.has_value()) {
+        auto unknown = (*wrong_endpoint)->get("000000000099.sst", 0,
+                                             BlobStore::kReadToEnd).get();
+        check(!unknown.has_value() && unknown.error() == Status::Io,
+              "an endpoint-level 404 is not object absence");
+    }
     // --- multipart (ARCHITECTURE.md "The ABI boundary") ---------------------------------------------------
     //
     // Part size clamped to S3's 5 MiB floor, so 12 MiB is three parts: the smallest object

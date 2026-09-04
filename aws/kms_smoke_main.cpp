@@ -60,6 +60,16 @@ int main() {
     if (!opened) { std::printf("open failed\n"); return 1; }
     auto& keys = **opened;
 
+    KmsOptions missing = o;
+    missing.key_id = "00000000-0000-0000-0000-000000000000";
+    auto missing_manager = AwsKmsEncryptionKeyManager::open(missing);
+    check(missing_manager.has_value(), "a key id is validated by KMS, not at construction");
+    if (missing_manager.has_value()) {
+        auto absent = (*missing_manager)->new_data_key();
+        check(!absent.has_value() && absent.error() == Status::Config,
+              "an absent KMS key is Config, not retryable Io");
+    }
+
     auto first = keys.new_data_key();
     check(first.has_value() && first->key.size() == 32,
           "GenerateDataKey yields the 32 bytes AES-256 needs");
