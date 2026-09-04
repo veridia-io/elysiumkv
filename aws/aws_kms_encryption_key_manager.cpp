@@ -1,4 +1,5 @@
 #include "elysiumkv/aws_kms_encryption_key_manager.hpp"
+#include "sdk_guard.hpp"
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentials.h>
@@ -7,50 +8,25 @@
 #include <aws/kms/model/DecryptRequest.h>
 #include <aws/kms/model/GenerateDataKeyRequest.h>
 
-#include <mutex>
 #include <utility>
 
 namespace elysiumkv {
 namespace {
 
-/// One SDK lifetime for the process however many clients exist, refcounted here rather than asked
-/// of the embedder: getting it wrong surfaces as a crash during exit, long after the mistake.
-class SdkGuard {
-public:
-    SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (refs_++ == 0) {
-            options_ = new Aws::SDKOptions();
-            Aws::InitAPI(*options_);
-        }
-    }
-    ~SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (--refs_ == 0) {
-            Aws::ShutdownAPI(*options_);
-            delete options_;
-            options_ = nullptr;
-        }
-    }
-    SdkGuard(const SdkGuard&) = delete;
-    SdkGuard& operator=(const SdkGuard&) = delete;
-
-private:
-    static std::mutex mutex_;
-    static int refs_;
-    static Aws::SDKOptions* options_;
-};
-
-std::mutex SdkGuard::mutex_;
-int SdkGuard::refs_ = 0;
-Aws::SDKOptions* SdkGuard::options_ = nullptr;
-
 constexpr size_t kKeyBytes = 32;   // AES_256, which is what the provider requires
+
+bool retryable(const Aws::KMS::KMSError& error) {
+    const auto type = error.GetErrorType();
+    return error.ShouldRetry() || type == Aws::KMS::KMSErrors::THROTTLING ||
+           type == Aws::KMS::KMSErrors::NETWORK_CONNECTION ||
+           type == Aws::KMS::KMSErrors::DEPENDENCY_TIMEOUT ||
+           type == Aws::KMS::KMSErrors::K_M_S_INTERNAL;
+}
 
 }  // namespace
 
 struct AwsKmsEncryptionKeyManager::Impl {
-    SdkGuard sdk;
+    aws_detail::SdkGuard sdk;
     KmsOptions options;
     std::shared_ptr<Aws::KMS::KMSClient> client;
 };
@@ -68,7 +44,9 @@ Result<std::shared_ptr<AwsKmsEncryptionKeyManager>> AwsKmsEncryptionKeyManager::
     config.connectTimeoutMs = static_cast<long>(impl->options.timeout.count());
     if (!impl->options.endpoint.empty()) {
         config.endpointOverride = impl->options.endpoint;
-        config.scheme = Aws::Http::Scheme::HTTP;
+        config.scheme = impl->options.endpoint.rfind("https://", 0) == 0
+                            ? Aws::Http::Scheme::HTTPS
+                            : Aws::Http::Scheme::HTTP;
     }
 
     if (!impl->options.access_key.empty()) {
@@ -99,9 +77,7 @@ Result<DataKey> AwsKmsEncryptionKeyManager::new_data_key() {
 
     auto outcome = impl_->client->GenerateDataKey(request);
     if (!outcome.IsSuccess()) {
-        // Could not determine: a throttle, an expired credential, a network fault. Retryable, and
-        // the write that needed the key will ask again.
-        return std::unexpected(Status::Io);
+        return std::unexpected(retryable(outcome.GetError()) ? Status::Io : Status::Config);
     }
 
     const auto& plaintext = outcome.GetResult().GetPlaintext();
@@ -129,13 +105,7 @@ Result<SecretKey> AwsKmsEncryptionKeyManager::open_data_key(Slice envelope) {
         // Distinguishing "this key is gone or forbidden" from "KMS is briefly unreachable" needs
         // the error type, and the two want different remedies: one is a configuration to fix, the
         // other is a retry.
-        const auto& error = outcome.GetError();
-        const auto type = error.GetErrorType();
-        const bool retryable = error.ShouldRetry() || type == Aws::KMS::KMSErrors::THROTTLING ||
-                               type == Aws::KMS::KMSErrors::NETWORK_CONNECTION ||
-                               type == Aws::KMS::KMSErrors::DEPENDENCY_TIMEOUT ||
-                               type == Aws::KMS::KMSErrors::K_M_S_INTERNAL;
-        return std::unexpected(retryable ? Status::Io : Status::Config);
+        return std::unexpected(retryable(outcome.GetError()) ? Status::Io : Status::Config);
     }
 
     const auto& plaintext = outcome.GetResult().GetPlaintext();

@@ -97,8 +97,11 @@ public:
     /// the implementation file and has to name this. Nothing outside can do
     /// anything with it, and it keeps the AWS headers out of this one.
     struct Impl;
+    class BulkFacade;
 
 private:
+    std::future<GetResult> bulk_get(std::string_view name, uint64_t offset, size_t len);
+
     /// Above `multipart_threshold_bytes`. Separate because the shapes share nothing but
     /// the name: three round trips minimum, a part list to assemble, and an abort to
     /// remember on every failing path.

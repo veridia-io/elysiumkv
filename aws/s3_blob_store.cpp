@@ -3,16 +3,19 @@
 // One definition of what names a store accepts, shared with the local store —
 // this file had its own, looser copy, and the two disagreed about a leading dot.
 #include "blob/object_name.hpp"
+#include "sdk_guard.hpp"
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
+#include <aws/core/utils/UUID.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/Delete.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/DeleteObjectsRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/ObjectIdentifier.h>
 #include <aws/s3/model/AbortMultipartUploadRequest.h>
@@ -24,7 +27,6 @@
 #include <aws/s3/model/UploadPartRequest.h>
 
 #include <algorithm>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -32,38 +34,9 @@
 namespace elysiumkv {
 namespace {
 
-/// The SDK needs process-wide init and shutdown, and a process may hold several
-/// stores. Refcounting it here rather than asking the embedder to remember:
-/// getting it wrong surfaces as a crash during exit, long after the mistake.
-class SdkGuard {
-public:
-    SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (refs_++ == 0) {
-            options_ = new Aws::SDKOptions();
-            Aws::InitAPI(*options_);
-        }
-    }
-    ~SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (--refs_ == 0) {
-            Aws::ShutdownAPI(*options_);
-            delete options_;
-            options_ = nullptr;
-        }
-    }
-    SdkGuard(const SdkGuard&) = delete;
-    SdkGuard& operator=(const SdkGuard&) = delete;
+constexpr const char* kWriteId = "elysiumkv-write-id";
 
-private:
-    static std::mutex mutex_;
-    static int refs_;
-    static Aws::SDKOptions* options_;
-};
-
-std::mutex SdkGuard::mutex_;
-int SdkGuard::refs_ = 0;
-Aws::SDKOptions* SdkGuard::options_ = nullptr;
+std::string fresh_write_id() { return Aws::Utils::UUID::RandomUUID(); }
 
 /// The discard path rests on this mapping: `Status::NotFound` is positive evidence of absence, so
 /// anything meaning "could not determine" must be `Io`. A `403` says nothing about whether the
@@ -71,25 +44,22 @@ Aws::SDKOptions* SdkGuard::options_ = nullptr;
 /// indistinguishable from a mistyped one. Only a per-object 404 earns `NotFound`.
 template <typename Error>
 Status classify(const Error& error) {
-    if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_KEY ||
-        error.GetErrorType() == Aws::S3::S3Errors::RESOURCE_NOT_FOUND) {
+    if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_KEY) {
         return Status::NotFound;
     }
     if (error.GetErrorType() == Aws::S3::S3Errors::NO_SUCH_BUCKET) return Status::Io;
-    // A 404 the SDK did not map to a typed error is still a genuine absence.
-    if (error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-        return Status::NotFound;
-    }
     return Status::Io;
 }
 
 }  // namespace
 
 struct S3BlobStore::Impl {
-    SdkGuard sdk;
+    aws_detail::SdkGuard sdk;
     S3Options options;
     std::shared_ptr<Aws::S3::S3Client> point_client;
     std::shared_ptr<Aws::S3::S3Client> bulk_client;
+    std::shared_ptr<Aws::S3::S3Client> point_conditional_client;
+    std::shared_ptr<Aws::S3::S3Client> bulk_conditional_client;
     std::string id;
     std::unique_ptr<BlobStore> bulk_facade;
 
@@ -109,9 +79,21 @@ struct S3BlobStore::Impl {
         }
         return key.substr(expected.size());
     }
-};
 
-namespace {
+    bool owns(Aws::S3::S3Client& client, const std::string& key,
+              const std::string& write_id, size_t size) const {
+        Aws::S3::Model::HeadObjectRequest request;
+        request.SetBucket(options.bucket);
+        request.SetKey(key);
+        auto outcome = client.HeadObject(request);
+        if (!outcome.IsSuccess() || outcome.GetResult().GetContentLength() !=
+                                        static_cast<long long>(size)) {
+            return false;
+        }
+        const auto found = outcome.GetResult().GetMetadata().find(kWriteId);
+        return found != outcome.GetResult().GetMetadata().end() && found->second == write_id;
+    }
+};
 
 GetResult do_get(S3BlobStore::Impl& impl, Aws::S3::S3Client& client, std::string_view name,
                  uint64_t offset, size_t len) {
@@ -162,13 +144,13 @@ GetResult do_get(S3BlobStore::Impl& impl, Aws::S3::S3Client& client, std::string
 /// `bulk_view()` must return a `BlobStore&`, so the bulk profile needs an object.
 /// It forwards to the owner with the bulk client selected — no duplicated request
 /// logic, and no second set of retry and addressing settings to keep in step.
-class BulkFacade final : public BlobStore {
+class S3BlobStore::BulkFacade final : public BlobStore {
 public:
     BulkFacade(S3BlobStore& owner, S3BlobStore::Impl& impl) : owner_(owner), impl_(impl) {}
 
     std::string id() const override { return impl_.id; }
     std::future<GetResult> get(std::string_view name, uint64_t offset, size_t len) override {
-        return make_ready_future(do_get(impl_, *impl_.bulk_client, name, offset, len));
+        return owner_.bulk_get(name, offset, len);
     }
     std::future<Status> put(std::string_view name, Slice bytes) override {
         return owner_.put(name, bytes);
@@ -186,8 +168,6 @@ private:
     S3BlobStore::Impl& impl_;
 };
 
-}  // namespace
-
 S3BlobStore::S3BlobStore(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 S3BlobStore::~S3BlobStore() = default;
 
@@ -203,11 +183,14 @@ Result<std::shared_ptr<S3BlobStore>> S3BlobStore::open(S3Options options) {
                    ? "s3://" + options.bucket + (options.prefix.empty() ? "" : "/" + options.prefix)
                    : options.id;
 
-    const auto make_client = [&options](std::chrono::milliseconds timeout) {
+    const auto make_client = [&options](std::chrono::milliseconds timeout, bool retry) {
         Aws::Client::ClientConfiguration config;
         config.region = options.region;
         config.requestTimeoutMs = static_cast<long>(timeout.count());
         config.connectTimeoutMs = static_cast<long>(std::min<long long>(timeout.count(), 5'000));
+        if (!retry) {
+            config.retryStrategy = aws_detail::no_retry_strategy();
+        }
 
         const bool overridden = !options.endpoint.empty();
         if (overridden) {
@@ -228,8 +211,10 @@ Result<std::shared_ptr<S3BlobStore>> S3BlobStore::open(S3Options options) {
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, virtual_host);
     };
 
-    impl->point_client = make_client(options.point_timeout);
-    impl->bulk_client = make_client(options.bulk_timeout);
+    impl->point_client = make_client(options.point_timeout, true);
+    impl->bulk_client = make_client(options.bulk_timeout, true);
+    impl->point_conditional_client = make_client(options.point_timeout, false);
+    impl->bulk_conditional_client = make_client(options.bulk_timeout, false);
 
     Impl* raw = impl.get();
     std::shared_ptr<S3BlobStore> store(new S3BlobStore(std::move(impl)));
@@ -243,6 +228,12 @@ BlobStore& S3BlobStore::bulk_view() { return *impl_->bulk_facade; }
 
 std::future<GetResult> S3BlobStore::get(std::string_view name, uint64_t offset, size_t len) {
     auto result = do_get(*impl_, *impl_->point_client, name, offset, len);
+    note_get(result);
+    return make_ready_future(std::move(result));
+}
+
+std::future<GetResult> S3BlobStore::bulk_get(std::string_view name, uint64_t offset, size_t len) {
+    auto result = do_get(*impl_, *impl_->bulk_client, name, offset, len);
     note_get(result);
     return make_ready_future(std::move(result));
 }
@@ -264,11 +255,13 @@ Status classify_conditional_put(Aws::Http::HttpResponseCode code) {
 /// bulk write, and the point client's timeout would invent failures on it.
 Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
     const std::string key = impl_->key_for(name);
+    const std::string write_id = fresh_write_id();
     const size_t part_bytes = std::max(impl_->options.multipart_part_bytes, kMinPartBytes);
 
     Aws::S3::Model::CreateMultipartUploadRequest create;
     create.SetBucket(impl_->options.bucket);
     create.SetKey(key);
+    create.AddMetadata(kWriteId, write_id);
     // Counted per request to S3, not per call to this class. A multipart put is one `put`
     // and several billed round trips — create, a part each, complete — and the figure this exists
     // to produce is the one on the invoice.
@@ -326,9 +319,18 @@ Status S3BlobStore::multipart_put(std::string_view name, Slice bytes) {
     // before this was relied on.
     complete.SetIfNoneMatch("*");
 
-    auto finished = impl_->bulk_client->CompleteMultipartUpload(complete);
+    auto finished = impl_->bulk_conditional_client->CompleteMultipartUpload(complete);
     note_put(finished.IsSuccess() ? Status::Ok : Status::Io, 0);
     if (finished.IsSuccess()) return Status::Ok;
+    const auto first_code = finished.GetError().GetResponseCode();
+    if (first_code != Aws::Http::HttpResponseCode::PRECONDITION_FAILED) {
+        finished = impl_->bulk_conditional_client->CompleteMultipartUpload(complete);
+        note_put(finished.IsSuccess() ? Status::Ok : Status::Io, 0);
+        if (finished.IsSuccess()) return Status::Ok;
+        if (impl_->owns(*impl_->bulk_conditional_client, key, write_id, bytes.size())) {
+            return Status::Ok;
+        }
+    }
     // Including the write-once rejection: the upload exists and its parts are billable
     // until aborted, and "the name was taken" is no reason to leave them.
     abort();
@@ -342,25 +344,34 @@ std::future<Status> S3BlobStore::put(std::string_view name, Slice bytes) {
         return make_ready_future(multipart_put(name, bytes));
     }
 
-    Aws::S3::Model::PutObjectRequest request;
-    request.SetBucket(impl_->options.bucket);
-    request.SetKey(impl_->key_for(name));
+    const std::string key = impl_->key_for(name);
+    const std::string write_id = fresh_write_id();
+    const auto attempt = [&] {
+        Aws::S3::Model::PutObjectRequest request;
+        request.SetBucket(impl_->options.bucket);
+        request.SetKey(key);
+        request.SetIfNoneMatch("*");
+        request.AddMetadata(kWriteId, write_id);
+        auto body = Aws::MakeShared<Aws::StringStream>("elysiumkv");
+        body->write(reinterpret_cast<const char*>(bytes.data()),
+                    static_cast<std::streamsize>(bytes.size()));
+        request.SetBody(body);
+        request.SetContentLength(static_cast<long long>(bytes.size()));
+        return impl_->point_conditional_client->PutObject(request);
+    };
 
-    // Write-once enforced by the store rather than trusted of the caller. File
-    // numbers are monotonic under a single writer, so a collision means a zombie
-    // process is reusing them; the conditional costs nothing and converts a
-    // silent overwrite into an error the engine can act on.
-    request.SetIfNoneMatch("*");
-
-    auto body = Aws::MakeShared<Aws::StringStream>("elysiumkv");
-    body->write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-    request.SetBody(body);
-    request.SetContentLength(static_cast<long long>(bytes.size()));
-
-    auto outcome = impl_->point_client->PutObject(request);
+    auto outcome = attempt();
     note_put(outcome.IsSuccess() ? Status::Ok : Status::Io, bytes.size());
     if (outcome.IsSuccess()) return make_ready_future(Status::Ok);
+    if (outcome.GetError().GetResponseCode() !=
+        Aws::Http::HttpResponseCode::PRECONDITION_FAILED) {
+        outcome = attempt();
+        note_put(outcome.IsSuccess() ? Status::Ok : Status::Io, bytes.size());
+        if (outcome.IsSuccess()) return make_ready_future(Status::Ok);
+        if (impl_->owns(*impl_->point_conditional_client, key, write_id, bytes.size())) {
+            return make_ready_future(Status::Ok);
+        }
+    }
     // A rejected conditional means the name is taken, which under the no-reuse rule means a zombie
     // writer. Terminal rather than transient, so it must not look retryable.
     //

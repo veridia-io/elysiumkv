@@ -95,7 +95,7 @@ int main() {
 
         auto installed = (*a)->compare_and_set(std::nullopt, 1);
         check(installed.has_value() && installed->has_value(), "seed the race with generation 1");
-        const auto shared_expectation = **installed;
+        auto shared_expectation = **installed;
 
         constexpr int kRounds = 12;
         int winners = 0, losers = 0, errors = 0;
@@ -123,7 +123,10 @@ int main() {
             // Put the pointer back to the shared expectation for the next round.
             auto now = (*a)->read();
             if (now.has_value() && now->has_value() && (*now)->generation != 1) {
-                (void)(*a)->compare_and_set(**now, 1);
+                auto restored = (*a)->compare_and_set(**now, 1);
+                if (restored.has_value() && restored->has_value()) {
+                    shared_expectation = **restored;
+                }
             }
         }
         std::printf("  race over %d rounds: %d won, %d fenced, %d errored\n",

@@ -9,6 +9,7 @@ find_package(CURL QUIET)
 find_package(AWSSDK CONFIG REQUIRED COMPONENTS s3 dynamodb kms)
 
 add_library(elysiumkv_aws STATIC
+    sdk_guard.cpp
     s3_blob_store.cpp
     s3_manifest_catalog.cpp
     dynamo_manifest_catalog.cpp

@@ -1,4 +1,5 @@
 #include "elysiumkv/dynamo_manifest_catalog.hpp"
+#include "sdk_guard.hpp"
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
@@ -19,7 +20,6 @@
 
 
 #include <algorithm>
-#include <mutex>
 #include <random>
 #include <set>
 #include <charconv>
@@ -30,36 +30,6 @@
 
 namespace elysiumkv {
 namespace {
-
-class SdkGuard {
-public:
-    SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (refs_++ == 0) {
-            options_ = new Aws::SDKOptions();
-            Aws::InitAPI(*options_);
-        }
-    }
-    ~SdkGuard() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (--refs_ == 0) {
-            Aws::ShutdownAPI(*options_);
-            delete options_;
-            options_ = nullptr;
-        }
-    }
-    SdkGuard(const SdkGuard&) = delete;
-    SdkGuard& operator=(const SdkGuard&) = delete;
-
-private:
-    static std::mutex mutex_;
-    static int refs_;
-    static Aws::SDKOptions* options_;
-};
-
-std::mutex SdkGuard::mutex_;
-int SdkGuard::refs_ = 0;
-Aws::SDKOptions* SdkGuard::options_ = nullptr;
 
 namespace attr {
 constexpr const char* kPk = "PK";
@@ -73,6 +43,7 @@ constexpr const char* kTotalChunks = "total_chunks";
 /// generation rolls. This attribute only answers "is the thing already at that address *mine*",
 /// which is what makes a retry over one's own residue safe and a retry over a rival's a fence.
 constexpr const char* kWriter = "writer";
+constexpr const char* kOperation = "operation";
 /// The snapshot attempt the pointer install committed to. See `sort_key_snapshot`.
 constexpr const char* kSnapshotAttempt = "snapshot_attempt";
 }  // namespace attr
@@ -183,9 +154,10 @@ bool is_validation_failure(const Aws::DynamoDB::DynamoDBError& error) {
 }  // namespace
 
 struct DynamoManifestCatalog::Impl {
-    SdkGuard sdk;
+    aws_detail::SdkGuard sdk;
     DynamoOptions options;
     std::shared_ptr<Aws::DynamoDB::DynamoDBClient> client;
+    std::shared_ptr<Aws::DynamoDB::DynamoDBClient> conditional_client;
 
     /// This instance, for as long as it lives. Written onto every chunk so a retry can tell its
     /// own residue from a rival's in-flight write — see `attr::kWriter`.
@@ -222,29 +194,56 @@ struct DynamoManifestCatalog::Impl {
         return Aws::DynamoDB::Model::AttributeValue(options.store_id);
     }
 
+    Result<bool> operation_landed(const std::string& sort_key,
+                                  const std::string& operation) const {
+        Aws::DynamoDB::Model::GetItemRequest request;
+        request.SetTableName(options.table);
+        request.AddKey(attr::kPk, pk());
+        request.AddKey(attr::kSk, Aws::DynamoDB::Model::AttributeValue(sort_key));
+        request.SetConsistentRead(true);
+        auto outcome = conditional_client->GetItem(request);
+        if (!outcome.IsSuccess()) return std::unexpected(Status::Io);
+        const auto found = outcome.GetResult().GetItem().find(attr::kOperation);
+        return found != outcome.GetResult().GetItem().end() &&
+               found->second.GetS() == operation;
+    }
+
     /// Write-once by condition, not by convention: a put at an existing address is
     /// a programming error per ARCHITECTURE.md "Ownership is one compare-and-set", and `attribute_not_exists` is what makes it
     /// fail rather than silently replace.
     Status put_once(const std::string& sort_key, const std::string& payload,
                     std::optional<uint32_t> total_chunks) {
-        Aws::DynamoDB::Model::PutItemRequest request;
-        request.SetTableName(options.table);
-        request.AddItem(attr::kPk, pk());
-        request.AddItem(attr::kSk, Aws::DynamoDB::Model::AttributeValue(sort_key));
+        const std::string operation = fresh_id();
+        const auto attempt = [&] {
+            Aws::DynamoDB::Model::PutItemRequest request;
+            request.SetTableName(options.table);
+            request.AddItem(attr::kPk, pk());
+            request.AddItem(attr::kSk, Aws::DynamoDB::Model::AttributeValue(sort_key));
 
-        Aws::DynamoDB::Model::AttributeValue body;
-        body.SetB(Aws::Utils::ByteBuffer(reinterpret_cast<const unsigned char*>(payload.data()),
-                                         payload.size()));
-        request.AddItem(attr::kPayload, body);
-        request.AddItem(attr::kWriter, Aws::DynamoDB::Model::AttributeValue(writer));
-        if (total_chunks.has_value()) {
-            request.AddItem(attr::kTotalChunks, Aws::DynamoDB::Model::AttributeValue().SetN(
-                                                    std::to_string(*total_chunks)));
-        }
-        request.SetConditionExpression("attribute_not_exists(SK)");
+            Aws::DynamoDB::Model::AttributeValue body;
+            body.SetB(Aws::Utils::ByteBuffer(
+                reinterpret_cast<const unsigned char*>(payload.data()), payload.size()));
+            request.AddItem(attr::kPayload, body);
+            request.AddItem(attr::kWriter, Aws::DynamoDB::Model::AttributeValue(writer));
+            request.AddItem(attr::kOperation, Aws::DynamoDB::Model::AttributeValue(operation));
+            if (total_chunks.has_value()) {
+                request.AddItem(attr::kTotalChunks, Aws::DynamoDB::Model::AttributeValue().SetN(
+                                                        std::to_string(*total_chunks)));
+            }
+            request.SetConditionExpression("attribute_not_exists(SK)");
+            return conditional_client->PutItem(request);
+        };
 
-        auto outcome = client->PutItem(request);
+        auto outcome = attempt();
         if (outcome.IsSuccess()) return Status::Ok;
+        if (!is_conditional_failure(outcome.GetError()) &&
+            !is_validation_failure(outcome.GetError())) {
+            outcome = attempt();
+            if (outcome.IsSuccess()) return Status::Ok;
+            auto landed = operation_landed(sort_key, operation);
+            if (!landed) return landed.error();
+            if (*landed) return Status::Ok;
+        }
         if (is_conditional_failure(outcome.GetError())) return Status::Config;
         // Terminal, not retryable. A rejected *request* — an item over the 400 KB cap, a table
         // whose schema does not match — will be rejected identically forever, and `Status::Io`
@@ -509,6 +508,7 @@ struct DynamoManifestCatalog::Impl {
             request.AddExpressionAttributeValues(
                 ":sk", Aws::DynamoDB::Model::AttributeValue(prefix));
             if (!start.empty()) request.SetExclusiveStartKey(start);
+            request.SetConsistentRead(true);
 
             auto outcome = client->Query(request);
             if (!outcome.IsSuccess()) return std::unexpected(Status::Io);
@@ -582,6 +582,15 @@ Result<std::shared_ptr<DynamoManifestCatalog>> DynamoManifestCatalog::open(Dynam
             Aws::Auth::AWSCredentials(options.access_key, options.secret_key), config);
     }
 
+    config.retryStrategy = aws_detail::no_retry_strategy();
+    if (options.access_key.empty()) {
+        impl->conditional_client =
+            std::make_shared<Aws::DynamoDB::DynamoDBClient>(config);
+    } else {
+        impl->conditional_client = std::make_shared<Aws::DynamoDB::DynamoDBClient>(
+            Aws::Auth::AWSCredentials(options.access_key, options.secret_key), config);
+    }
+
     if (options.create_table_if_missing) {
         if (const Status status = impl->ensure_table(); status != Status::Ok) {
             return std::unexpected(status);
@@ -649,14 +658,18 @@ Result<std::optional<ManifestCatalog::Entry>> DynamoManifestCatalog::compare_and
     // generation without naming the attempt it committed to would leave a reader guessing between
     // two complete snapshots, which is the case this whole layout exists to make decidable.
     const std::string attempt = impl_->written_attempt(generation);
-    request.SetUpdateExpression(attempt.empty() ? "SET #g = :g, #v = :v"
-                                                : "SET #g = :g, #v = :v, #a = :a");
+    const std::string operation = fresh_id();
+    request.SetUpdateExpression(attempt.empty() ? "SET #g = :g, #v = :v, #w = :w"
+                                                : "SET #g = :g, #v = :v, #a = :a, #w = :w");
     request.AddExpressionAttributeNames("#g", attr::kGeneration);
     request.AddExpressionAttributeNames("#v", attr::kVersion);
+    request.AddExpressionAttributeNames("#w", attr::kWriter);
     request.AddExpressionAttributeValues(
         ":g", Aws::DynamoDB::Model::AttributeValue().SetN(std::to_string(generation)));
     request.AddExpressionAttributeValues(
         ":v", Aws::DynamoDB::Model::AttributeValue().SetN(std::to_string(next_version)));
+    request.AddExpressionAttributeValues(":w",
+                                         Aws::DynamoDB::Model::AttributeValue(operation));
     if (!attempt.empty()) {
         request.AddExpressionAttributeNames("#a", attr::kSnapshotAttempt);
         request.AddExpressionAttributeValues(":a", Aws::DynamoDB::Model::AttributeValue(attempt));
@@ -672,11 +685,32 @@ Result<std::optional<ManifestCatalog::Entry>> DynamoManifestCatalog::compare_and
         request.SetConditionExpression("attribute_not_exists(#v)");
     }
 
-    auto outcome = impl_->client->UpdateItem(request);
+    auto outcome = impl_->conditional_client->UpdateItem(request);
     if (outcome.IsSuccess()) {
         impl_->note_pointer(generation, attempt);
         return Result<std::optional<Entry>>(
             std::optional<Entry>(Entry{generation, std::to_string(next_version)}));
+    }
+    if (!is_conditional_failure(outcome.GetError())) {
+        outcome = impl_->conditional_client->UpdateItem(request);
+        if (outcome.IsSuccess()) {
+            impl_->note_pointer(generation, attempt);
+            return Result<std::optional<Entry>>(
+                std::optional<Entry>(Entry{generation, std::to_string(next_version)}));
+        }
+        Aws::DynamoDB::Model::GetItemRequest current;
+        current.SetTableName(impl_->options.table);
+        current.AddKey(attr::kPk, impl_->pk());
+        current.AddKey(attr::kSk, Aws::DynamoDB::Model::AttributeValue(kPointerSk));
+        current.SetConsistentRead(true);
+        auto read = impl_->conditional_client->GetItem(current);
+        if (!read.IsSuccess()) return std::unexpected(Status::Io);
+        const auto writer = read.GetResult().GetItem().find(attr::kWriter);
+        if (writer != read.GetResult().GetItem().end() && writer->second.GetS() == operation) {
+            impl_->note_pointer(generation, attempt);
+            return Result<std::optional<Entry>>(
+                std::optional<Entry>(Entry{generation, std::to_string(next_version)}));
+        }
     }
     // A failed condition is a lost CAS, not an error. Another writer
     // installed first, so this process is fenced: nullopt, which the engine turns
