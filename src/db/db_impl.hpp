@@ -361,7 +361,7 @@ private:
     Status run_compaction(const Compaction& compaction, DeferredLine& line);
     /// ARCHITECTURE.md "Migration between tiers" — the third kind of background work, and structurally the simplest:
     /// it moves bytes without interpreting them. Same `run_one()` contract.
-    bool run_one_migration(Status& status);
+    bool run_one_migration(Status& status, bool* failure_preempts = nullptr);
     Status run_migration(const Migration& migration, DeferredLine& line);
 
     /// One file re-sealed under the primary provider, when `rewrite_to_primary` is on. Returns

@@ -764,5 +764,47 @@ TEST_F(TierMigrationTest, AnL0FileLeavesItsTierOldestFirstEvenWhenWriteTimesTie)
     }
 }
 
+TEST_F(TierMigrationTest, AnOlderColdL0FileDoesNotBlockTransientRescue) {
+    Options options = make_tiered_options(store_, Duration(50));
+    LevelOptions l0;
+    l0.max_files = 100;
+    options.levels = {{0, l0}, {1, LevelOptions{}}, {2, LevelOptions{}}};
+    open(options);
+
+    ASSERT_EQ(db_->put(Slice::from(std::string("k")), Slice::from(std::string("old"))),
+              Status::Ok);
+    advance(Duration(100));
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->put(Slice::from(std::string("k")), Slice::from(std::string("new"))),
+              Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(engine().current_version()->file_count(0), 2u);
+
+    advance(Duration(100));
+    ASSERT_EQ(engine().compact_until_quiet(), Status::Ok);
+    EXPECT_EQ(engine().current_version()->file_count(0), 0u);
+    auto found = db_->get_copy(Slice::from(std::string("k")));
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(std::string(found->begin(), found->end()), "new");
+}
+
+TEST_F(TierMigrationTest, TwoPlacementTiersOnOneStoreDoNotLoop) {
+    Options options = make_options(store_, Compression::None, 16u << 10);
+    options.tiers = {
+        Tier{.store = store_.store(0),
+             .durability = Durability::Durable,
+             .max_age = Duration(50)},
+        Tier{.store = store_.store(0), .durability = Durability::Durable},
+    };
+    open(options);
+    ASSERT_EQ(db_->put(Slice::from(std::string("k")), Slice::from(std::string("v"))), Status::Ok);
+    ASSERT_EQ(db_->flush(), Status::Ok);
+    ASSERT_EQ(db_->compact_level(0), Status::Ok);
+
+    advance(Duration(100));
+    EXPECT_EQ(engine().compact_until_quiet(), Status::Ok);
+    EXPECT_EQ(db_->stats().migrations, 0u);
+}
+
 }  // namespace
 }  // namespace elysiumkv::test

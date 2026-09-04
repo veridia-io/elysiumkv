@@ -223,9 +223,9 @@ struct Options {
     /// observation distinguishes them.
     ///
     /// Not optional, because deleting an object seen unreferenced once is never correct. Turn the
-    /// sweep off with `orphan_sweep_interval` instead. Must be at least `obsolete_retention`,
-    /// checked at open: a crash empties the pending queue, and an obsoleted object then returns as
-    /// an orphan protected by this window alone.
+    /// sweep off with `orphan_sweep_interval` instead. Must be non-zero while the sweep is enabled,
+    /// and at least `obsolete_retention`; checked at open because a crash empties the pending queue
+    /// and an obsoleted object then returns as an orphan protected by this window alone.
     Duration orphan_retention{std::chrono::hours(24)};
 
     /// How often to list the stores looking for orphans. Unset disables the sweep, which costs

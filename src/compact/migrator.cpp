@@ -61,8 +61,12 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
             }
         }
         if (candidate != nullptr) {
-            return Migration{*candidate, tier_index,
-                             placement(tiers, candidate->file_number, candidate->min_write_time_ms, now_ms),
+            const int target = placement(tiers, candidate->file_number,
+                                         candidate->min_write_time_ms, now_ms);
+            if (tiers.tiers[static_cast<size_t>(target)].store->id() == candidate->store_id) {
+                continue;
+            }
+            return Migration{*candidate, tier_index, target,
                              /*leaves_transient=*/true, /*capacity_eviction=*/false};
         }
 
@@ -70,6 +74,10 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
         if (tier.max_bytes.has_value() && contents.bytes > *tier.max_bytes) {
             const FileMetadata* victim = oldest(contents.files);
             if (victim != nullptr && tier_index < tiers.last()) {
+                if (tiers.tiers[static_cast<size_t>(tier_index + 1)].store->id() ==
+                    victim->store_id) {
+                    continue;
+                }
                 return Migration{*victim, tier_index, tier_index + 1, true, true};
             }
         }
@@ -84,6 +92,9 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
 
         const FileMetadata* victim = oldest(contents.files);
         if (victim != nullptr) {
+            if (tiers.tiers[static_cast<size_t>(tier_index + 1)].store->id() == victim->store_id) {
+                continue;
+            }
             return Migration{*victim, tier_index, tier_index + 1, false, true};
         }
     }
@@ -93,7 +104,8 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
     for (const auto& [tier_index, contents] : by_tier) {
         for (const FileMetadata& file : contents.files) {
             const int target = placement(tiers, file.file_number, file.min_write_time_ms, now_ms);
-            if (target > tier_index) {
+            if (target > tier_index &&
+                tiers.tiers[static_cast<size_t>(target)].store->id() != file.store_id) {
                 return Migration{file, tier_index, target, false, false};
             }
         }
