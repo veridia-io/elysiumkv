@@ -198,7 +198,11 @@ TEST(ReadOrderTest, AQuietStoreRetriesARetryableFlushFailure) {
               Status::Ok);
 
     catalog->fail_next_edit();
-    EXPECT_EQ(db->flush(), Status::Io);
+    const Status flush_status = db->flush();
+    EXPECT_TRUE(flush_status == Status::Io || flush_status == Status::Ok)
+        << status_name(flush_status);
+    EXPECT_TRUE(settles([&] { return db->stats().background_failures == 1; }))
+        << "the injected flush failure was never observed";
     EXPECT_TRUE(settles([&] { return db->stats().flushes == 1; }))
         << "the frozen memtable was never retried after the store went quiet";
 
