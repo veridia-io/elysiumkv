@@ -74,7 +74,7 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
         if (tier.max_bytes.has_value() && contents.bytes > *tier.max_bytes) {
             const FileMetadata* victim = oldest(contents.files);
             if (victim != nullptr && tier_index < tiers.last()) {
-                if (tiers.tiers[static_cast<size_t>(tier_index + 1)].store->id() ==
+                if (tiers.tiers[static_cast<size_t>(tier_index) + 1].store->id() ==
                     victim->store_id) {
                     continue;
                 }
@@ -92,7 +92,7 @@ std::optional<Migration> pick_migration(const Version& version, const ResolvedTi
 
         const FileMetadata* victim = oldest(contents.files);
         if (victim != nullptr) {
-            if (tiers.tiers[static_cast<size_t>(tier_index + 1)].store->id() == victim->store_id) {
+            if (tiers.tiers[static_cast<size_t>(tier_index) + 1].store->id() == victim->store_id) {
                 continue;
             }
             return Migration{*victim, tier_index, tier_index + 1, false, true};
