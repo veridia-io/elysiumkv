@@ -290,13 +290,9 @@ std::shared_ptr<const Version> Version::apply(const Version& base, const Version
     std::string truncation_point = base.truncation_point_;
     if (edit.truncation_point > truncation_point) truncation_point = edit.truncation_point;
 
-    // Monotone, like the truncation point: an edit can only raise it, so replaying the manifest is
-    // idempotent and an edit arriving after a later one cannot lower the frontier again. The
-    // *raise* is what makes a partial replay safe — see `Version::watermark_floor`.
-    // Taken as given, not merged. The direction depends on what produced the edit: a flush
-    // raises the floor, a discard lowers it. Each emit site folds the current value in and hands
-    // over the result, because only the site knows which of the two it is. Replay is in sequence
-    // order and stops at the first gap, so last-writer-wins is well defined here.
+    // Taken as given, not merged: a discard installs a floor, recovery completion clears it, and
+    // other edits are silent. Replay is in sequence order and stops at the first gap, so
+    // last-writer-wins is well defined here.
     std::optional<WatermarkFloor> watermark_floor = base.watermark_floor_;
     switch (edit.floor_update) {
         case VersionEdit::FloorUpdate::Silent: break;

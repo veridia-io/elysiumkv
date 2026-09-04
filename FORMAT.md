@@ -147,8 +147,8 @@ The footer, at file offset `file_len - footer_length`:
 | 12 | `index_handle.offset` | uint64 | |
 | 20 | `index_handle.length` | uint32 | framed length |
 | 24 | `num_entries` | uint64 | |
-| 32 | `range_del_handle.offset` | uint64 | **v2 only** |
-| 40 | `range_del_handle.length` | uint32 | **v2 only**, framed length |
+| 32 | `range_del_handle.offset` | uint64 | **v2 and later** |
+| 40 | `range_del_handle.length` | uint32 | **v2 and later**, framed length |
 | 44 | `crc32c` | uint32 | **v3 only**, over footer bytes `[0, 44)` |
 | 32 / 44 / 48 | `format_version` | uint32 | 1, 2 or 3 |
 | 36 / 48 / 52 | `magic` | uint64 | `0x454C595349554D31` |
@@ -209,7 +209,7 @@ bytes. The outer envelope begins with this 32-byte little-endian header:
 
 | Offset | Field | Type | Notes |
 | --- | --- | --- | --- |
-| 0 | `magic` | uint32 | bytes `45 4b 56 02` (`EKV\\x02`) |
+| 0 | `magic` | uint32 | bytes `45 4b 56 02` (`EKV\x02`) |
 | 4 | `header_version` | uint16 | 1 |
 | 6 | `provider_len` | uint16 | bytes in `provider` |
 | 8 | `metadata_len` | uint32 | bytes in provider metadata |
@@ -255,7 +255,8 @@ them even when the provider id is empty; they occupy positions in the record.
 The **range tombstone span** is the interval this file's range deletes cover, and it is deliberately
 not bounded by `smallest_key` and `largest_key`: a file can delete a range it holds no keys in, so a
 reader that consulted only the data span would walk past the tombstone answering its query.
-`num_range_tombstones` is zero exactly when the file's SST is `format_version = 1`.
+`num_range_tombstones` is zero exactly when the file has no range-delete block. A v3 file records a
+zero range-delete handle in that case; only the historical v1 layout omitted the handle itself.
 
 `store_id` is persisted rather than derived: tier and level are independent, so a file's store cannot
 be computed from its level. `min_write_time_ms` is carried over unchanged by migration, so placement
@@ -430,8 +431,8 @@ record grew from 32 to 88 by appending, under the same rule as the level record 
 
 ## 8. Entry limits
 
-Enforced by the writer, not only the reader — a limit the writer does not know about is a trap that
-accepts data which can never be read back.
+Enforced by the database write API, not only the reader — a limit the write path does not know about
+is a trap that accepts data which can never be read back.
 
 | Limit | Value | Constant |
 | --- | --- | --- |

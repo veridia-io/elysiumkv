@@ -77,10 +77,9 @@ public:
     /// lost set left to reason from and `max(high)` is taken again, reporting a frontier the store
     /// can no longer support. Writes above the true floor lived only in the discarded files.
     ///
-    /// So the one number the loss produced is written down in the same edit that removes them.
-    /// Monotone, and raised by each file flushed afterwards to that file's `high`: raising rather
-    /// than clearing is what makes a *partial* replay safe, since a crash after re-materialising
-    /// only part of the gap must not restore the old, higher answer.
+    /// So the one number the loss produced is written down in the same edit that removes them. It
+    /// can only be lowered by another loss and remains until recovery is explicitly completed;
+    /// partially replayed data on the transient tier earns no durability credit.
     std::optional<WatermarkFloor> watermark_floor() const { return watermark_floor_; }
     bool truncated(Slice key) const {
         return !truncation_point_.empty() && key < Slice::from(truncation_point_);

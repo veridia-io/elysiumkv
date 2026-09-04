@@ -11,9 +11,8 @@
 
 namespace elysiumkv {
 
-/// ARCHITECTURE.md "Inside an SST". An open enum: 0x02..0xFF are reserved (range tombstones are the
-/// deferred feature) and a reader must reject them as corruption rather than
-/// guess.
+/// ARCHITECTURE.md "Inside an SST". An open enum: 0x02..0xFF are reserved and a reader must reject
+/// them as corruption rather than guess.
 enum class ValueType : uint8_t {
     Delete = 0x00,
     Put = 0x01,

@@ -18,9 +18,8 @@ namespace elysiumkv {
 Status frame_block(Slice content, Compression codec, std::string& out);
 
 /// Validates the CRC, bounds `uncompressed_len`, and only then decompresses.
-/// `max_uncompressed` is `max(16 * block_bytes, 1 MiB)` (ARCHITECTURE.md "Inside an SST"): a corrupted
-/// length field must not request an arbitrary allocation. The bound is a
-/// backstop behind the CRC and is not optional.
+/// `max_uncompressed` is chosen by the caller for the block type: a corrupted length field must not
+/// request an arbitrary allocation. The bound is a backstop behind the CRC and is not optional.
 Result<Buffer> unframe_block(Slice raw, size_t max_uncompressed);
 
 }  // namespace elysiumkv

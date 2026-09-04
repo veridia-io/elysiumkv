@@ -136,8 +136,8 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
         if (attempt + 1 == kSnapshotAttempts) return Status::Unusable;
     }
 
-    // The pointer install is the commit point: a partially written generation
-    // that never gets installed is an orphan, collected later.
+    // The pointer install is the commit point. A generation that never gets installed is ignored;
+    // the retry loop above advances beyond every generation the catalog can list.
     auto installed = catalog_.compare_and_set(entry_, generation);
     if (!installed) {
         if (installed.error() != Status::Io) return installed.error();

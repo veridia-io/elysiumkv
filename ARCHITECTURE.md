@@ -84,9 +84,9 @@ number counter past it rather than deleting it.
 
 ### Inside an SST
 
-A file is sorted key–value blocks, then a bloom filter, an index block, and the footer. This section
-is the reasoning; [FORMAT.md](FORMAT.md) is the byte layout, and is normative where the two could be
-read as disagreeing.
+A file is sorted key–value blocks, then a bloom filter, an index block, an optional range-delete
+block, and the footer. This section is the reasoning; [FORMAT.md](FORMAT.md) is the byte layout, and
+is normative where the two could be read as disagreeing.
 
 Blocks use restart points with prefix compression between them, and carry a checksum each. Restart
 points bound how far a seek has to scan; the per-block checksum means corruption is detected at the
