@@ -6,6 +6,7 @@
 #include <openssl/rand.h>
 
 #include <cstring>
+#include <limits>
 #include <utility>
 
 namespace elysiumkv {
