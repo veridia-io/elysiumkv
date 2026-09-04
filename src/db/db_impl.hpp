@@ -619,7 +619,6 @@ private:
     std::atomic<uint64_t> reencryptions_{0};
     /// Whether the manifest has been rolled since the last file was rewritten. Latches so the
     /// roll happens once per rotation rather than on every idle maintenance pass.
-    std::atomic<bool> rotation_manifest_rolled_{false};
     /// -1 when not pinned; otherwise the frozen epoch. See `pin_maintenance_epoch_for_test`.
     std::atomic<int64_t> pinned_maintenance_epoch_{-1};
     std::atomic<bool> suppress_timed_maintenance_{false};

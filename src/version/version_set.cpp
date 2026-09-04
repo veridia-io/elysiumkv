@@ -163,6 +163,7 @@ Status VersionSet::write_snapshot_and_install(uint64_t generation,
 
     const std::optional<ManifestCatalog::Entry> previous = entry_;
     entry_ = *installed;
+    manifest_payloads_pending_reencryption_.store(0, std::memory_order_relaxed);
     if (previous.has_value()) {
         (void)catalog_.delete_generation(previous->generation).get();
     }
@@ -212,9 +213,11 @@ Status VersionSet::recover() {
         // a wrong or missing key surfaces at this one call rather than as a replay that quietly
         // stops and opens on a truncated history.
         std::string why;
+        std::string snapshot_provider;
         auto snapshot_plain = ManifestPayload::open(encryption_, generation,
                                                     ManifestPayload::snapshot_address(generation),
-                                                    Slice::from(*snapshot_bytes), why);
+                                                    Slice::from(*snapshot_bytes), why,
+                                                    &snapshot_provider);
         if (!snapshot_plain) {
             if (!why.empty()) last_error_ = why;
             return snapshot_plain.error();
@@ -249,6 +252,7 @@ Status VersionSet::recover() {
 
         std::sort(seqs->begin(), seqs->end());
         uint64_t expected_seq = 1;
+        uint64_t stale_manifest_payloads = snapshot_provider == encryption_.primary ? 0 : 1;
         bool unreadable = false;
         std::string replay_corruption;
         for (uint64_t seq : *seqs) {
@@ -270,9 +274,10 @@ Status VersionSet::recover() {
             // for one: breaking here would drop every committed edit from this point on and open
             // as though they had never been written.
             std::string edit_why;
+            std::string edit_provider;
             auto plain = ManifestPayload::open(encryption_, generation,
                                                ManifestPayload::edit_address(generation, seq),
-                                               Slice::from(*bytes), edit_why);
+                                               Slice::from(*bytes), edit_why, &edit_provider);
             if (!plain && (plain.error() == Status::Config ||
                            plain.error() == Status::Unsupported)) {
                 if (!edit_why.empty()) last_error_ = edit_why;
@@ -301,6 +306,7 @@ Status VersionSet::recover() {
             }
 
             version = Version::apply(*version, *edit);
+            if (edit_provider != encryption_.primary) ++stale_manifest_payloads;
             if (edit->next_file_number > file_number) file_number = edit->next_file_number;
             ++expected_seq;
         }
@@ -338,6 +344,8 @@ Status VersionSet::recover() {
 
         entry_ = entry;
         next_seq_ = expected_seq;
+        manifest_payloads_pending_reencryption_.store(stale_manifest_payloads,
+                                                      std::memory_order_relaxed);
         next_file_number_.store(file_number, std::memory_order_relaxed);
         install(version);
         return Status::Ok;
@@ -444,9 +452,8 @@ Status VersionSet::roll_generation_now() {
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (!entry_.has_value()) return Status::Unusable;
-    // Nothing has been written into this generation, so its snapshot is already the newest thing
-    // there is and rolling would produce an identical one under a new number.
-    if (next_seq_ == 1) return Status::Ok;
+    // An untouched generation needs no roll only when its snapshot already uses the primary.
+    if (next_seq_ == 1 && manifest_payloads_pending_reencryption() == 0) return Status::Ok;
 
     const uint64_t next_generation = entry_->generation + 1;
     if (Status status = write_snapshot_and_install(next_generation, current());

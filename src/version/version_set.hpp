@@ -170,6 +170,10 @@ public:
     /// counting installs is cheaper than asking each predicate whether anything moved.
     uint64_t installs() const { return installs_.load(std::memory_order_relaxed); }
 
+    uint64_t manifest_payloads_pending_reencryption() const {
+        return manifest_payloads_pending_reencryption_.load(std::memory_order_relaxed);
+    }
+
     /// Rolls to a new generation now, whatever the edit count is.
     ///
     /// For finishing an encryption rotation. Manifest payloads are sealed under whichever
@@ -223,6 +227,7 @@ private:
     std::atomic<bool> fenced_{false};
     std::atomic<size_t> pending_deletions_hint_{0};
     std::atomic<uint64_t> installs_{0};
+    std::atomic<uint64_t> manifest_payloads_pending_reencryption_{0};
 };
 
 }  // namespace elysiumkv

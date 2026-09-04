@@ -23,6 +23,7 @@ class NoEncryptionProvider final : public EncryptionProvider {
 public:
     Result<NewObject> create(uint64_t object_id) override;
     Result<std::shared_ptr<ObjectCipher>> open(uint64_t object_id, Slice metadata) override;
+    Result<ObjectLayout> layout(Slice metadata) override;
 };
 
 }  // namespace elysiumkv

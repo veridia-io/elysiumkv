@@ -101,6 +101,11 @@ struct NewObject {
     std::string metadata;
 };
 
+struct ObjectLayout {
+    size_t chunk_bytes = 0;
+    size_t overhead_bytes = 0;
+};
+
 /// One construction: a suite, a key policy, and whatever metadata it needs to reopen an object.
 ///
 /// A provider does not know its own name. Its id is the key it is registered under in
@@ -114,6 +119,9 @@ public:
 
     /// Reconstruct the cipher for an existing object from what `create` recorded.
     virtual Result<std::shared_ptr<ObjectCipher>> open(uint64_t object_id, Slice metadata) = 0;
+
+    /// Reads only the physical layout recorded by `create`; it must not unwrap key material.
+    virtual Result<ObjectLayout> layout(Slice) { return std::unexpected(Status::Unsupported); }
 
     virtual ~EncryptionProvider() = default;
 };

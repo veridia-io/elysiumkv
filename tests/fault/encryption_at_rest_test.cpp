@@ -37,6 +37,19 @@ std::string value_at(int i) {
     return "PLAINTEXT-CANARY-" + std::to_string(i) + "-" + std::string(64, 'v');
 }
 
+class CountingKeyManager final : public EncryptionKeyManager {
+public:
+    Result<DataKey> new_data_key() override { return inner_.new_data_key(); }
+    Result<SecretKey> open_data_key(Slice envelope) override {
+        ++opens;
+        return inner_.open_data_key(envelope);
+    }
+    int opens = 0;
+
+private:
+    TestKeyManager inner_;
+};
+
 /// Every byte of every object on `store`, concatenated. Read below the boundary, so what this sees
 /// is what an attacker with the bucket would see.
 std::string all_stored_bytes(BlobStore& store) {
@@ -358,6 +371,58 @@ TEST_F(EncryptionAtRest, AConvergedRotationOpensWithoutTheOldProvider) {
     }
 }
 
+TEST_F(EncryptionAtRest, AnEditFreeManifestParticipatesInRotationConvergence) {
+    {
+        auto db = std::move(*DB::open(encrypted_options()));
+    }
+
+    Options rotating = make_options(store_, Compression::None, 64u << 10);
+    rotating.background = BackgroundMode::Inline;
+    rotating.encryption.providers["kms-gcm"] = make_test_provider(1);
+    rotating.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+    rotating.encryption.primary_provider = "kms-gcm-2";
+    rotating.encryption.rewrite_to_primary = true;
+    {
+        auto db = std::move(*DB::open_read_only(rotating));
+        EXPECT_EQ(db->stats().files_pending_reencryption, 0u);
+        EXPECT_GT(db->stats().manifest_payloads_pending_reencryption, 0u);
+    }
+    {
+        auto db = std::move(*DB::open(rotating));
+        ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+        EXPECT_EQ(db->stats().manifest_payloads_pending_reencryption, 0u);
+    }
+
+    rotating.encryption.providers.erase("kms-gcm");
+    EXPECT_TRUE(DB::open(rotating).has_value()) << last_error();
+}
+
+TEST_F(EncryptionAtRest, IdleStaleLevelZeroFilesFinishRotation) {
+    Options original = encrypted_options();
+    original.levels[0].max_files = 100;
+    {
+        auto db = std::move(*DB::open(original));
+        for (int batch = 0; batch < 3; ++batch) {
+            ASSERT_EQ(db->put(Slice::from(key_at(batch)), Slice::from(value_at(batch))), Status::Ok);
+            ASSERT_EQ(db->flush(), Status::Ok);
+        }
+        ASSERT_EQ(db->stats().levels[0].file_count, 3);
+    }
+
+    Options rotating = original;
+    rotating.encryption.providers["kms-gcm-2"] = make_test_provider(2);
+    rotating.encryption.primary_provider = "kms-gcm-2";
+    rotating.encryption.rewrite_to_primary = true;
+    {
+        auto db = std::move(*DB::open_read_only(rotating));
+        ASSERT_GT(db->stats().files_pending_reencryption, 0u);
+    }
+    auto db = std::move(*DB::open(rotating));
+    ASSERT_EQ(static_cast<DbImpl&>(*db).compact_until_quiet(), Status::Ok);
+    EXPECT_EQ(db->stats().files_pending_reencryption, 0u);
+    EXPECT_EQ(db->stats().levels[0].file_count, 0);
+}
+
 /// I12. A configuration the engine cannot honour is refused at open, not at first write — and
 /// each refusal says which one it was, because `Config` alone does not narrow it down at all.
 TEST_F(EncryptionAtRest, AnUnusableConfigurationIsRefusedAtOpen) {
@@ -410,7 +475,9 @@ TEST_F(EncryptionAtRest, MigrationCopiesCiphertextUnchangedAndItStillReads) {
     Options options = make_transient_options(tiers, Duration(60'000), Duration(120'000));
     options.background = BackgroundMode::Inline;
     options.clock = [&now] { return now; };
-    options.encryption.providers["kms-gcm"] = make_test_provider();
+    auto keys = std::make_shared<CountingKeyManager>();
+    options.encryption.providers["kms-gcm"] =
+        *Aes256GcmEncryptionProvider::open(keys, 4096);
     options.encryption.primary_provider = "kms-gcm";
 
     auto opened = DbImpl::open(options, /*require_all_durable=*/false);
@@ -429,8 +496,10 @@ TEST_F(EncryptionAtRest, MigrationCopiesCiphertextUnchangedAndItStillReads) {
     const std::string before = all_stored_bytes(*tiers.store(0));
     ASSERT_FALSE(before.empty());
 
+    keys->opens = 0;
     now += 200'000;
     ASSERT_EQ(engine.compact_until_quiet(), Status::Ok);
+    EXPECT_EQ(keys->opens, 0) << "a byte-copy migration does not need the data key";
     ASSERT_EQ(db->stats().tiers[0].file_count, 0) << "everything aged off the hot tier";
     ASSERT_GT(db->stats().tiers[1].file_count, 0);
 
@@ -491,6 +560,7 @@ public:
         ++opens;
         return inner_->open(object_id, metadata);
     }
+    Result<ObjectLayout> layout(Slice metadata) override { return inner_->layout(metadata); }
 
     int creates = 0;
     int opens = 0;

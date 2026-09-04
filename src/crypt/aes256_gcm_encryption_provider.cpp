@@ -6,6 +6,7 @@
 #include <openssl/rand.h>
 
 #include <cstring>
+#include <limits>
 #include <utility>
 
 namespace elysiumkv {
@@ -212,6 +213,18 @@ struct Aes256GcmEncryptionProvider::Impl {
             std::move(*key), salt, static_cast<size_t>(recorded_chunk_bytes), object_id));
     }
 
+    Result<ObjectLayout> layout(Slice metadata) {
+        uint32_t salt = 0;
+        uint64_t recorded_chunk_bytes = 0;
+        uint64_t object_id = 0;
+        std::string envelope;
+        if (!decode_metadata(metadata, salt, recorded_chunk_bytes, object_id, envelope) ||
+            recorded_chunk_bytes > std::numeric_limits<size_t>::max()) {
+            return std::unexpected(Status::Corrupt);
+        }
+        return ObjectLayout{static_cast<size_t>(recorded_chunk_bytes), kTagBytes};
+    }
+
     static std::string encode_metadata(uint32_t salt, size_t chunk_bytes, uint64_t object_id,
                                        const std::string& envelope) {
         std::string out;
@@ -259,6 +272,10 @@ Result<std::shared_ptr<Aes256GcmEncryptionProvider>> Aes256GcmEncryptionProvider
     if (chunk_bytes != 0) impl->chunk_bytes = chunk_bytes;
     return std::shared_ptr<Aes256GcmEncryptionProvider>(
         new Aes256GcmEncryptionProvider(std::move(impl)));
+}
+
+Result<ObjectLayout> Aes256GcmEncryptionProvider::layout(Slice metadata) {
+    return impl_->layout(metadata);
 }
 
 Aes256GcmEncryptionProvider::Aes256GcmEncryptionProvider(std::unique_ptr<Impl> impl)
