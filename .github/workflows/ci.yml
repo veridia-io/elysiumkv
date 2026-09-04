@@ -712,37 +712,20 @@ jobs:
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
       - run: cmake --preset release && cmake --build --preset release --target elysiumkv_bench
 
-      # The baseline belongs to the runner, not to the repository. A committed
-      # number is a measurement of whichever machine produced it, so comparing a
-      # runner against it reports the hardware difference as a regression. This
-      # restores the last baseline *this* OS's runners recorded on main; a PR
-      # therefore gates against main's numbers, measured on the same class of
-      # machine, and never writes back.
+      # The structural baseline is recorded on main and never written by a pull request.
       - name: Restore benchmark baseline
         uses: actions/cache/restore@v6
         with:
           path: bench/baselines
-          key: bench-baseline-${{ matrix.os }}-
-          restore-keys: bench-baseline-${{ matrix.os }}-
+          key: bench-structural-v1-${{ matrix.os }}-
+          restore-keys: bench-structural-v1-${{ matrix.os }}-
 
       - name: Run benchmarks
-        # Medians over repetitions: a shared CI runner is noisy, and a 10%
-        # threshold against a single sample would be a coin toss.
-        #
-        # Fifteen repetitions of a second each, after half a second of warmup
-        # discarded. Measured locally, that puts the coefficient of variation
-        # between 0.2% and 2.2% and the whole run at about two and a half
-        # minutes — so the median is settled to well under a percent, against a
-        # threshold of ten. The run reports its own dispersion and the ratchet
-        # declines to judge a benchmark whose noise could account for the change,
-        # which is what keeps a bad afternoon on a shared runner from failing a
-        # build that changed nothing.
+        # Timings remain useful in the artifact, but only deterministic work-per-operation
+        # counters are compared with the baseline.
         run: |
           ./build/release/bench/elysiumkv_bench \
             --benchmark_min_time=1s \
-            --benchmark_repetitions=15 \
-            --benchmark_min_warmup_time=0.5 \
-            --benchmark_report_aggregates_only=true \
             --benchmark_format=json > bench-results.json
       # **The pull request is where a regression is caught; main is where the reference is
       # recorded.** Gating both is what deadlocks: the ratchet cannot run until the check passes,
@@ -770,7 +753,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: bench/baselines
-          key: bench-baseline-${{ matrix.os }}-${{ github.run_number }}
+          key: bench-structural-v1-${{ matrix.os }}-${{ github.run_number }}
 
       - name: Upload results
         if: always()

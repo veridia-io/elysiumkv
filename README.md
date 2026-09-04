@@ -728,8 +728,8 @@ this codebase came from it rather than from unit tests.
 no-op reports green for two different states: nothing is wrong, and the check did
 not run. Each one is therefore paired with a test that deliberately breaks what it
 watches and asserts it fails *for that specific reason* — a stray exported symbol
-must be named, each internal invariant has its own injection, and a synthetic
-benchmark is slowed on purpose to prove the performance ratchet trips.
+must be named, each internal invariant has its own injection, and a doubled store
+round trip must be named by the benchmark gate.
 
 ## Benchmarks
 
@@ -739,20 +739,15 @@ correct; one is ten times slower.
 
 ```sh
 cmake --build --preset release --target elysiumkv_bench
-./build/release/bench/elysiumkv_bench --benchmark_repetitions=7 \
-    --benchmark_report_aggregates_only=true --benchmark_format=json > results.json
-python3 bench/check_regression.py results.json           # fails on a >10% regression
+./build/release/bench/elysiumkv_bench --benchmark_format=json > results.json
+python3 bench/check_regression.py results.json           # fails on any structural regression
 python3 bench/check_regression.py results.json --update  # ratchet the baseline down
 ```
 
-Baselines are **per machine and not committed**: 73 ns on one arm64 machine is not
-a 73 ns threshold on another, and treating it as one reports a hardware difference
-as a regression. Your first run records your own and passes with a notice; CI keeps
-its own in a cache so runners compare against their own history.
-
-A baseline also expires. Measured 20 hours apart on one laptop under sustained
-build load, a memory-bound benchmark drifted 24% with no code change at all. Before
-believing a regression, rebuild the old code and measure it *now*.
+Baselines are not committed. They contain only deterministic work-per-operation counters:
+store gets and reader opens per lookup, store gets per scan, and bytes rewritten per byte written.
+Any increase fails; wall-clock measurements remain in the uploaded report but never gate a build.
+Your first run records a baseline and passes with a notice, while CI retains its baseline in a cache.
 
 The load-bearing benchmark is the prefix scan: the same 100-key prefix in a 100k-
 and a 1M-key store must cost about the same, or file pruning is not working.
