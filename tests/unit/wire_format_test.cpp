@@ -4,6 +4,8 @@
 #include "sst/crc32c.hpp"
 #include "sst/footer.hpp"
 #include "sst/format.hpp"
+#include "sst/sst_writer.hpp"
+#include "version/manifest_payload.hpp"
 #include "version/version_edit.hpp"
 
 #include <gtest/gtest.h>
@@ -100,6 +102,21 @@ TEST(WireFormat, TheInvariantTrailerIsTheLastTwelveBytesAndIsReadableAlone) {
     // And the version precedes the magic within it.
     EXPECT_EQ(read_u32(trailer, 0), 1u);
     EXPECT_EQ(read_u64(trailer, 4), Footer::kMagic);
+}
+
+TEST(WireFormat, CurrentFooterVersionMatchesTheDocument) {
+    SstWriter writer({.compression = Compression::None});
+    writer.add(Slice::from(std::string("a")), ValueType::Put, Slice::from(std::string("v")));
+    auto built = writer.finish();
+    ASSERT_TRUE(built.has_value());
+
+    const std::string encoded = built->bytes.substr(built->bytes.size() - 60);
+    ASSERT_EQ(encoded.size(), 60u) << "FORMAT.md declares a 60-byte v3 footer";
+    EXPECT_EQ(read_u64(encoded, 32), 0u) << "range_del offset";
+    EXPECT_EQ(read_u32(encoded, 40), 0u) << "range_del length";
+    EXPECT_EQ(read_u32(encoded, 44), crc32c(std::string_view(encoded.data(), 44))) << "footer CRC";
+    EXPECT_EQ(read_u32(encoded, 48), Footer::kFormatVersion3);
+    EXPECT_EQ(read_u64(encoded, 52), Footer::kMagic);
 }
 
 // --- FORMAT.md §2, block framing -------------------------------------------------------
@@ -264,7 +281,27 @@ TEST(WireFormat, AMalformedFilterIsTreatedAsMayContain) {
     EXPECT_TRUE(bloom_may_contain(Slice::from(zero_blocks), Slice::from(std::string("k"))));
 }
 
-// --- FORMAT.md §6, manifest records ----------------------------------------------------
+// --- FORMAT.md §6, manifest payloads and records ---------------------------------------
+
+TEST(WireFormat, ManifestPayloadEnvelopeMatchesTheDocument) {
+    const ProviderRegistry registry = passthrough_registry();
+    const std::string plaintext = "x";
+    auto sealed = ManifestPayload::seal(registry, 7, ManifestPayload::snapshot_address(7),
+                                        Slice::from(plaintext));
+    ASSERT_TRUE(sealed.has_value());
+    ASSERT_EQ(sealed->size(), ManifestPayload::kHeaderBytes + plaintext.size());
+
+    EXPECT_EQ(read_u32(*sealed, 0), 0x02564B45u) << "magic: EKV\\x02";
+    EXPECT_EQ(static_cast<uint8_t>((*sealed)[4]), 1u) << "header_version low byte";
+    EXPECT_EQ(static_cast<uint8_t>((*sealed)[5]), 0u) << "header_version high byte";
+    EXPECT_EQ(static_cast<uint8_t>((*sealed)[6]), 0u) << "provider_len low byte";
+    EXPECT_EQ(static_cast<uint8_t>((*sealed)[7]), 0u) << "provider_len high byte";
+    EXPECT_EQ(read_u32(*sealed, 8), 0u) << "metadata_len";
+    EXPECT_EQ(read_u32(*sealed, 12), 0u) << "codec";
+    EXPECT_EQ(read_u64(*sealed, 16), plaintext.size()) << "plain_len";
+    EXPECT_EQ(read_u64(*sealed, 24), plaintext.size()) << "packed_len";
+    EXPECT_EQ(sealed->substr(ManifestPayload::kHeaderBytes), plaintext);
+}
 
 TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     FileMetadata file;
@@ -321,11 +358,8 @@ TEST(WireFormat, ManifestEditFieldOrderMatchesTheDocument) {
     EXPECT_EQ(take_varint(content, at), 3u) << "watermark flags: both bounds present";
     EXPECT_EQ(take_varint(content, at), 80u) << "watermark_low";
     EXPECT_EQ(take_varint(content, at), 100u) << "watermark_high";
-    // Reserved for encryption and written empty until the feature lands, so that adding it later
-    // costs no format version. A reserved field still occupies a position, which is the whole
-    // reason this test exists.
-    EXPECT_EQ(take_string(content, at), "") << "encryption_provider";
-    EXPECT_EQ(take_string(content, at), "") << "encryption_metadata";
+    EXPECT_EQ(take_string(content, at), "") << "encryption_provider: passthrough";
+    EXPECT_EQ(take_string(content, at), "") << "encryption_metadata: passthrough";
 
     ASSERT_EQ(take_varint(content, at), 1u) << "deleted_count";
     EXPECT_EQ(take_varint(content, at), 1u) << "deleted level";

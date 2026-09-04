@@ -82,7 +82,7 @@ useful rather than to be novel.
   AES-256-GCM under envelope encryption, with a fresh data key per object. Key custody
   is yours — a static master key and AWS KMS both ship, and the key manager is an
   interface if neither fits (see [below](#encryption-at-rest)).
-- **Bindings**: a C ABI (72 functions, C99) and a Java binding over JNI needing only
+- **Bindings**: a C ABI (76 functions, C99) and a Java binding over JNI needing only
   Java 11, plus Kafka Streams state stores in `bindings/kafka-streams-v3` — key-value,
   window and session stores in both plain and timestamped form, and a versioned store
   (KIP-889). The windowed kinds keep every window in one store rather than one store per
@@ -383,7 +383,7 @@ try (DiskBlobStore store = new DiskBlobStore("/data/store", "hot");
      DiskManifestCatalog catalog = new DiskManifestCatalog("/data");
      ElysiumKVOptions options = new ElysiumKVOptions()
              .manifestCatalog(catalog)
-             .addTier(store, Durability.DURABLE, 0, 0, 0, 0)
+             .addTier(store, Durability.DURABLE, 0, 0, 0)
              .level(0, Compression.NONE, 0, 4, 8, 12, 0)
              .level(1, Compression.ZSTD, 0, 0, 0, 0, 0);
      ElysiumKV db = ElysiumKV.open(options)) {
@@ -791,6 +791,6 @@ Issues and pull requests are welcome. Practical expectations:
 
 MIT — see [LICENSE](LICENSE).
 
-The shared library and the Java jar statically link zstd and lz4, so their notices
+The shared library and the Java jar statically link zstd, lz4 and OpenSSL, so their notices
 travel with the binary. [NOTICE.md](NOTICE.md) records what is bundled and what it
 requires of you if you redistribute a build.

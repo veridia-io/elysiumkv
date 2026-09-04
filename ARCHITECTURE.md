@@ -148,9 +148,9 @@ why a fresh local L0 entry correctly shadows a stale copy of the same key sittin
 
 A background thread scores every level by how far it exceeds its configured budget and compacts the
 worst offender. The chosen input files plus every overlapping file in the next level are merged by a
-heap of iterators; where the same key appears more than once, position decides the winner — newest
-wins — and superseded values and dead tombstones are dropped. That is the *only* mechanism that
-reclaims space.
+linear scan over iterators; where the same key appears more than once, position decides the winner —
+newest wins — and superseded values and dead tombstones are dropped. That is the *only* mechanism
+that reclaims space.
 
 New files get fresh numbers, one manifest edit adds them and removes the inputs, and the old objects
 are deleted once no live version references them. Compaction picks by structure alone: a file's age
@@ -326,11 +326,13 @@ replays within the same few minutes, so the whole store crosses together and mig
 The offset is derived from the file rather than rolled, which is what lets the crossing time and the
 maintenance deadline below agree on it.
 
-The third term is the one to size against, not the first: it is bounded by `max_compaction_bytes`
-over throughput, which at the 400 MiB default and 50 MB/s is roughly sixteen seconds. Note what that
-conversion assumes — **a byte bound turned into a time bound using an assumption about your
-storage** — so it is a typical-case figure and not a guarantee. Against a remote tier throughput is
-network-bound and variable, and a throttling episode with retries stretches it further.
+The third term is the one to size against, not the first: it is bounded by twice
+`max_compaction_bytes` over throughput, because compaction reads its inputs and writes its outputs.
+At the 400 MiB default that is up to 800 MiB of I/O, or roughly sixteen seconds at 50 MiB/s. Note
+what that conversion assumes — **a byte bound turned into a time bound using an assumption about
+your storage** — so it is a typical-case figure and not a guarantee. Against a remote tier
+throughput is network-bound and variable, and a throttling episode with retries stretches it
+further.
 
 **And no tier setting bounds the worst case.** During a storage outage, migration is what is failing,
 so data already written stays exposed for the duration. The stall valve stops accepting *new* writes
@@ -588,9 +590,9 @@ memory; that would wire a failure to something the caller cannot see. The budget
 instead of rejecting work, and a shed counter is how you learn it is too small.
 
 The stall valve cannot be disabled, but it can be made non-blocking, in which case a write that
-would stall is refused with a retryable status rather than parking the caller's thread. That is the
-right choice for a non-critical writer and the wrong one for a system of record — the data is simply
-not stored.
+would stall is refused with a retryable status before any mutation rather than parking the caller's
+thread. That is the right choice for a non-critical writer and the wrong one for a system of record —
+the data is simply not stored.
 
 ### Absence is an answer, not an error
 
@@ -785,9 +787,9 @@ otherwise resolution succeeds and the failure appears at first use.
 
 ### The invariant trailer
 
-An SST's last bytes are an invariant trailer: magic, then format version. A reader seeks to the end,
-validates the magic, and only then dispatches on the version to learn the rest of the footer's
-width.
+An SST's last bytes are an invariant trailer: format version, then magic. A reader seeks to the end,
+validates the magic, and only then dispatches on the preceding version to learn the rest of the
+footer's width.
 
 The ordering is the design. If footer width depended on a version stored inside the footer, a reader
 could not know how much to read before knowing the version, and no future format change would be

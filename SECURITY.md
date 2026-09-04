@@ -2,8 +2,8 @@
 
 ## Status
 
-**ElysiumKV has had no external security review.** The README says the same thing, and it is repeated
-here so it is not discovered late: treat this as software to evaluate, not as a hardened dependency.
+**ElysiumKV has had no external security review.** Treat it as software to evaluate, not as a
+hardened dependency.
 
 ## Supported versions
 
@@ -42,20 +42,38 @@ whatever the host process hands it. In scope:
   Pin and iterator lifetime handling is the most likely place for one.
 - **The C ABI boundary**: an exception escaping it, or a handle misuse that corrupts state rather
   than returning an error.
+- **Encryption at rest.** SST contents and manifest payloads can be protected with AES-256-GCM under
+  envelope encryption. Authentication failures, plaintext downgrade, provider routing, nonce reuse,
+  and key-lifetime mistakes are security issues.
+
+## Threat model
+
+With read access to a blob store and manifest catalog, an observer learns object names, counts,
+sizes, compressed manifest lengths and the manifest pointer. With encryption configured, keys,
+values, SST metadata and manifest contents are intended to remain confidential.
+
+With blob-store write access, an attacker can delete or damage objects. The engine detects missing
+objects and authentication failures; it does not provide availability. With catalog write access,
+an attacker can roll the pointer back to a retained authentic generation. Rollback protection is
+outside the encryption boundary.
+
+Manifest authentication binds payloads to their generation and address, but not to a store identity.
+Two stores using the same key manager therefore do not have cryptographic isolation from each other.
+Encryption protects data at rest; transport encryption and credential policy belong to the configured
+storage and key-management clients.
 
 ## What is out of scope
 
-- **Encryption at rest or in transit.** The engine provides neither. Storage-level encryption is the
-  embedder's responsibility — an S3 bucket policy, an encrypted volume.
+- **Encryption in transit.** The engine does not provide transport security; configure it on the
+  storage and key-management clients.
 - **Access control.** Anything that can reach the configured blob store and manifest catalog can read
   and rewrite the database. That is a property of an embedded store, not a defect.
 - **Two writers on one store.** Ownership is arbitrated by a single compare-and-set on the manifest
   pointer; a second writer is fenced at its next manifest write, not prevented from starting. Running
   two writers is a misconfiguration, and the data loss that can follow is documented, not a
   vulnerability.
-- **`reclaim_orphans_at_open`.** It deletes unreferenced objects and is off by default precisely
-  because open cannot detect a concurrent writer. Enabling it asserts exclusivity; losing data by
-  enabling it while another process holds the store is the documented consequence.
+- **Availability after an authorised destructive operation.** Encryption detects deletion and
+  damage; it cannot restore an object or prevent a credential holder from removing one.
 - **Denial of service through configuration**, such as a memory budget too small for the configured
   instances. The engine sheds and stalls by design.
 

@@ -13,7 +13,7 @@ package io.veridia.elysiumkv;
  * try (S3BlobStore remote = S3BlobStore.builder("my-bucket").prefix("cold").open();
  *      DiskCacheBlobStore cold = new DiskCacheBlobStore("/var/cache/elysiumkv", remote,
  *                                                       20L << 30, true)) {
- *     options.addTier(cold, Durability.DURABLE, 0, 0, 0, 0);
+ *     options.addTier(cold, Durability.DURABLE, 0, 0, 0);
  * }
  * }</pre>
  *
