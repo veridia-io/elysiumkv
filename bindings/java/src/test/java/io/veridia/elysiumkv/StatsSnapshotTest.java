@@ -82,6 +82,7 @@ class StatsSnapshotTest {
             // signal useless.
             assertEquals(0, stats.reencryptions());
             assertEquals(0, stats.filesPendingReencryption());
+            assertEquals(0, stats.manifestPayloadsPendingReencryption());
             db.close();
         }
     }

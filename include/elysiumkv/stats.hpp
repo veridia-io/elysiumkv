@@ -141,12 +141,14 @@ struct Stats {
     /// Files whose recorded encryption provider is not the primary — a gauge, so it says how
     /// much is left.
     ///
-    /// Zero is the signal that a rotation is complete, and therefore the moment the previous
-    /// provider may be unregistered. Non-zero with `rewrite_to_primary` off means the rotation was
+    /// Zero together with `manifest_payloads_pending_reencryption` is the signal that a rotation is
+    /// complete. Non-zero with `rewrite_to_primary` off means the rotation was
     /// started and never finished, which is a store still depending on a key someone believes they
-    /// retired. Counted over every level including L0, so it genuinely reaches zero: L0 files are
-    /// written under the primary already.
+    /// retired. Counted over every level including L0; the rotation driver compacts stale L0 files
+    /// into L1 because renumbering them in place would change recency.
     uint64_t files_pending_reencryption = 0;
+    /// Manifest payloads in the current generation still sealed under another provider.
+    uint64_t manifest_payloads_pending_reencryption = 0;
     uint64_t compaction_bytes_read = 0;
     uint64_t compaction_bytes_written = 0;
     /// ARCHITECTURE.md "Migration between tiers" — migration moves bytes without interpreting them, so its cost is

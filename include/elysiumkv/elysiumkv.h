@@ -744,7 +744,8 @@ ELYSIUMKV_API void elysiumkv_iter_destroy(elysiumkv_iter*);
  *         background_failures                          offset 216
  *     u64 compactions_trimmed                          offset 240
  *     u64 reencryptions, files_pending_reencryption    offset 248
- *                                                      header_bytes = 264
+ *     u64 manifest_payloads_pending_reencryption       offset 264
+ *                                                      header_bytes = 272
  *
  * `watermark_present` exists because zero is a valid watermark — a store at the start of its log —
  * so the value alone cannot express absence. An exporter omits the series when the flag is zero.

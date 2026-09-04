@@ -352,9 +352,8 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         auto version = versions_->current();
         if (config_.last() < 1) return false;
 
-        // The L0 file whose tier no longer matches its placement. ARCHITECTURE.md "Positional recency" resolves L0
-        // recency by file number, so this file cannot simply be copied — it has to be
-        // rewritten into L1, where order is by key.
+        // An L0 file that must be rewritten into L1, either to leave its tier or to finish an
+        // encryption rotation. It cannot be renumbered in L0 because file number is recency.
         //
         // Chosen by file number, never by `min_write_time_ms`: that is a memtable's creation time,
         // so several flushes can share a tick, and pushing a newer L0 file down while older ones
@@ -366,10 +365,12 @@ bool DbImpl::compact_l0_file_off_its_tier(Status& status) {
         const FileMetadata* seed = nullptr;
         for (const FileMetadata& file : version->files_at(0)) {
             const int tier = tiers_.tier_of_store(file.store_id);
-            if (tier < 0) continue;
-            if (placement(tiers_, file.file_number, file.min_write_time_ms, now_ms()) <= tier) {
-                continue;
-            }
+            const bool misplaced = tier >= 0 &&
+                                   placement(tiers_, file.file_number, file.min_write_time_ms,
+                                             now_ms()) > tier;
+            const bool stale_encryption = options_.encryption.rewrite_to_primary &&
+                                          file.encryption_provider != encryption_.primary;
+            if (!misplaced && !stale_encryption) continue;
             if (seed == nullptr || file.file_number < seed->file_number) seed = &file;
         }
         if (seed == nullptr) return false;
@@ -494,16 +495,13 @@ bool DbImpl::run_one_reencryption(Status& status) {
         // provider was primary when it was written, so a store whose every file has been rewritten
         // still cannot open without the retired provider until a fresh snapshot exists under the
         // new one. Rolling is what writes that snapshot, and nothing else would — an idle store
-        // produces no edits, so `maybe_roll_generation` never fires. Rolled once, when the rewrite
-        // pass has nothing left to do; the roll itself is a no-op on an untouched generation.
-        if (!rotation_manifest_rolled_.exchange(true, std::memory_order_relaxed)) {
+        // produces no edits, so `maybe_roll_generation` never fires.
+        if (versions_->manifest_payloads_pending_reencryption() != 0) {
             status = versions_->roll_generation_now();
             return status == Status::Ok;
         }
         return false;
     }
-    // Any further rewriting means the manifest needs rolling again afterwards.
-    rotation_manifest_rolled_.store(false, std::memory_order_relaxed);
 
     status = run_reencryption(*stale, deferred);
     compaction_finished_.notify_all();
@@ -580,10 +578,18 @@ Status DbImpl::run_migration(const Migration& migration, DeferredLine& line) {
     // stored object rather than the file's contents, and an encrypted object is longer than the
     // logical size the manifest records — by one tag per chunk. Comparing against `file_bytes`
     // here reported every encrypted file as corrupt.
-    auto cipher = cipher_for(migration.file);
-    if (!cipher) return cipher.error();
+    EncryptionProvider* provider = encryption_.find(migration.file.encryption_provider);
+    if (provider == nullptr) return Status::Config;
+    auto layout = provider->layout(Slice::from(migration.file.encryption_metadata));
+    if (!layout && layout.error() == Status::Unsupported) {
+        auto cipher = provider->open(migration.file.file_number,
+                                     Slice::from(migration.file.encryption_metadata));
+        if (!cipher) return cipher.error();
+        layout = ObjectLayout{(*cipher)->chunk_bytes(), (*cipher)->overhead_bytes()};
+    }
+    if (!layout) return layout.error();
     const uint64_t expected = EncryptedObject::physical_size(
-        migration.file.file_bytes, (*cipher)->chunk_bytes(), (*cipher)->overhead_bytes());
+        migration.file.file_bytes, layout->chunk_bytes, layout->overhead_bytes);
     if (bytes->size() != expected) return Status::Corrupt;
 
     // A whole file in memory, held until the copy lands — the largest transient allocation the

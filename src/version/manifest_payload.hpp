@@ -62,7 +62,8 @@ struct ManifestPayload {
     /// to fix; `Corrupt` for framing that is not ours, a truncated payload, or authentication that
     /// does not hold.
     static Result<std::string> open(const ProviderRegistry& registry, uint64_t generation,
-                                    std::string_view address, Slice framed, std::string& error);
+                                    std::string_view address, Slice framed, std::string& error,
+                                    std::string* provider_id = nullptr);
 };
 
 }  // namespace elysiumkv

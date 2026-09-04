@@ -183,6 +183,7 @@ public final class ElysiumKVStats {
     private final long compactionsTrimmed;
     private final long reencryptions;
     private final long filesPendingReencryption;
+    private final long manifestPayloadsPendingReencryption;
     private final long durableWatermark;
     private final boolean watermarkPresent;
     private final List<Level> levels;
@@ -227,6 +228,7 @@ public final class ElysiumKVStats {
         compactionsTrimmed = headerBytes > 240 ? readLong(buffer, 240) : 0L;
         reencryptions = headerBytes > 248 ? readLong(buffer, 248) : 0L;
         filesPendingReencryption = headerBytes > 256 ? readLong(buffer, 256) : 0L;
+        manifestPayloadsPendingReencryption = headerBytes > 264 ? readLong(buffer, 264) : 0L;
         durableWatermark = headerBytes > 200 ? readLong(buffer, 200) : 0L;
         watermarkPresent = headerBytes > 208 && buffer[208] != 0;
 
@@ -367,12 +369,17 @@ public final class ElysiumKVStats {
     /**
      * Files whose recorded encryption provider is not the primary.
      *
-     * <p>Zero is the signal that a key rotation is complete — and therefore the moment the
-     * previous provider may be unregistered. Non-zero while
+     * <p>Zero together with {@link #manifestPayloadsPendingReencryption()} is the signal that a key
+     * rotation is complete. Non-zero while
      * {@code rewriteToPrimary} is off means a rotation was started and never finished, which is a
      * store still depending on a key someone believes they retired.
      */
     public long filesPendingReencryption() { return filesPendingReencryption; }
+
+    /** Manifest payloads in the current generation still sealed under another provider. */
+    public long manifestPayloadsPendingReencryption() {
+        return manifestPayloadsPendingReencryption;
+    }
 
     /**
      * An <strong>upper bound</strong> on the number of distinct live keys — {@code records -

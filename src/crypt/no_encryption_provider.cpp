@@ -36,4 +36,9 @@ Result<std::shared_ptr<ObjectCipher>> NoEncryptionProvider::open(uint64_t, Slice
     return std::shared_ptr<ObjectCipher>(std::make_shared<NoEncryptionCipher>());
 }
 
+Result<ObjectLayout> NoEncryptionProvider::layout(Slice metadata) {
+    if (!metadata.empty()) return std::unexpected(Status::Corrupt);
+    return ObjectLayout{4096, 0};
+}
+
 }  // namespace elysiumkv

@@ -352,9 +352,9 @@ public final class ElysiumKVOptions implements AutoCloseable {
      * file only when it happens to compact it, which for a cold file may be never — and that is
      * exactly the file a key rotation was performed to stop depending on.
      *
-     * <p>{@link ElysiumKVStats#filesPendingReencryption()} reaches zero when the rotation has
-     * converged, which is the moment the retired provider may be unregistered. The manifest is
-     * re-sealed as part of it, so the store then opens without that provider registered at all.
+     * <p>{@link ElysiumKVStats#filesPendingReencryption()} and
+     * {@link ElysiumKVStats#manifestPayloadsPendingReencryption()} both reach zero when the rotation
+     * has converged, which is the moment the retired provider may be unregistered.
      */
     public ElysiumKVOptions rewriteToPrimaryEncryptionProvider(boolean enabled) {
         Native.optionsSetEncryptionRewriteToPrimary(handle(), enabled);

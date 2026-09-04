@@ -154,7 +154,7 @@ Result<std::string> ManifestPayload::seal(const ProviderRegistry& registry, uint
 
 Result<std::string> ManifestPayload::open(const ProviderRegistry& registry, uint64_t generation,
                                           std::string_view address, Slice framed,
-                                          std::string& error) {
+                                          std::string& error, std::string* provider_id) {
     if (framed.size() < kHeaderBytes || decode_fixed32(framed.data()) != kMagic) {
         // Not our framing at all: a payload from an older format, or a write that never landed
         // whole. Replay treats this as an unacknowledged edit, which is why it must not be
@@ -197,6 +197,7 @@ Result<std::string> ManifestPayload::open(const ProviderRegistry& registry, uint
                 "', which is not registered";
         return std::unexpected(Status::Config);
     }
+    if (provider_id != nullptr) *provider_id = id;
 
     // The same id `create` was given. The stock provider takes the one recorded in the metadata
     // instead, but an embedder's need not, so it is passed rather than left to chance.
